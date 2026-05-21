@@ -1,0 +1,7607 @@
+import './styles.css';
+import * as THREE from 'three';
+import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
+import { MeshSurfaceSampler } from 'three/examples/jsm/math/MeshSurfaceSampler.js';
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import {
+  Box,
+  createIcons,
+  Download,
+  KeyRound,
+  Lightbulb,
+  Move3D,
+  Orbit,
+  Pause,
+  Play,
+  Plus,
+  RotateCcw,
+  Rotate3D,
+  Sun,
+  Sparkles,
+  Trash2,
+  Waves
+} from 'lucide';
+
+createIcons({
+  icons: {
+    Box,
+    Download,
+    KeyRound,
+    Lightbulb,
+    Move3D,
+    Move3d: Move3D,
+    Orbit,
+    Pause,
+    Play,
+    Plus,
+    Rotate3D,
+    Rotate3d: Rotate3D,
+    RotateCcw,
+    Sun,
+    Sparkles,
+    Trash2,
+    Waves
+  }
+});
+
+const canvas = document.querySelector('#scene');
+const panel = document.querySelector('.panel');
+const cameraPreviewUi = {
+  root: document.querySelector('#cameraPreview'),
+  canvas: document.querySelector('#cameraPreviewCanvas'),
+  info: document.querySelector('#cameraPreviewInfo')
+};
+const modelInput = document.querySelector('#modelInput');
+const dropZone = document.querySelector('#dropZone');
+const modelName = document.querySelector('#modelName');
+const statusText = document.querySelector('#status');
+const statsText = document.querySelector('#stats');
+const resetCameraButton = document.querySelector('#resetCamera');
+const presetButtons = [...document.querySelectorAll('[data-preset]')];
+const effectModeButtons = [...document.querySelectorAll('[data-effect-mode]')];
+const MODEL_EXTENSIONS = new Set(['glb', 'gltf', 'obj', 'stl', 'fbx']);
+const RASTER_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp']);
+const PANORAMA_TEXTURE_EXTENSIONS = new Set(['hdr', 'exr']);
+const IMAGE_EXTENSIONS = new Set([...RASTER_IMAGE_EXTENSIONS, ...PANORAMA_TEXTURE_EXTENSIONS]);
+const GAUSSIAN_SPLAT_EXTENSIONS = new Set(['ply', 'splat', 'ksplat', 'spz']);
+const INLINE_MODEL_PAYLOAD_LIMIT = 160 * 1024 * 1024;
+const MIN_PARTICLE_COUNT = 1;
+const urlParams = new URLSearchParams(window.location.search);
+const exportHideUi = urlParams.get('export') === '1';
+const exportSettings = {
+  transparent: urlParams.get('transparent') === '1',
+  hideUi: exportHideUi,
+  autoDissolve: urlParams.get('autoDissolve') === '1',
+  duration: Number(urlParams.get('duration') || 5),
+  modelUrl: urlParams.get('model') || (exportHideUi ? '' : '/cs.glb'),
+  morphTargetUrl: urlParams.get('morphTarget') || '',
+  worldUrl: urlParams.get('world') || '',
+  pixelRatio: Number(urlParams.get('pixelRatio') || window.devicePixelRatio || 1)
+};
+const studioPixelRatio = THREE.MathUtils.clamp(
+  Number.isFinite(exportSettings.pixelRatio) ? exportSettings.pixelRatio : 1,
+  0.5,
+  2
+);
+const renderPixelRatio = exportSettings.hideUi ? 1 : studioPixelRatio;
+
+if (exportSettings.hideUi) {
+  document.documentElement.classList.add('export-mode');
+}
+
+const controlsUi = {
+  particleCount: document.querySelector('#particleCount'),
+  pointSize: document.querySelector('#pointSize'),
+  edgeFeather: document.querySelector('#edgeFeather'),
+  sampleCleanup: document.querySelector('#sampleCleanup'),
+  sizeRandom: document.querySelector('#sizeRandom'),
+  glowRadius: document.querySelector('#glowRadius'),
+  glowExposure: document.querySelector('#glowExposure'),
+  spread: document.querySelector('#spread'),
+  noise: document.querySelector('#noise'),
+  noiseScale: document.querySelector('#noiseScale'),
+  swirl: document.querySelector('#swirl'),
+  speed: document.querySelector('#speed'),
+  dissolve: document.querySelector('#dissolve'),
+  growth: document.querySelector('#growth'),
+  growthFlow: document.querySelector('#growthFlow'),
+  growthWidth: document.querySelector('#growthWidth'),
+  growthTurbulence: document.querySelector('#growthTurbulence'),
+  organicFlow: document.querySelector('#organicFlow'),
+  edgeBreak: document.querySelector('#edgeBreak'),
+  filamentLength: document.querySelector('#filamentLength'),
+  filamentCurl: document.querySelector('#filamentCurl'),
+  emissionEnabled: document.querySelector('#emissionEnabled'),
+  emissionCount: document.querySelector('#emissionCount'),
+  modelWhite: document.querySelector('#modelWhite'),
+  modelRoughness: document.querySelector('#modelRoughness'),
+  emissionIntensity: document.querySelector('#emissionIntensity'),
+  emissionDistance: document.querySelector('#emissionDistance'),
+  emissionSpeed: document.querySelector('#emissionSpeed'),
+  emissionWindX: document.querySelector('#emissionWindX'),
+  emissionWindY: document.querySelector('#emissionWindY'),
+  emissionWindZ: document.querySelector('#emissionWindZ'),
+  emissionTurbulence: document.querySelector('#emissionTurbulence'),
+  emissionSize: document.querySelector('#emissionSize'),
+  emissionOpacity: document.querySelector('#emissionOpacity'),
+  emissionGlow: document.querySelector('#emissionGlow'),
+  breakAmount: document.querySelector('#breakAmount'),
+  breakProgress: document.querySelector('#breakProgress'),
+  breakRadius: document.querySelector('#breakRadius'),
+  breakFeather: document.querySelector('#breakFeather'),
+  breakCenterX: document.querySelector('#breakCenterX'),
+  breakCenterY: document.querySelector('#breakCenterY'),
+  breakCenterZ: document.querySelector('#breakCenterZ'),
+  breakSpeed: document.querySelector('#breakSpeed'),
+  breakSize: document.querySelector('#breakSize'),
+  imageSplatCount: document.querySelector('#imageSplatCount'),
+  imageSplatDepth: document.querySelector('#imageSplatDepth'),
+  imageSplatScatter: document.querySelector('#imageSplatScatter'),
+  imageSplatSpeed: document.querySelector('#imageSplatSpeed'),
+  imageSplatDirX: document.querySelector('#imageSplatDirX'),
+  imageSplatDirY: document.querySelector('#imageSplatDirY'),
+  imageSplatDirZ: document.querySelector('#imageSplatDirZ'),
+  imageSplatTurbulence: document.querySelector('#imageSplatTurbulence'),
+  imageSplatSize: document.querySelector('#imageSplatSize'),
+  imageSplatFeather: document.querySelector('#imageSplatFeather'),
+  imageSplatColorKeep: document.querySelector('#imageSplatColorKeep'),
+  imageSplatOpacity: document.querySelector('#imageSplatOpacity'),
+  imageSplatGlow: document.querySelector('#imageSplatGlow'),
+  imageSplatPlaneVisible: document.querySelector('#imageSplatPlaneVisible'),
+  imageSplatPlaneOpacity: document.querySelector('#imageSplatPlaneOpacity'),
+  moveImageSplat: document.querySelector('#moveImageSplat'),
+  rotateImageSplat: document.querySelector('#rotateImageSplat'),
+  scaleImageSplat: document.querySelector('#scaleImageSplat'),
+  morphProgress: document.querySelector('#morphProgress'),
+  morphFlow: document.querySelector('#morphFlow'),
+  morphScatter: document.querySelector('#morphScatter'),
+  morphTurbulence: document.querySelector('#morphTurbulence'),
+  morphTrail: document.querySelector('#morphTrail'),
+  morphDirX: document.querySelector('#morphDirX'),
+  morphDirY: document.querySelector('#morphDirY'),
+  morphDirZ: document.querySelector('#morphDirZ'),
+  colorA: document.querySelector('#colorA'),
+  colorB: document.querySelector('#colorB'),
+  useTexture: document.querySelector('#useTexture'),
+  autoRotate: document.querySelector('#autoRotate'),
+  worldEnabled: document.querySelector('#worldEnabled'),
+  worldVisible: document.querySelector('#worldVisible'),
+  worldExport: document.querySelector('#worldExport'),
+  worldIntensity: document.querySelector('#worldIntensity'),
+  worldBlur: document.querySelector('#worldBlur'),
+  worldRotation: document.querySelector('#worldRotation'),
+  timeline: document.querySelector('#timeline'),
+  duration: document.querySelector('#duration'),
+  cameraCurve: document.querySelector('#cameraCurve'),
+  cameraCurveStrength: document.querySelector('#cameraCurveStrength'),
+  playTimeline: document.querySelector('#playTimeline'),
+  addKeyframe: document.querySelector('#addKeyframe'),
+  clearKeyframes: document.querySelector('#clearKeyframes'),
+  moveKeyframe: document.querySelector('#moveKeyframe'),
+  rotateKeyframe: document.querySelector('#rotateKeyframe'),
+  timelineMarkers: document.querySelector('#timelineMarkers'),
+  keyframeCount: document.querySelector('#keyframeCount'),
+  exportWidth: document.querySelector('#exportWidth'),
+  exportHeight: document.querySelector('#exportHeight'),
+  exportFps: document.querySelector('#exportFps'),
+  exportMov: document.querySelector('#exportMov'),
+  exportStatus: document.querySelector('#exportStatus')
+};
+
+const outputUi = {
+  particleCount: document.querySelector('#particleCountValue'),
+  pointSize: document.querySelector('#pointSizeValue'),
+  edgeFeather: document.querySelector('#edgeFeatherValue'),
+  sampleCleanup: document.querySelector('#sampleCleanupValue'),
+  sizeRandom: document.querySelector('#sizeRandomValue'),
+  glowRadius: document.querySelector('#glowRadiusValue'),
+  glowExposure: document.querySelector('#glowExposureValue'),
+  spread: document.querySelector('#spreadValue'),
+  noise: document.querySelector('#noiseValue'),
+  noiseScale: document.querySelector('#noiseScaleValue'),
+  swirl: document.querySelector('#swirlValue'),
+  speed: document.querySelector('#speedValue'),
+  dissolve: document.querySelector('#dissolveValue'),
+  growth: document.querySelector('#growthValue'),
+  growthFlow: document.querySelector('#growthFlowValue'),
+  growthWidth: document.querySelector('#growthWidthValue'),
+  growthTurbulence: document.querySelector('#growthTurbulenceValue'),
+  organicFlow: document.querySelector('#organicFlowValue'),
+  edgeBreak: document.querySelector('#edgeBreakValue'),
+  filamentLength: document.querySelector('#filamentLengthValue'),
+  filamentCurl: document.querySelector('#filamentCurlValue'),
+  emissionCount: document.querySelector('#emissionCountValue'),
+  modelWhite: document.querySelector('#modelWhiteValue'),
+  modelRoughness: document.querySelector('#modelRoughnessValue'),
+  emissionIntensity: document.querySelector('#emissionIntensityValue'),
+  emissionDistance: document.querySelector('#emissionDistanceValue'),
+  emissionSpeed: document.querySelector('#emissionSpeedValue'),
+  emissionWindX: document.querySelector('#emissionWindXValue'),
+  emissionWindY: document.querySelector('#emissionWindYValue'),
+  emissionWindZ: document.querySelector('#emissionWindZValue'),
+  emissionTurbulence: document.querySelector('#emissionTurbulenceValue'),
+  emissionSize: document.querySelector('#emissionSizeValue'),
+  emissionOpacity: document.querySelector('#emissionOpacityValue'),
+  emissionGlow: document.querySelector('#emissionGlowValue'),
+  breakAmount: document.querySelector('#breakAmountValue'),
+  breakProgress: document.querySelector('#breakProgressValue'),
+  breakRadius: document.querySelector('#breakRadiusValue'),
+  breakFeather: document.querySelector('#breakFeatherValue'),
+  breakCenterX: document.querySelector('#breakCenterXValue'),
+  breakCenterY: document.querySelector('#breakCenterYValue'),
+  breakCenterZ: document.querySelector('#breakCenterZValue'),
+  breakSpeed: document.querySelector('#breakSpeedValue'),
+  breakSize: document.querySelector('#breakSizeValue'),
+  imageSplatCount: document.querySelector('#imageSplatCountValue'),
+  imageSplatDepth: document.querySelector('#imageSplatDepthValue'),
+  imageSplatScatter: document.querySelector('#imageSplatScatterValue'),
+  imageSplatSpeed: document.querySelector('#imageSplatSpeedValue'),
+  imageSplatDirX: document.querySelector('#imageSplatDirXValue'),
+  imageSplatDirY: document.querySelector('#imageSplatDirYValue'),
+  imageSplatDirZ: document.querySelector('#imageSplatDirZValue'),
+  imageSplatTurbulence: document.querySelector('#imageSplatTurbulenceValue'),
+  imageSplatSize: document.querySelector('#imageSplatSizeValue'),
+  imageSplatFeather: document.querySelector('#imageSplatFeatherValue'),
+  imageSplatColorKeep: document.querySelector('#imageSplatColorKeepValue'),
+  imageSplatOpacity: document.querySelector('#imageSplatOpacityValue'),
+  imageSplatGlow: document.querySelector('#imageSplatGlowValue'),
+  imageSplatPlaneOpacity: document.querySelector('#imageSplatPlaneOpacityValue'),
+  morphProgress: document.querySelector('#morphProgressValue'),
+  morphFlow: document.querySelector('#morphFlowValue'),
+  morphScatter: document.querySelector('#morphScatterValue'),
+  morphTurbulence: document.querySelector('#morphTurbulenceValue'),
+  morphTrail: document.querySelector('#morphTrailValue'),
+  morphDirX: document.querySelector('#morphDirXValue'),
+  morphDirY: document.querySelector('#morphDirYValue'),
+  morphDirZ: document.querySelector('#morphDirZValue'),
+  worldIntensity: document.querySelector('#worldIntensityValue'),
+  worldBlur: document.querySelector('#worldBlurValue'),
+  worldRotation: document.querySelector('#worldRotationValue'),
+  timeline: document.querySelector('#timelineValue')
+};
+
+const morphUi = {
+  input: document.querySelector('#morphTargetInput'),
+  dropZone: document.querySelector('#morphTargetDropZone'),
+  name: document.querySelector('#morphTargetName')
+};
+
+const worldUi = {
+  input: document.querySelector('#worldInput'),
+  dropZone: document.querySelector('#worldDropZone'),
+  name: document.querySelector('#worldName')
+};
+
+const lightsUi = {
+  panel: document.querySelector('#lightsPanel'),
+  list: document.querySelector('#lightList'),
+  addPoint: document.querySelector('#addPointLight'),
+  addSun: document.querySelector('#addSunLight'),
+  addSpot: document.querySelector('#addSpotLight'),
+  addArea: document.querySelector('#addAreaLight'),
+  delete: document.querySelector('#deleteLight'),
+  type: document.querySelector('#lightType'),
+  color: document.querySelector('#lightColor'),
+  colorValue: document.querySelector('#lightColorValue'),
+  intensity: document.querySelector('#lightIntensity'),
+  intensityValue: document.querySelector('#lightIntensityValue'),
+  size: document.querySelector('#lightSize'),
+  sizeValue: document.querySelector('#lightSizeValue'),
+  sizeLabel: document.querySelector('#lightSizeLabel'),
+  move: document.querySelector('#moveLight'),
+  rotate: document.querySelector('#rotateLight')
+};
+
+const state = {
+  effectMode: 'particles',
+  particleCount: Number(controlsUi.particleCount.value),
+  pointSize: Number(controlsUi.pointSize.value),
+  edgeFeather: Number(controlsUi.edgeFeather.value),
+  sampleCleanup: Number(controlsUi.sampleCleanup.value),
+  sizeRandom: Number(controlsUi.sizeRandom.value),
+  glowRadius: Number(controlsUi.glowRadius.value),
+  glowExposure: Number(controlsUi.glowExposure.value),
+  spread: Number(controlsUi.spread.value),
+  noise: Number(controlsUi.noise.value),
+  noiseScale: Number(controlsUi.noiseScale.value),
+  swirl: Number(controlsUi.swirl.value),
+  speed: Number(controlsUi.speed.value),
+  dissolve: Number(controlsUi.dissolve.value),
+  growth: Number(controlsUi.growth.value),
+  growthFlow: Number(controlsUi.growthFlow.value),
+  growthWidth: Number(controlsUi.growthWidth.value),
+  growthTurbulence: Number(controlsUi.growthTurbulence.value),
+  organicFlow: Number(controlsUi.organicFlow.value),
+  edgeBreak: Number(controlsUi.edgeBreak.value),
+  filamentLength: Number(controlsUi.filamentLength.value),
+  filamentCurl: Number(controlsUi.filamentCurl.value),
+  emissionEnabled: controlsUi.emissionEnabled.checked,
+  emissionCount: Number(controlsUi.emissionCount.value),
+  modelWhite: Number(controlsUi.modelWhite.value),
+  modelRoughness: Number(controlsUi.modelRoughness.value),
+  emissionIntensity: Number(controlsUi.emissionIntensity.value),
+  emissionDistance: Number(controlsUi.emissionDistance.value),
+  emissionSpeed: Number(controlsUi.emissionSpeed.value),
+  emissionWindX: Number(controlsUi.emissionWindX.value),
+  emissionWindY: Number(controlsUi.emissionWindY.value),
+  emissionWindZ: Number(controlsUi.emissionWindZ.value),
+  emissionTurbulence: Number(controlsUi.emissionTurbulence.value),
+  emissionSize: Number(controlsUi.emissionSize.value),
+  emissionOpacity: Number(controlsUi.emissionOpacity.value),
+  emissionGlow: Number(controlsUi.emissionGlow.value),
+  breakAmount: Number(controlsUi.breakAmount.value),
+  breakProgress: Number(controlsUi.breakProgress.value),
+  breakRadius: Number(controlsUi.breakRadius.value),
+  breakFeather: Number(controlsUi.breakFeather.value),
+  breakCenterX: Number(controlsUi.breakCenterX.value),
+  breakCenterY: Number(controlsUi.breakCenterY.value),
+  breakCenterZ: Number(controlsUi.breakCenterZ.value),
+  breakSpeed: Number(controlsUi.breakSpeed.value),
+  breakSize: Number(controlsUi.breakSize.value),
+  imageSplatCount: Number(controlsUi.imageSplatCount.value),
+  imageSplatDepth: Number(controlsUi.imageSplatDepth.value),
+  imageSplatScatter: Number(controlsUi.imageSplatScatter.value),
+  imageSplatSpeed: Number(controlsUi.imageSplatSpeed.value),
+  imageSplatDirX: Number(controlsUi.imageSplatDirX.value),
+  imageSplatDirY: Number(controlsUi.imageSplatDirY.value),
+  imageSplatDirZ: Number(controlsUi.imageSplatDirZ.value),
+  imageSplatTurbulence: Number(controlsUi.imageSplatTurbulence.value),
+  imageSplatSize: Number(controlsUi.imageSplatSize.value),
+  imageSplatFeather: Number(controlsUi.imageSplatFeather.value),
+  imageSplatColorKeep: Number(controlsUi.imageSplatColorKeep.value),
+  imageSplatOpacity: Number(controlsUi.imageSplatOpacity.value),
+  imageSplatGlow: Number(controlsUi.imageSplatGlow.value),
+  imageSplatPlaneVisible: controlsUi.imageSplatPlaneVisible.checked,
+  imageSplatPlaneOpacity: Number(controlsUi.imageSplatPlaneOpacity.value),
+  imageSplatPositionX: 0,
+  imageSplatPositionY: 0,
+  imageSplatPositionZ: 0,
+  imageSplatRotationX: 0,
+  imageSplatRotationY: 0,
+  imageSplatRotationZ: 0,
+  imageSplatScale: 1,
+  morphProgress: Number(controlsUi.morphProgress.value),
+  morphFlow: Number(controlsUi.morphFlow.value),
+  morphScatter: Number(controlsUi.morphScatter.value),
+  morphTurbulence: Number(controlsUi.morphTurbulence.value),
+  morphTrail: Number(controlsUi.morphTrail.value),
+  morphDirX: Number(controlsUi.morphDirX.value),
+  morphDirY: Number(controlsUi.morphDirY.value),
+  morphDirZ: Number(controlsUi.morphDirZ.value),
+  colorA: controlsUi.colorA.value,
+  colorB: controlsUi.colorB.value,
+  useTexture: controlsUi.useTexture.checked,
+  autoRotate: controlsUi.autoRotate.checked,
+  worldEnabled: controlsUi.worldEnabled.checked,
+  worldVisible: controlsUi.worldVisible.checked,
+  worldExport: controlsUi.worldExport.checked,
+  worldIntensity: Number(controlsUi.worldIntensity.value),
+  worldBlur: Number(controlsUi.worldBlur.value),
+  worldRotation: Number(controlsUi.worldRotation.value)
+};
+
+const cameraAnimation = {
+  duration: Number(exportSettings.duration || controlsUi.duration.value),
+  time: 0,
+  playing: false,
+  curve: controlsUi.cameraCurve?.value || 'easeInOut',
+  curveStrength: Number(controlsUi.cameraCurveStrength?.value || 2),
+  keyframes: []
+};
+const VALID_CAMERA_CURVES = new Set(['linear', 'easeInOut', 'easeIn', 'easeOut', 'hold']);
+
+const NUMERIC_KEYFRAME_FIELDS = [
+  'pointSize',
+  'edgeFeather',
+  'sampleCleanup',
+  'sizeRandom',
+  'glowRadius',
+  'glowExposure',
+  'spread',
+  'noise',
+  'noiseScale',
+  'swirl',
+  'speed',
+  'dissolve',
+  'growth',
+  'growthFlow',
+  'growthWidth',
+  'growthTurbulence',
+  'organicFlow',
+  'edgeBreak',
+  'filamentLength',
+  'filamentCurl',
+  'emissionCount',
+  'modelWhite',
+  'modelRoughness',
+  'emissionIntensity',
+  'emissionDistance',
+  'emissionSpeed',
+  'emissionWindX',
+  'emissionWindY',
+  'emissionWindZ',
+  'emissionTurbulence',
+  'emissionSize',
+  'emissionOpacity',
+  'emissionGlow',
+  'breakAmount',
+  'breakProgress',
+  'breakRadius',
+  'breakFeather',
+  'breakCenterX',
+  'breakCenterY',
+  'breakCenterZ',
+  'breakSpeed',
+  'breakSize',
+  'imageSplatCount',
+  'imageSplatDepth',
+  'imageSplatScatter',
+  'imageSplatSpeed',
+  'imageSplatDirX',
+  'imageSplatDirY',
+  'imageSplatDirZ',
+  'imageSplatTurbulence',
+  'imageSplatSize',
+  'imageSplatFeather',
+  'imageSplatColorKeep',
+  'imageSplatOpacity',
+  'imageSplatGlow',
+  'imageSplatPlaneOpacity',
+  'imageSplatPositionX',
+  'imageSplatPositionY',
+  'imageSplatPositionZ',
+  'imageSplatRotationX',
+  'imageSplatRotationY',
+  'imageSplatRotationZ',
+  'imageSplatScale',
+  'morphProgress',
+  'morphFlow',
+  'morphScatter',
+  'morphTurbulence',
+  'morphTrail',
+  'morphDirX',
+  'morphDirY',
+  'morphDirZ',
+  'worldIntensity',
+  'worldBlur',
+  'worldRotation'
+];
+const COLOR_KEYFRAME_FIELDS = ['colorA', 'colorB'];
+const BOOLEAN_KEYFRAME_FIELDS = [
+  'useTexture',
+  'autoRotate',
+  'emissionEnabled',
+  'imageSplatPlaneVisible',
+  'worldEnabled',
+  'worldVisible'
+];
+const STRING_KEYFRAME_FIELDS = ['effectMode'];
+const REBUILD_NUMERIC_FIELDS = new Set(['sampleCleanup', 'emissionCount', 'imageSplatCount']);
+const CLAMP_01_FIELDS = new Set([
+  'edgeFeather',
+  'sampleCleanup',
+  'organicFlow',
+  'edgeBreak',
+  'modelWhite',
+  'modelRoughness',
+  'emissionOpacity',
+  'breakAmount',
+  'breakProgress',
+  'imageSplatFeather',
+  'imageSplatColorKeep',
+  'imageSplatOpacity',
+  'imageSplatPlaneOpacity',
+  'morphProgress',
+  'morphTrail',
+  'worldBlur'
+]);
+const SIGNED_NUMERIC_FIELDS = new Set([
+  'swirl',
+  'emissionWindX',
+  'emissionWindY',
+  'emissionWindZ',
+  'breakCenterX',
+  'breakCenterY',
+  'breakCenterZ',
+  'imageSplatDirX',
+  'imageSplatDirY',
+  'imageSplatDirZ',
+  'imageSplatPositionX',
+  'imageSplatPositionY',
+  'imageSplatPositionZ',
+  'imageSplatRotationX',
+  'imageSplatRotationY',
+  'imageSplatRotationZ',
+  'morphDirX',
+  'morphDirY',
+  'morphDirZ',
+  'worldRotation'
+]);
+
+const VALID_EFFECT_MODES = new Set(['particles', 'emission', 'image', 'morph']);
+
+const LIGHT_TYPES = {
+  point: '点光',
+  sun: '日光',
+  spot: '聚光',
+  area: '面光'
+};
+
+const LIGHT_DEFAULTS = {
+  point: { color: '#ffffff', intensity: 8, size: 0.75, position: [1.8, 1.7, 2.2], rotation: [0, 0, 0] },
+  sun: { color: '#ffffff', intensity: 0.65, size: 0, position: [-3.5, 5.2, 4.6], rotation: [-0.82, -0.56, -0.42] },
+  spot: { color: '#ffffff', intensity: 12, size: 0.72, position: [2.4, 2.4, 3.2], rotation: [-0.62, 0.55, 0.08] },
+  area: { color: '#ffffff', intensity: 5, size: 2.4, position: [-2.8, 2.8, 2.8], rotation: [-0.74, -0.62, -0.42] }
+};
+
+const presets = {
+  shape: {
+    pointSize: 2.4,
+    edgeFeather: 0.18,
+    sizeRandom: 0.28,
+    glowRadius: 80,
+    glowExposure: 0.85,
+    spread: 0,
+    noise: 0,
+    noiseScale: 1.8,
+    swirl: 0,
+    speed: 0,
+    dissolve: 0,
+    growth: 1,
+    growthFlow: 0.65,
+    growthWidth: 0.24,
+    growthTurbulence: 0.45,
+    organicFlow: 0,
+    edgeBreak: 0,
+    filamentLength: 0,
+    filamentCurl: 0,
+    colorA: '#00f0ff',
+    colorB: '#ffbf36'
+  },
+  calm: {
+    pointSize: 2.2,
+    edgeFeather: 0.22,
+    sizeRandom: 0.36,
+    glowRadius: 110,
+    glowExposure: 1.05,
+    spread: 0.22,
+    noise: 0.36,
+    noiseScale: 2.4,
+    swirl: 0.16,
+    speed: 0.72,
+    dissolve: 0,
+    growth: 1,
+    growthFlow: 0.82,
+    growthWidth: 0.28,
+    growthTurbulence: 0.62,
+    organicFlow: 0.28,
+    edgeBreak: 0.18,
+    filamentLength: 0.65,
+    filamentCurl: 0.5,
+    colorA: '#00f0ff',
+    colorB: '#ffbf36'
+  },
+  burst: {
+    pointSize: 2.8,
+    edgeFeather: 0.16,
+    sizeRandom: 0.58,
+    glowRadius: 150,
+    glowExposure: 1.35,
+    spread: 2.25,
+    noise: 1.18,
+    noiseScale: 1.25,
+    swirl: 0.62,
+    speed: 1.18,
+    dissolve: 0,
+    growth: 1,
+    growthFlow: 1.15,
+    growthWidth: 0.18,
+    growthTurbulence: 1.05,
+    organicFlow: 0.35,
+    edgeBreak: 0.35,
+    filamentLength: 1.0,
+    filamentCurl: 0.75,
+    colorA: '#ff6f61',
+    colorB: '#ffe86b'
+  },
+  vortex: {
+    pointSize: 2.0,
+    edgeFeather: 0.2,
+    sizeRandom: 0.46,
+    glowRadius: 130,
+    glowExposure: 1.2,
+    spread: 0.82,
+    noise: 0.95,
+    noiseScale: 1.6,
+    swirl: 2.12,
+    speed: 1.35,
+    dissolve: 0,
+    growth: 1,
+    growthFlow: 1.0,
+    growthWidth: 0.22,
+    growthTurbulence: 0.9,
+    organicFlow: 0.45,
+    edgeBreak: 0.28,
+    filamentLength: 1.15,
+    filamentCurl: 1.35,
+    colorA: '#8cfffb',
+    colorB: '#ff4d9d'
+  },
+  bloom: {
+    pointSize: 1.45,
+    edgeFeather: 0.1,
+    sizeRandom: 0.48,
+    glowRadius: 80,
+    glowExposure: 0.95,
+    spread: 0.08,
+    noise: 0.22,
+    noiseScale: 1.35,
+    swirl: 0.18,
+    speed: 0.75,
+    dissolve: 0,
+    growth: 0.58,
+    growthFlow: 1.15,
+    growthWidth: 0.18,
+    growthTurbulence: 0.9,
+    organicFlow: 0.92,
+    edgeBreak: 0.7,
+    filamentLength: 1.35,
+    filamentCurl: 1.15,
+    colorA: '#ffd7ef',
+    colorB: '#ffb238'
+  }
+};
+
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  alpha: true,
+  premultipliedAlpha: false,
+  preserveDrawingBuffer: true,
+  powerPreference: 'high-performance'
+});
+
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.setClearColor(0x090a0c, exportSettings.transparent ? 0 : 1);
+renderer.setPixelRatio(renderPixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const cameraPreviewRenderer = !exportSettings.hideUi && cameraPreviewUi.canvas
+  ? new THREE.WebGLRenderer({
+    canvas: cameraPreviewUi.canvas,
+    antialias: true,
+    alpha: true,
+    premultipliedAlpha: false,
+    powerPreference: 'high-performance'
+  })
+  : null;
+
+if (cameraPreviewRenderer) {
+  cameraPreviewRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  cameraPreviewRenderer.toneMapping = renderer.toneMapping;
+  cameraPreviewRenderer.toneMappingExposure = renderer.toneMappingExposure;
+  cameraPreviewRenderer.setClearColor(0x090a0c, 1);
+  cameraPreviewRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+}
+
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+
+const postSize = new THREE.Vector2();
+const postClearColor = new THREE.Color();
+const bloomScale = 0.5;
+
+function createPostTarget(name, width, height, options = {}) {
+  const target = new THREE.WebGLRenderTarget(width, height, {
+    format: THREE.RGBAFormat,
+    type: THREE.HalfFloatType,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    depthBuffer: Boolean(options.depthBuffer),
+    stencilBuffer: false
+  });
+  target.texture.name = name;
+  target.texture.generateMipmaps = false;
+  return target;
+}
+
+function currentDrawingBufferSize() {
+  renderer.getDrawingBufferSize(postSize);
+  return {
+    width: Math.max(2, Math.floor(postSize.x)),
+    height: Math.max(2, Math.floor(postSize.y))
+  };
+}
+
+let drawingSize = currentDrawingBufferSize();
+let sceneTarget = createPostTarget('particle-base', drawingSize.width, drawingSize.height, { depthBuffer: true });
+let glowTarget = createPostTarget(
+  'particle-glow-source',
+  Math.max(2, Math.floor(drawingSize.width * bloomScale)),
+  Math.max(2, Math.floor(drawingSize.height * bloomScale)),
+  { depthBuffer: true }
+);
+let blurTargetA = createPostTarget('particle-glow-blur-a', glowTarget.width, glowTarget.height);
+let blurTargetB = createPostTarget('particle-glow-blur-b', glowTarget.width, glowTarget.height);
+
+function resizePostTargets() {
+  drawingSize = currentDrawingBufferSize();
+  const bloomWidth = Math.max(2, Math.floor(drawingSize.width * bloomScale));
+  const bloomHeight = Math.max(2, Math.floor(drawingSize.height * bloomScale));
+  sceneTarget.setSize(drawingSize.width, drawingSize.height);
+  glowTarget.setSize(bloomWidth, bloomHeight);
+  blurTargetA.setSize(bloomWidth, bloomHeight);
+  blurTargetB.setSize(bloomWidth, bloomHeight);
+}
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x090a0c, 0.035);
+RectAreaLightUniformsLib.init();
+
+const ambientLight = new THREE.AmbientLight(0xf2f5ff, 0.55);
+scene.add(ambientLight);
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.55);
+keyLight.position.set(-3.5, 5.2, 4.6);
+scene.add(keyLight);
+const rimLight = new THREE.DirectionalLight(0xbfdcff, 0.28);
+rimLight.position.set(3.6, 2.1, -4.8);
+scene.add(rimLight);
+const baseLightIntensities = {
+  ambient: ambientLight.intensity,
+  key: keyLight.intensity,
+  rim: rimLight.intensity
+};
+const sceneLightGroup = new THREE.Group();
+scene.add(sceneLightGroup);
+const lightHandleGroup = new THREE.Group();
+lightHandleGroup.visible = !exportSettings.hideUi;
+scene.add(lightHandleGroup);
+
+const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.001, 100);
+const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, 0.001, 100);
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.07;
+orbit.minDistance = 0.02;
+orbit.maxDistance = 100;
+const clock = new THREE.Clock();
+const cameraPathGroup = new THREE.Group();
+cameraPathGroup.visible = !exportSettings.hideUi;
+scene.add(cameraPathGroup);
+const transformControls = new TransformControls(camera, renderer.domElement);
+transformControls.setMode('translate');
+transformControls.setSize(1.15);
+transformControls.visible = false;
+scene.add(transformControls);
+let activeCameraQuaternion = null;
+transformControls.addEventListener('dragging-changed', (event) => {
+  orbit.enabled = !event.value;
+  if (!event.value) {
+    if (selectedImageSplat) {
+      commitSelectedImageSplatTransform();
+      syncImageSplatTransformButtons();
+    } else if (selectedLightId) {
+      commitSelectedLightTransform();
+      syncLightUi();
+      selectLightHandle(selectedLightId);
+    } else if (selectedKeyframeId) {
+      commitSelectedKeyframeTransform();
+      rebuildCameraPath();
+      selectCameraKeyframeHandle(selectedKeyframeId);
+    }
+  }
+});
+transformControls.addEventListener('objectChange', () => {
+  if (selectedImageSplat) {
+    commitSelectedImageSplatTransform();
+    return;
+  }
+
+  if (selectedLightId) {
+    commitSelectedLightTransform();
+    syncLightUi();
+    return;
+  }
+
+  const keyframe = commitSelectedKeyframeTransform();
+  if (keyframe) {
+    updateSelectedCameraMarkerFromKeyframe(keyframe);
+  }
+  updateCameraPathCurve();
+});
+orbit.addEventListener('start', () => {
+  if (!transformControls.dragging && !cameraAnimation.playing) {
+    activeCameraQuaternion = null;
+  }
+});
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const selectedTransformProxy = new THREE.Object3D();
+selectedTransformProxy.visible = false;
+scene.add(selectedTransformProxy);
+let selectedKeyframeId = null;
+let selectedKeyframeObject = null;
+let selectedKeyframeMode = 'translate';
+const sceneLights = [];
+let selectedLightId = null;
+let selectedLightMode = 'translate';
+let selectedImageSplat = false;
+let selectedImageSplatMode = 'translate';
+
+const uniforms = {
+  uTime: { value: 0 },
+  uPixelRatio: { value: studioPixelRatio },
+  uPointSize: { value: state.pointSize },
+  uEdgeFeather: { value: state.edgeFeather },
+  uSizeRandom: { value: state.sizeRandom },
+  uGlowRadius: { value: state.glowRadius },
+  uGlowExposure: { value: state.glowExposure },
+  uSpread: { value: state.spread },
+  uNoise: { value: state.noise },
+  uNoiseScale: { value: state.noiseScale },
+  uSwirl: { value: state.swirl },
+  uDissolve: { value: state.dissolve },
+  uGrowth: { value: state.growth },
+  uGrowthFlow: { value: state.growthFlow },
+  uGrowthWidth: { value: state.growthWidth },
+  uGrowthTurbulence: { value: state.growthTurbulence },
+  uOrganicFlow: { value: state.organicFlow },
+  uEdgeBreak: { value: state.edgeBreak },
+  uFilamentLength: { value: state.filamentLength },
+  uFilamentCurl: { value: state.filamentCurl },
+  uMorphMode: { value: state.effectMode === 'morph' ? 1 : 0 },
+  uMorphReady: { value: 0 },
+  uMorphProgress: { value: state.morphProgress },
+  uMorphFlow: { value: state.morphFlow },
+  uMorphScatter: { value: state.morphScatter },
+  uMorphTurbulence: { value: state.morphTurbulence },
+  uMorphTrail: { value: state.morphTrail },
+  uMorphDirection: { value: new THREE.Vector3(state.morphDirX, state.morphDirY, state.morphDirZ) },
+  uUseTexture: { value: state.useTexture ? 1 : 0 },
+  uColorA: { value: new THREE.Color(state.colorA) },
+  uColorB: { value: new THREE.Color(state.colorB) }
+};
+uniforms.uGlowPass = { value: 0 };
+const glowUniforms = { ...uniforms, uGlowPass: { value: 1 } };
+
+const screenVertexShader = `
+  varying vec2 vUv;
+
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
+const blurMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uTexture: { value: null },
+    uDirection: { value: new THREE.Vector2(1, 0) },
+    uTexelSize: { value: new THREE.Vector2(1 / glowTarget.width, 1 / glowTarget.height) },
+    uRadius: { value: 1 }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uTexture;
+    uniform vec2 uDirection;
+    uniform vec2 uTexelSize;
+    uniform float uRadius;
+
+    varying vec2 vUv;
+
+    void main() {
+      vec2 stepOffset = uDirection * uTexelSize * max(uRadius, 0.001);
+      vec4 color = texture2D(uTexture, vUv) * 0.227027;
+      color += texture2D(uTexture, vUv + stepOffset * 1.384615) * 0.316216;
+      color += texture2D(uTexture, vUv - stepOffset * 1.384615) * 0.316216;
+      color += texture2D(uTexture, vUv + stepOffset * 3.230769) * 0.070270;
+      color += texture2D(uTexture, vUv - stepOffset * 3.230769) * 0.070270;
+      gl_FragColor = color;
+    }
+  `
+});
+
+const compositeMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uBaseTexture: { value: sceneTarget.texture },
+    uBloomTexture: { value: blurTargetA.texture },
+    uBloomStrength: { value: 1 },
+    uBloomAlpha: { value: 1 },
+    uToneExposure: { value: renderer.toneMappingExposure },
+    uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 }
+  },
+  depthTest: false,
+  depthWrite: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uBaseTexture;
+    uniform sampler2D uBloomTexture;
+    uniform float uBloomStrength;
+    uniform float uBloomAlpha;
+    uniform float uToneExposure;
+    uniform float uTransparentOutput;
+
+    varying vec2 vUv;
+
+    const mat3 PMS_LINEAR_REC2020_TO_LINEAR_SRGB = mat3(
+      vec3(1.6605, -0.1246, -0.0182),
+      vec3(-0.5876, 1.1329, -0.1006),
+      vec3(-0.0728, -0.0083, 1.1187)
+    );
+
+    const mat3 PMS_LINEAR_SRGB_TO_LINEAR_REC2020 = mat3(
+      vec3(0.6274, 0.0691, 0.0164),
+      vec3(0.3293, 0.9195, 0.0880),
+      vec3(0.0433, 0.0113, 0.8956)
+    );
+
+    vec3 pmsAgxDefaultContrastApprox(vec3 x) {
+      vec3 x2 = x * x;
+      vec3 x4 = x2 * x2;
+      return 15.5 * x4 * x2
+        - 40.14 * x4 * x
+        + 31.96 * x4
+        - 6.868 * x2 * x
+        + 0.4298 * x2
+        + 0.1191 * x
+        - 0.00232;
+    }
+
+    vec3 pmsAgxToneMap(vec3 color) {
+      const mat3 AgXInsetMatrix = mat3(
+        vec3(0.856627153315983, 0.137318972929847, 0.11189821299995),
+        vec3(0.0951212405381588, 0.761241990602591, 0.0767994186031903),
+        vec3(0.0482516061458583, 0.101439036467562, 0.811302368396859)
+      );
+      const mat3 AgXOutsetMatrix = mat3(
+        vec3(1.1271005818144368, -0.1413297634984383, -0.14132976349843826),
+        vec3(-0.11060664309660323, 1.157823702216272, -0.11060664309660294),
+        vec3(-0.016493938717834573, -0.016493938717834257, 1.2519364065950405)
+      );
+      const float AgxMinEv = -12.47393;
+      const float AgxMaxEv = 4.026069;
+      color *= uToneExposure;
+      color = PMS_LINEAR_SRGB_TO_LINEAR_REC2020 * color;
+      color = AgXInsetMatrix * color;
+      color = max(color, 1e-10);
+      color = log2(color);
+      color = (color - AgxMinEv) / (AgxMaxEv - AgxMinEv);
+      color = clamp(color, 0.0, 1.0);
+      color = pmsAgxDefaultContrastApprox(color);
+      color = AgXOutsetMatrix * color;
+      color = pow(max(vec3(0.0), color), vec3(2.2));
+      color = PMS_LINEAR_REC2020_TO_LINEAR_SRGB * color;
+      return clamp(color, 0.0, 1.0);
+    }
+
+    vec3 linearToSrgb(vec3 value) {
+      vec3 low = value * 12.92;
+      vec3 high = 1.055 * pow(max(value, 0.0), vec3(1.0 / 2.4)) - 0.055;
+      return mix(low, high, step(vec3(0.0031308), value));
+    }
+
+    void main() {
+      vec4 base = texture2D(uBaseTexture, vUv);
+      vec4 bloom = texture2D(uBloomTexture, vUv);
+      bloom.rgb = max(bloom.rgb - vec3(0.0012), vec3(0.0));
+      bloom.a = max(bloom.a - 0.001, 0.0);
+      float bloomEnergy = max(max(bloom.r, bloom.g), bloom.b);
+      float bloomMask = smoothstep(0.0, 0.008, bloomEnergy);
+      bloom *= bloomMask;
+      vec3 color = base.rgb + bloom.rgb * uBloomStrength;
+      float alpha = max(base.a, bloom.a * uBloomAlpha);
+      alpha = mix(1.0, alpha, uTransparentOutput);
+      color = linearToSrgb(pmsAgxToneMap(color));
+      gl_FragColor = vec4(color, alpha);
+    }
+  `
+});
+
+const postScene = new THREE.Scene();
+const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), compositeMaterial);
+postQuad.frustumCulled = false;
+postScene.add(postQuad);
+
+const particleMaterial = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthTest: true,
+  depthWrite: true,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    attribute vec3 aNormal;
+    attribute vec3 aOffset;
+    attribute vec3 aParticleColor;
+    attribute float aSeed;
+    attribute float aMix;
+    attribute float aTextureWeight;
+    attribute float aGrowthOrder;
+    attribute float aFilament;
+    attribute vec3 aFlowStart;
+    attribute vec3 aMorphTarget;
+    attribute vec3 aMorphColor;
+    attribute float aMorphTextureWeight;
+
+    uniform float uTime;
+    uniform float uPixelRatio;
+    uniform float uPointSize;
+    uniform float uEdgeFeather;
+    uniform float uSizeRandom;
+    uniform float uSpread;
+    uniform float uNoise;
+    uniform float uNoiseScale;
+    uniform float uSwirl;
+    uniform float uDissolve;
+    uniform float uGrowth;
+    uniform float uGrowthFlow;
+    uniform float uGrowthWidth;
+    uniform float uGrowthTurbulence;
+    uniform float uOrganicFlow;
+    uniform float uEdgeBreak;
+    uniform float uFilamentLength;
+    uniform float uFilamentCurl;
+    uniform float uMorphMode;
+    uniform float uMorphReady;
+    uniform float uMorphProgress;
+    uniform float uMorphFlow;
+    uniform float uMorphScatter;
+    uniform float uMorphTurbulence;
+    uniform float uMorphTrail;
+    uniform vec3 uMorphDirection;
+    uniform float uGlowRadius;
+    uniform float uGlowPass;
+    uniform float uUseTexture;
+    uniform vec3 uColorA;
+    uniform vec3 uColorB;
+
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vCoreRadius;
+    varying float vGlowSeed;
+
+    mat2 rotate2d(float angle) {
+      float s = sin(angle);
+      float c = cos(angle);
+      return mat2(c, -s, s, c);
+    }
+
+    float wave(vec3 p, float seed) {
+      return sin(dot(p, vec3(1.71, 2.47, 1.19)) + uTime * 1.35 + seed * 6.28318);
+    }
+
+    float blobNoise(vec3 p) {
+      float a = sin(p.x * 1.45 + sin(p.y * 1.1) + p.z * 0.62);
+      float b = sin(p.y * 1.7 + cos(p.z * 1.25) + p.x * 0.58);
+      float c = sin(p.z * 1.32 + sin(p.x * 1.18) + p.y * 0.72);
+      float d = sin(dot(p, vec3(1.9, 1.15, 1.45)) + sin(p.x + p.y));
+      return (a + b + c + d) * 0.25;
+    }
+
+    void main() {
+      vec3 p = position;
+      float pulse = wave(p, aSeed);
+      float noiseSize = max(uNoiseScale, 0.01);
+      vec3 q = p / noiseSize + aSeed * 0.07;
+      float blob = blobNoise(q + vec3(uTime * 0.09, -uTime * 0.06, uTime * 0.045));
+      float blobFine = blobNoise(q * 2.15 + vec3(1.7, 0.4, 2.2)) * 0.34;
+      float lumpyNoise = blob + blobFine;
+      vec3 field = vec3(
+        sin(q.y * 1.7 + uTime * 1.2 + aSeed * 3.1),
+        cos(q.z * 1.55 + uTime * 1.05 + aSeed * 2.4),
+        sin(q.x * 1.65 + uTime * 0.95 + aSeed * 4.2)
+      );
+      field += normalize(aNormal + vec3(lumpyNoise)) * lumpyNoise;
+
+      float morphMode = clamp(uMorphMode * uMorphReady, 0.0, 1.0);
+      vec3 morphDirection = uMorphDirection;
+      if (length(morphDirection) < 0.001) {
+        morphDirection = vec3(0.25, 0.35, -0.12);
+      }
+      morphDirection = normalize(morphDirection);
+      float directionalOrder = clamp(dot(normalize(position + vec3(0.0001)), morphDirection) * 0.28 + 0.5, 0.0, 1.0);
+      float morphOrder = clamp(aGrowthOrder * 0.48 + directionalOrder * 0.24 + aSeed * 0.22 + aMix * 0.06, 0.0, 1.0);
+      float morphTrail = max(uMorphTrail, 0.035);
+      float morphLocal = clamp((uMorphProgress - morphOrder * (1.0 - morphTrail)) / morphTrail, 0.0, 1.0);
+      float morphEase = smoothstep(0.0, 1.0, morphLocal);
+      float morphBand = smoothstep(0.04, 0.24, morphLocal) * (1.0 - smoothstep(0.72, 1.0, morphLocal));
+      float morphRibbon = pow(max(0.0, sin(morphEase * 3.14159265)), 1.45) * (0.35 + morphBand * 0.65);
+      vec3 morphDelta = aMorphTarget - position;
+      vec3 morphSide = cross(normalize(morphDelta + vec3(0.0001, 0.001, 0.0002)), vec3(0.0, 1.0, 0.0));
+      if (length(morphSide) < 0.001) {
+        morphSide = normalize(cross(normalize(morphDelta + vec3(0.001, 0.0001, 0.0002)), vec3(1.0, 0.0, 0.0)));
+      }
+      vec3 morphLift = normalize(morphDirection * 0.64 + field * (0.16 + uMorphTurbulence * 0.12) + aOffset * 0.34 + morphSide * 0.26);
+      float travel = length(morphDelta);
+      vec3 morphMid = mix(position, aMorphTarget, 0.5) +
+        morphLift * uMorphScatter * (0.06 + aSeed * 0.34 + min(travel, 4.0) * 0.045) * (0.55 + uMorphFlow * 0.18);
+      morphMid += morphDirection * (0.04 + uMorphFlow * 0.07) * morphRibbon;
+      vec3 morphA = mix(position, morphMid, smoothstep(0.02, 0.52, morphEase));
+      vec3 morphB = mix(morphMid, aMorphTarget, smoothstep(0.48, 1.0, morphEase));
+      vec3 morphPosition = mix(morphA, morphB, smoothstep(0.18, 0.82, morphEase));
+      morphPosition += field * uMorphTurbulence * morphRibbon * (0.032 + uMorphScatter * 0.032);
+      morphPosition += morphSide * sin(uTime * (0.72 + uMorphFlow * 0.56) + aSeed * 14.0) * morphRibbon * uMorphTurbulence * 0.032;
+
+      float organicFlow = clamp(uOrganicFlow, 0.0, 1.0);
+      float filamentNoise = sin(aSeed * 91.0 + position.x * 4.7 + position.y * 2.9 + position.z * 3.6) * 0.5 + 0.5;
+      float filamentMask = smoothstep(0.34, 0.96, aFilament + uEdgeBreak * 0.18 + filamentNoise * 0.16) * organicFlow;
+      float strandMask = filamentMask * (0.42 + smoothstep(0.58, 0.98, filamentNoise) * 0.58);
+      vec3 filamentDirection = normalize(
+        field * (0.82 + uFilamentCurl * 0.26) +
+        aOffset * (0.55 + uEdgeBreak * 0.35) +
+        aNormal * (0.28 + uEdgeBreak * 0.44) +
+        vec3(0.0, 0.12 + organicFlow * 0.16, 0.0)
+      );
+      float spark = sin(aSeed * 48.0 + uTime * 6.0) * 0.5 + 0.5;
+      float organicGrowthOrder = mix(
+        aGrowthOrder,
+        clamp(aGrowthOrder * 0.56 + aFilament * 0.34 + filamentNoise * 0.1, 0.0, 1.0),
+        organicFlow
+      );
+      float localGrowth = (uGrowth - organicGrowthOrder) / max(uGrowthWidth, 0.035);
+      float arrive = smoothstep(0.0, 1.0, clamp(localGrowth, 0.0, 1.0));
+      float visible = smoothstep(-0.18, 0.08, localGrowth);
+      float growHead = smoothstep(-0.04, 0.12, localGrowth) *
+        (1.0 - smoothstep(0.48, 1.08, localGrowth));
+      float completeGrowth = smoothstep(0.985, 1.0, uGrowth);
+      vec3 flowDir = normalize(position - aFlowStart + field * (0.14 + uGrowthTurbulence * 0.16) + aNormal * 0.08);
+      vec3 flowMid = mix(aFlowStart, position, 0.56) +
+        normalize(aOffset + field * (0.18 + uGrowthTurbulence * 0.36) + vec3(0.0, 0.6, 0.0)) *
+        (0.08 + uGrowthFlow * 0.22 + aSeed * (0.16 + uGrowthFlow * 0.18));
+      flowMid += filamentDirection * strandMask * uFilamentLength * (0.1 + uGrowthFlow * 0.12 + filamentNoise * 0.18);
+      vec3 firstLeg = mix(aFlowStart, flowMid, arrive);
+      vec3 secondLeg = mix(flowMid, position, arrive);
+      p = mix(firstLeg, secondLeg, arrive);
+      p = mix(p, position, completeGrowth);
+      arrive = mix(arrive, 1.0, completeGrowth);
+      visible = mix(visible, 1.0, completeGrowth);
+      growHead *= 1.0 - completeGrowth;
+
+      float current = visible * (1.0 - arrive);
+      p += normalize(field + aOffset * 0.45) * current * (0.055 + uNoise * 0.07) * (0.62 + uGrowthTurbulence * 0.58);
+      p += flowDir * growHead * (0.045 + uGrowthFlow * (0.1 + aSeed * 0.16));
+      p += field * sin(localGrowth * 6.28318 + uTime * 2.4 + aSeed * 5.0) * current *
+        (0.012 + uGrowthTurbulence * 0.045);
+      float silkGrowth = strandMask * (current + growHead * 0.72);
+      p += filamentDirection * silkGrowth * uFilamentLength * (0.16 + filamentNoise * 0.36);
+      p += field * silkGrowth * uFilamentCurl * (0.06 + aSeed * 0.12);
+
+      vec3 organicSource = position
+        - filamentDirection * strandMask * uFilamentLength * (0.18 + filamentNoise * 0.38)
+        - field * uFilamentCurl * strandMask * (0.04 + aSeed * 0.12)
+        + aNormal * filamentMask * uEdgeBreak * (0.03 + aSeed * 0.12);
+      vec3 organicPosition = mix(organicSource, position, arrive);
+      organicPosition += filamentDirection * strandMask * growHead * uFilamentLength * (0.18 + filamentNoise * 0.28);
+      organicPosition += field * strandMask * (current + growHead) * uFilamentCurl * (0.045 + aSeed * 0.07);
+      p = mix(p, organicPosition, organicFlow);
+
+      p += aOffset * uSpread * arrive * (0.22 + aSeed * 0.78);
+      float lumpAmplitude = uNoise * arrive * (0.5 + min(noiseSize, 6.0) * 0.12);
+      p += normalize(aNormal + field * 0.35) * lumpyNoise * lumpAmplitude;
+      p += field * uNoise * arrive * 0.08;
+      p += aNormal * pulse * arrive * uNoise * 0.028;
+
+      float dissolveAmount = clamp(uDissolve, 0.0, 1.0);
+      float dissolveOrder = clamp(aSeed * 0.68 + aMix * 0.32, 0.0, 1.0);
+      float dissolve = dissolveAmount <= 0.0001
+        ? 0.0
+        : smoothstep(dissolveOrder - 0.16, dissolveOrder + 0.16, dissolveAmount);
+      float dissolveTravel = mix(1.0 + aSeed * 3.4, 0.24 + aSeed * 1.15 + uFilamentLength * 0.16, organicFlow);
+      p += normalize(aOffset + aNormal * 1.8 + field * 0.35) * dissolve * dissolveTravel;
+      p.y += dissolve * mix(0.35 + spark * 0.85, 0.04 + spark * 0.22, organicFlow);
+      float silkDissolve = dissolve * strandMask;
+      p += filamentDirection * silkDissolve * uFilamentLength * (0.18 + aSeed * 0.65);
+      p += field * silkDissolve * uFilamentCurl * (0.1 + spark * 0.2);
+
+      float radius = length(p.xz);
+      float angle = uSwirl * (0.22 * radius + 0.16 * sin(uTime * 0.65 + aSeed * 6.28318));
+      p.xz = rotate2d(angle) * p.xz;
+      p = mix(p, morphPosition, morphMode);
+
+      vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+      float depthScale = clamp(4.8 / -mvPosition.z, 0.22, 5.6);
+      float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
+      float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
+      float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
+      corePointSize *= mix(1.0, 0.56 + growHead * 0.32 + dissolve * 0.18, strandMask);
+      corePointSize *= mix(1.0, 0.92 + morphRibbon * (0.18 + uMorphFlow * 0.06), morphMode);
+      float glowSourceSize = corePointSize * 1.45 + min(uGlowRadius, 900.0) * uPixelRatio * 0.006;
+      gl_PointSize = mix(corePointSize, max(corePointSize, glowSourceSize), step(0.5, uGlowPass));
+      vCoreRadius = clamp((corePointSize / max(gl_PointSize, 0.001)) * 0.48, 0.025, 0.48);
+      gl_Position = projectionMatrix * mvPosition;
+
+      vec3 gradientColor = mix(uColorA, uColorB, clamp(aMix + pulse * 0.08, 0.0, 1.0));
+      vColor = mix(gradientColor, aParticleColor, clamp(uUseTexture * aTextureWeight, 0.0, 1.0));
+      float textureColorWeight = clamp(uUseTexture * aTextureWeight, 0.0, 1.0);
+      vec3 liftedTextureColor = pow(max(vColor, vec3(0.0)), vec3(0.72));
+      vColor = mix(vColor, liftedTextureColor, textureColorWeight * 0.72);
+      vColor = mix(vColor, vec3(1.0), growHead * 0.18);
+      vColor += dissolve * spark * vec3(0.45, 0.26, 0.08);
+      vec3 silkTint = mix(vColor, vec3(1.0, 0.74, 0.93), 0.24 + spark * 0.12);
+      vColor = mix(vColor, silkTint, strandMask * (growHead * 0.42 + dissolve * 0.22 + uEdgeBreak * 0.08));
+      vec3 morphTargetColor = mix(gradientColor, aMorphColor, clamp(uUseTexture * aMorphTextureWeight, 0.0, 1.0));
+      morphTargetColor = mix(morphTargetColor, vec3(0.92, 0.88, 0.8), morphRibbon * 0.08);
+      vColor = mix(vColor, morphTargetColor, morphMode * morphEase);
+      float growthAlpha = clamp(visible * (0.16 + arrive * 0.84) + growHead * 0.35, 0.0, 1.0);
+      vAlpha = (0.84 + aSeed * 0.14) * growthAlpha * (1.0 - smoothstep(0.62, 1.0, dissolve));
+      vAlpha *= mix(1.0, 0.62 + growHead * 0.3 + dissolve * 0.18, strandMask);
+      vAlpha *= mix(1.0, 0.82 + morphRibbon * (0.24 + uMorphFlow * 0.05), morphMode);
+      vGlowSeed = aSeed;
+    }
+  `,
+  fragmentShader: `
+    uniform float uGlowRadius;
+    uniform float uGlowExposure;
+    uniform float uGlowPass;
+    uniform float uEdgeFeather;
+
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vCoreRadius;
+    varying float vGlowSeed;
+
+    void main() {
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      if (uGlowPass < 0.5) {
+        float feather = clamp(uEdgeFeather, 0.0, 1.0);
+        float innerEdge = mix(0.49, 0.06, feather);
+        float coreAlpha = smoothstep(0.5, innerEdge, d);
+        if (coreAlpha * vAlpha < 0.012) {
+          discard;
+        }
+        float coreGlow = step(0.001, uGlowRadius) * (1.0 - exp(-max(uGlowExposure, 0.0) * 0.36));
+        vec3 litColor = vColor * (1.0 + coreGlow * 0.42);
+        gl_FragColor = vec4(litColor, coreAlpha * vAlpha);
+        return;
+      }
+
+      float exposure = max(uGlowExposure, 0.0);
+      if (uGlowRadius <= 0.0 || exposure <= 0.0) {
+        discard;
+      }
+
+      if (d > 0.5) {
+        discard;
+      }
+
+      float glowStrength = 1.0 - exp(-exposure * 0.42);
+      float luminance = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
+      float colorEnergy = max(max(vColor.r, vColor.g), vColor.b);
+      float glowWeight = mix(0.3, 1.0, smoothstep(0.08, 0.78, max(luminance, colorEnergy * 0.86)));
+      float highlight = mix(0.42, 1.0, smoothstep(0.72, 0.98, vGlowSeed));
+      float source = exp(-d * d * 24.0);
+      float alpha = source * vAlpha * glowWeight * highlight * glowStrength * 0.58;
+      vec3 glowColor = mix(vColor, vec3(1.0), glowStrength * 0.2);
+      vec3 color = glowColor * alpha * (1.45 + exposure * 0.34);
+      gl_FragColor = vec4(color, clamp(alpha, 0.0, 0.52));
+    }
+  `
+});
+
+const glowMaterial = particleMaterial.clone();
+glowMaterial.uniforms = glowUniforms;
+glowMaterial.blending = THREE.AdditiveBlending;
+glowMaterial.depthWrite = false;
+glowMaterial.depthTest = false;
+glowMaterial.transparent = true;
+
+const emissionUniforms = {
+  uTime: { value: 0 },
+  uPixelRatio: { value: studioPixelRatio },
+  uEmissionEnabled: { value: state.emissionEnabled ? 1 : 0 },
+  uEmissionCountRatio: { value: 1 },
+  uEmissionIntensity: { value: state.emissionIntensity },
+  uEmissionDistance: { value: state.emissionDistance },
+  uEmissionSpeed: { value: state.emissionSpeed },
+  uEmissionWind: { value: new THREE.Vector3(state.emissionWindX, state.emissionWindY, state.emissionWindZ) },
+  uEmissionTurbulence: { value: state.emissionTurbulence },
+  uEmissionSize: { value: state.emissionSize },
+  uEmissionOpacity: { value: state.emissionOpacity },
+  uEmissionGlow: { value: state.emissionGlow },
+  uModelWhite: { value: state.modelWhite },
+  uUseTexture: { value: state.useTexture ? 1 : 0 },
+  uColorA: { value: new THREE.Color(state.colorA) },
+  uColorB: { value: new THREE.Color(state.colorB) },
+  uBreakAmount: { value: state.breakAmount },
+  uBreakProgress: { value: state.breakProgress },
+  uBreakRadius: { value: state.breakRadius },
+  uBreakFeather: { value: state.breakFeather },
+  uBreakCenter: { value: new THREE.Vector3(state.breakCenterX, state.breakCenterY, state.breakCenterZ) },
+  uBreakSpeed: { value: state.breakSpeed },
+  uBreakSize: { value: state.breakSize },
+  uGlowPass: { value: 0 }
+};
+const emissionGlowUniforms = { ...emissionUniforms, uGlowPass: { value: 1 } };
+const modelBreakUniforms = {
+  uBreakAmount: emissionUniforms.uBreakAmount,
+  uBreakProgress: emissionUniforms.uBreakProgress,
+  uBreakRadius: emissionUniforms.uBreakRadius,
+  uBreakFeather: emissionUniforms.uBreakFeather,
+  uBreakCenter: emissionUniforms.uBreakCenter
+};
+
+const emissionMaterial = new THREE.ShaderMaterial({
+  uniforms: emissionUniforms,
+  transparent: true,
+  depthWrite: false,
+  depthTest: true,
+  blending: THREE.NormalBlending,
+  vertexShader: `
+    attribute vec3 aNormal;
+    attribute vec3 aOffset;
+    attribute vec3 aParticleColor;
+    attribute float aSeed;
+    attribute float aLifeOffset;
+    attribute float aIndexRatio;
+    attribute float aTextureWeight;
+
+    uniform float uTime;
+    uniform float uPixelRatio;
+    uniform float uEmissionEnabled;
+    uniform float uEmissionCountRatio;
+    uniform float uEmissionIntensity;
+    uniform float uEmissionDistance;
+    uniform float uEmissionSpeed;
+    uniform vec3 uEmissionWind;
+    uniform float uEmissionTurbulence;
+    uniform float uEmissionSize;
+    uniform float uEmissionOpacity;
+    uniform float uEmissionGlow;
+    uniform float uModelWhite;
+    uniform float uUseTexture;
+    uniform vec3 uColorA;
+    uniform vec3 uColorB;
+    uniform float uBreakAmount;
+    uniform float uBreakProgress;
+    uniform float uBreakRadius;
+    uniform float uBreakFeather;
+    uniform vec3 uBreakCenter;
+    uniform float uBreakSpeed;
+    uniform float uBreakSize;
+    uniform float uGlowPass;
+
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vGlow;
+
+    float hash(vec3 p) {
+      return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+    }
+
+    vec3 flowField(vec3 p, float seed, float timeValue) {
+      vec3 q = p * (1.35 + seed * 0.75) + vec3(timeValue * 0.16, -timeValue * 0.11, timeValue * 0.09);
+      return normalize(vec3(
+        sin(q.y * 2.1 + q.z * 0.8 + seed * 6.28318),
+        cos(q.z * 1.7 + q.x * 0.9 + seed * 5.2),
+        sin(q.x * 1.9 - q.y * 0.7 + seed * 4.4)
+      ) + aOffset * 0.42);
+    }
+
+    void main() {
+      float activeMask = uEmissionEnabled * step(aIndexRatio, clamp(uEmissionCountRatio, 0.0, 1.0));
+      float timeValue = uTime * max(uEmissionSpeed, 0.0);
+      float age = fract(timeValue * (0.052 + aSeed * 0.028) + aLifeOffset);
+      float fade = smoothstep(0.0, 0.13, age) * (1.0 - smoothstep(0.72, 1.0, age));
+      float intensity = max(uEmissionIntensity, 0.0);
+      float energy = fade * activeMask * intensity;
+
+      vec3 normal = normalize(aNormal + aOffset * 0.08);
+      vec3 wind = uEmissionWind;
+      float windLength = length(wind);
+      wind = mix(vec3(0.42, 0.12, -0.18), wind / max(windLength, 0.0001), step(0.0001, windLength));
+      vec3 curl = flowField(position * 0.78 + normal * age * 0.75, aSeed, timeValue);
+      vec3 tangent = normalize(vec3(-position.z, 0.18 + aSeed * 0.24, position.x) + curl * 0.22 + wind * 0.18);
+      float ribbon = pow(0.5 + 0.5 * sin(position.y * 3.1 + position.x * 1.7 - position.z * 1.2 + aSeed * 9.4 + timeValue * 0.42), 2.2);
+      float stream = mix(0.52, 1.38, ribbon);
+      float breakDistance = length(position - uBreakCenter);
+      float breakArea = 1.0 - smoothstep(uBreakRadius, uBreakRadius + max(uBreakFeather, 0.001), breakDistance);
+      float breakGate = smoothstep(aSeed - 0.22, aSeed + 0.22, uBreakProgress);
+      float breakMask = clamp(uBreakAmount, 0.0, 1.0) * breakArea * breakGate;
+      vec3 drift = normalize(normal * 0.38 + tangent * 0.58 + wind * 0.42 + curl * uEmissionTurbulence * 0.72);
+      float easedAge = age * age * (3.0 - 2.0 * age);
+      float plume = smoothstep(0.18, 0.88, age);
+      float distance = uEmissionDistance * (0.22 + aSeed * 1.15) * (0.42 + intensity * 0.72);
+      vec3 p = position;
+      p += normal * distance * 0.16 * smoothstep(0.0, 0.25, age);
+      p += drift * distance * easedAge * stream;
+      p += tangent * sin(age * 6.28318 + aSeed * 7.1) * uEmissionDistance * (0.045 + uEmissionTurbulence * 0.075) * plume;
+      p += curl * uEmissionTurbulence * uEmissionDistance * age * (0.18 + aSeed * 0.28);
+      p += normal * sin(age * 6.28318 + aSeed * 9.7) * uEmissionTurbulence * 0.026;
+      float breakTime = uTime * max(uBreakSpeed, 0.0);
+      vec3 breakFlow = flowField(position * 1.4 + aOffset * 0.8, aSeed + 0.37, breakTime);
+      vec3 breakDirection = normalize(normal * 0.95 + aOffset * 0.75 + breakFlow * 0.55 + wind * 0.28);
+      float breakTravel = breakMask * uBreakProgress * (0.55 + uEmissionDistance * 0.65) * (0.75 + aSeed * 1.35);
+      p += breakDirection * breakTravel;
+      p += breakFlow * breakMask * uBreakProgress * (0.08 + uEmissionTurbulence * 0.16);
+
+      vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+      float depthScale = clamp(4.8 / -mvPosition.z, 0.18, 5.2);
+      float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
+      float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
+      baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
+      float glowSize = baseSize * (1.55 + clamp(uEmissionGlow, 0.0, 4.0) * 1.12);
+      gl_PointSize = mix(baseSize, max(baseSize, glowSize), step(0.5, uGlowPass));
+      gl_Position = projectionMatrix * mvPosition;
+
+      float gradientMix = clamp(
+        0.5 + position.y * 0.34 + ribbon * 0.22 + sin(aSeed * 9.7 + position.x * 1.6) * 0.08,
+        0.0,
+        1.0
+      );
+      vec3 gradientColor = mix(uColorA, uColorB, gradientMix);
+      vec3 textureColor = mix(gradientColor, aParticleColor, clamp(aTextureWeight, 0.0, 1.0));
+      vec3 sourceColor = mix(gradientColor, textureColor, clamp(uUseTexture, 0.0, 1.0));
+      float luma = dot(sourceColor, vec3(0.299, 0.587, 0.114));
+      vec3 mistColor = mix(sourceColor, vec3(luma), 0.12);
+      vColor = mix(mistColor, vec3(0.9, 0.93, 0.95), clamp(uModelWhite, 0.0, 1.0));
+      float breakAlpha = activeMask * breakMask * smoothstep(0.0, 0.08, uBreakProgress) *
+        (1.0 - smoothstep(0.94, 1.0, uBreakProgress)) * (0.52 + aSeed * 0.46);
+      vAlpha = max(energy * stream, breakAlpha) * clamp(uEmissionOpacity, 0.0, 1.0) * (0.28 + aSeed * 0.54);
+      vGlow = clamp(uEmissionGlow * (0.52 + ribbon * 0.42) + breakMask * 0.35, 0.0, 4.0);
+    }
+  `,
+  fragmentShader: `
+    uniform float uGlowPass;
+
+    varying vec3 vColor;
+    varying float vAlpha;
+    varying float vGlow;
+
+    void main() {
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      if (d > 0.5) {
+        discard;
+      }
+
+      if (uGlowPass < 0.5) {
+        float core = smoothstep(0.48, 0.06, d);
+        float feather = smoothstep(0.5, 0.32, d);
+        vec3 color = vColor * (0.86 + vGlow * 0.08);
+        gl_FragColor = vec4(color, core * feather * vAlpha);
+        return;
+      }
+
+      if (vGlow <= 0.001) {
+        discard;
+      }
+
+      float halo = exp(-d * d * 10.5);
+      float alpha = halo * vAlpha * min(vGlow, 4.0) * 0.12;
+      vec3 glowColor = mix(vColor, vec3(1.0), 0.28);
+      gl_FragColor = vec4(glowColor * alpha * (1.05 + vGlow * 0.12), clamp(alpha, 0.0, 0.2));
+    }
+  `
+});
+
+const emissionGlowMaterial = emissionMaterial.clone();
+emissionGlowMaterial.uniforms = emissionGlowUniforms;
+emissionGlowMaterial.blending = THREE.AdditiveBlending;
+emissionGlowMaterial.depthWrite = false;
+emissionGlowMaterial.depthTest = true;
+emissionGlowMaterial.transparent = true;
+
+const imageSplatUniforms = {
+  uTime: { value: 0 },
+  uPixelRatio: { value: studioPixelRatio },
+  uDepth: { value: state.imageSplatDepth },
+  uScatter: { value: state.imageSplatScatter },
+  uSpeed: { value: state.imageSplatSpeed },
+  uScatterDirection: { value: new THREE.Vector3(state.imageSplatDirX, state.imageSplatDirY, state.imageSplatDirZ) },
+  uTurbulence: { value: state.imageSplatTurbulence },
+  uSize: { value: state.imageSplatSize },
+  uFeather: { value: state.imageSplatFeather },
+  uColorKeep: { value: state.imageSplatColorKeep },
+  uOpacity: { value: state.imageSplatOpacity },
+  uGlow: { value: state.imageSplatGlow },
+  uCountRatio: { value: 1 },
+  uColorA: { value: new THREE.Color(state.colorA) },
+  uColorB: { value: new THREE.Color(state.colorB) },
+  uMistPass: { value: 0 },
+  uGlowPass: { value: 0 }
+};
+const imageSplatGlowUniforms = { ...imageSplatUniforms, uGlowPass: { value: 1 } };
+const imageSplatMistUniforms = { ...imageSplatUniforms, uMistPass: { value: 1 } };
+
+const imageSplatVertexShader = `
+  attribute float aDepth;
+  attribute vec3 aScatter;
+  attribute vec3 aParticleColor;
+  attribute float aSeed;
+  attribute float aMix;
+  attribute float aAlpha;
+  attribute float aIndexRatio;
+
+  uniform float uTime;
+  uniform float uPixelRatio;
+  uniform float uDepth;
+  uniform float uScatter;
+  uniform float uSpeed;
+  uniform vec3 uScatterDirection;
+  uniform float uTurbulence;
+  uniform float uSize;
+  uniform float uGlow;
+  uniform float uCountRatio;
+  uniform float uMistPass;
+  uniform float uGlowPass;
+
+  varying vec3 vColor;
+  varying float vMix;
+  varying float vAlpha;
+
+  float hash(float value) {
+    return fract(sin(value * 127.1) * 43758.5453123);
+  }
+
+  void main() {
+    float t = uTime * max(uSpeed, 0.0);
+    float mist = clamp(uMistPass, 0.0, 1.0);
+    float age = fract(aSeed + t * mix(0.09, 0.16, mist));
+    float stream = smoothstep(0.02, 0.22, age) * (1.0 - smoothstep(0.72, 1.0, age));
+    float pulse = sin(t * 2.4 + aSeed * 18.0) * 0.5 + 0.5;
+    vec3 wind = uScatterDirection;
+    if (length(wind) < 0.001) {
+      wind = vec3(0.35, 0.12, 0.55);
+    }
+    wind = normalize(wind);
+    vec3 curl = normalize(vec3(
+      sin(position.y * 2.7 + t + aSeed * 5.1),
+      cos(position.x * 2.1 - t * 0.8 + aSeed * 6.7),
+      sin((position.x + position.y) * 1.4 + t * 1.2 + aSeed * 4.3)
+    ));
+    vec3 flow = normalize(wind * 0.72 + aScatter * 0.58 + curl * uTurbulence * 0.34);
+    vec3 p = position;
+    p.z += aDepth * uDepth;
+    p += flow * uScatter * stream * (0.15 + aSeed * 0.9 + mist * 0.55);
+    p += curl * uTurbulence * (0.035 + mist * 0.08) * (0.25 + pulse);
+    p += aScatter * mist * uScatter * (0.22 + aSeed * 0.68);
+
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    float perspectiveScale = clamp(3.6 / max(1.0, -mvPosition.z), 0.58, 2.4);
+    float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
+    float glowPass = clamp(uGlowPass, 0.0, 1.0);
+    float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
+    gl_PointSize = max(0.42, uSize * uPixelRatio * perspectiveScale * jitter * glowScale * 2.2);
+    gl_Position = projectionMatrix * mvPosition;
+
+    vColor = aParticleColor;
+    vMix = aMix;
+    float activeMask = step(aIndexRatio, clamp(uCountRatio, 0.0, 1.0));
+    vAlpha = aAlpha * activeMask * mix(1.0, 0.38, mist) * mix(1.0, 0.42, clamp(uGlowPass, 0.0, 1.0));
+  }
+`;
+
+const imageSplatFragmentShader = `
+  uniform float uFeather;
+  uniform float uColorKeep;
+  uniform float uOpacity;
+  uniform float uGlow;
+  uniform vec3 uColorA;
+  uniform vec3 uColorB;
+  uniform float uMistPass;
+  uniform float uGlowPass;
+
+  varying vec3 vColor;
+  varying float vMix;
+  varying float vAlpha;
+
+  void main() {
+    vec2 centered = gl_PointCoord.xy - vec2(0.5);
+    float d = length(centered) * 2.0;
+    if (d > 1.0) {
+      discard;
+    }
+
+    float feather = clamp(uFeather, 0.0, 1.0);
+    float gaussian = exp(-d * d * mix(12.0, 3.2, feather));
+    float crisp = 1.0 - smoothstep(0.86 + feather * 0.1, 1.0, d);
+    float soft = mix(crisp, gaussian, feather);
+    vec3 gradient = mix(uColorA, uColorB, clamp(vMix, 0.0, 1.0));
+    vec3 color = mix(gradient, vColor, clamp(uColorKeep, 0.0, 1.0));
+    float mist = clamp(uMistPass, 0.0, 1.0);
+    float glowPass = clamp(uGlowPass, 0.0, 1.0);
+    float alpha = soft * vAlpha * clamp(uOpacity, 0.0, 1.0) * mix(1.0, 0.42, mist);
+    color = mix(color, vec3(dot(color, vec3(0.299, 0.587, 0.114))), mist * 0.18);
+    color *= 1.0 + uGlow * mix(0.04, 0.18, glowPass);
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+const imageSplatMaterial = new THREE.ShaderMaterial({
+  uniforms: imageSplatUniforms,
+  transparent: true,
+  depthTest: true,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: imageSplatVertexShader,
+  fragmentShader: imageSplatFragmentShader
+});
+const imageSplatGlowMaterial = imageSplatMaterial.clone();
+imageSplatGlowMaterial.uniforms = imageSplatGlowUniforms;
+imageSplatGlowMaterial.blending = THREE.AdditiveBlending;
+const imageSplatMistMaterial = imageSplatMaterial.clone();
+imageSplatMistMaterial.uniforms = imageSplatMistUniforms;
+
+let particles = null;
+let glowParticles = null;
+let visibleModelRoot = null;
+let emissionParticles = null;
+let emissionGlowParticles = null;
+let imageSplatRoot = null;
+let imageSplatPlane = null;
+let imageSplatParticles = null;
+let imageSplatMistParticles = null;
+let imageSplatGlowParticles = null;
+let imageSplatTexture = null;
+let imageSplatSource = null;
+let realSplatRoot = null;
+let realSplatObjectUrl = '';
+let currentSource = createDefaultModel();
+let currentLabel = '程序内置模型';
+let currentModelPayload = null;
+let morphTargetSource = null;
+let morphTargetLabel = '';
+let currentMorphTargetPayload = null;
+let currentImageSplatPayload = null;
+let currentGaussianSplatPayload = null;
+let currentWorldPayload = null;
+let worldSourceTexture = null;
+let worldPmremTarget = null;
+let worldObjectUrl = '';
+let rebuildTimer = null;
+let buildToken = 0;
+let initialModelReady = false;
+
+resetCamera();
+importSceneLights();
+syncUi();
+syncUniforms();
+refreshCameraTimeline();
+updatePlayButton();
+initializeStartupModel();
+animate();
+
+async function initializeStartupModel() {
+  setStatus('Loading model');
+  const loaded = exportSettings.modelUrl ? await loadBundledModel(exportSettings.modelUrl) : false;
+  if (!loaded) {
+    await buildParticles(currentSource, currentLabel, { resetView: true });
+  }
+  await initializeStartupMorphTarget();
+  await initializeStartupWorld();
+  initialModelReady = true;
+}
+
+async function initializeStartupMorphTarget() {
+  if (!exportSettings.morphTargetUrl) {
+    return false;
+  }
+
+  try {
+    return await loadMorphTargetUrl(exportSettings.morphTargetUrl, {
+      name: exportSettings.morphTargetUrl.split('/').pop()?.split('?')[0] || 'target.glb'
+    });
+  } catch (error) {
+    console.warn('Could not load startup morph target.', error);
+    return false;
+  }
+}
+
+function createDefaultModel() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+  const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(1.08, 0.31, 260, 36), material);
+  knot.rotation.set(0.7, 0.1, 0.35);
+  group.add(knot);
+
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.72, 4), material);
+  core.scale.set(1.1, 0.82, 1.1);
+  group.add(core);
+
+  return group;
+}
+
+async function buildParticles(source, label, options = {}) {
+  const { resetView = false } = options;
+  const token = ++buildToken;
+  setStatus('Sampling');
+  await nextFrame();
+
+  try {
+    const particleGeometry = createParticleGeometry(source, state.particleCount);
+    const emissionGeometry = createEmissionGeometry(source, state.emissionCount);
+    if (token !== buildToken) {
+      particleGeometry.dispose();
+      emissionGeometry.dispose();
+      return false;
+    }
+
+    if (particles) {
+      const previousGeometry = particles.geometry;
+      particles.geometry = particleGeometry;
+      if (glowParticles) {
+        glowParticles.geometry = particleGeometry;
+        glowParticles.visible = false;
+      }
+      previousGeometry.dispose();
+      particles.rotation.set(0, 0, 0);
+      glowParticles?.rotation.set(0, 0, 0);
+    } else {
+      glowParticles = new THREE.Points(particleGeometry, glowMaterial);
+      glowParticles.renderOrder = 2;
+      glowParticles.visible = false;
+      scene.add(glowParticles);
+      particles = new THREE.Points(particleGeometry, particleMaterial);
+      particles.renderOrder = 1;
+      scene.add(particles);
+    }
+
+    if (emissionParticles) {
+      const previousEmissionGeometry = emissionParticles.geometry;
+      emissionParticles.geometry = emissionGeometry;
+      if (emissionGlowParticles) {
+        emissionGlowParticles.geometry = emissionGeometry;
+        emissionGlowParticles.visible = false;
+      }
+      previousEmissionGeometry.dispose();
+      emissionParticles.rotation.set(0, 0, 0);
+      emissionGlowParticles?.rotation.set(0, 0, 0);
+    } else {
+      emissionGlowParticles = new THREE.Points(emissionGeometry, emissionGlowMaterial);
+      emissionGlowParticles.renderOrder = 4;
+      emissionGlowParticles.visible = false;
+      scene.add(emissionGlowParticles);
+      emissionParticles = new THREE.Points(emissionGeometry, emissionMaterial);
+      emissionParticles.renderOrder = 3;
+      scene.add(emissionParticles);
+    }
+
+    rebuildVisibleModel(source);
+    currentSource = source;
+    currentLabel = label;
+    modelName.textContent = `当前：${label}`;
+    syncUniforms();
+    syncEmissionUniforms();
+    syncEffectVisibility();
+    updateStats();
+    if (resetView) {
+      resetCamera();
+    }
+    setStatus('Ready');
+    window.dispatchEvent(new Event('particle-studio-ready'));
+    return true;
+  } catch (error) {
+    console.error(error);
+    setStatus('Load failed');
+    modelName.textContent = '当前：无法读取模型';
+    return false;
+  }
+}
+
+async function buildImageSplatObject(source, label, options = {}) {
+  const { resetView = false } = options;
+  const token = ++buildToken;
+  setStatus('Building image');
+  await nextFrame();
+
+  try {
+    const requestedCount = Math.max(MIN_PARTICLE_COUNT, Math.round(Number(state.imageSplatCount) || MIN_PARTICLE_COUNT));
+    const mistRatio = source.isPanorama ? 0.22 : 0.06;
+    const mistCount = requestedCount > 1 ? Math.max(1, Math.round(requestedCount * mistRatio)) : 0;
+    const mainCount = Math.max(MIN_PARTICLE_COUNT, requestedCount - mistCount);
+    const imageGeometry = createImageSplatGeometry(source, mainCount, false);
+    const mistGeometry = createImageSplatGeometry(source, mistCount, true);
+    if (token !== buildToken) {
+      imageGeometry.dispose();
+      mistGeometry.dispose();
+      return false;
+    }
+
+    removeImageSplatObject({ keepTexture: true });
+    imageSplatSource = source;
+    imageSplatRoot = new THREE.Group();
+    imageSplatRoot.name = 'Image Gaussian Splat Object';
+    imageSplatRoot.renderOrder = 5;
+    imageSplatRoot.userData.capacity = mainCount + mistCount;
+
+    const planeMaterial = new THREE.MeshBasicMaterial({
+      map: imageSplatTexture,
+      color: 0xffffff,
+      transparent: source.isPanorama ? state.imageSplatPlaneOpacity < 0.999 : true,
+      opacity: state.imageSplatPlaneOpacity,
+      side: source.isPanorama ? THREE.BackSide : THREE.DoubleSide,
+      depthTest: true,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false
+    });
+    imageSplatPlane = createImageSplatReferenceMesh(source, planeMaterial);
+    imageSplatRoot.add(imageSplatPlane);
+
+    imageSplatGlowParticles = new THREE.Points(imageGeometry, imageSplatGlowMaterial);
+    imageSplatGlowParticles.name = 'Image Splat Glow';
+    imageSplatGlowParticles.renderOrder = 6;
+    imageSplatGlowParticles.visible = false;
+    imageSplatRoot.add(imageSplatGlowParticles);
+
+    imageSplatParticles = new THREE.Points(imageGeometry, imageSplatMaterial);
+    imageSplatParticles.name = 'Image Splat Particles';
+    imageSplatParticles.renderOrder = 5;
+    imageSplatRoot.add(imageSplatParticles);
+
+    imageSplatMistParticles = new THREE.Points(mistGeometry, imageSplatMistMaterial);
+    imageSplatMistParticles.name = 'Image Splat Mist';
+    imageSplatMistParticles.renderOrder = 4;
+    imageSplatRoot.add(imageSplatMistParticles);
+
+    scene.add(imageSplatRoot);
+    applyImageSplatTransform();
+    syncImageSplatUniforms();
+    setEffectMode('image');
+    modelName.textContent = `当前：${label}（图片破溅对象）`;
+    currentLabel = label;
+    currentModelPayload = null;
+    updateStats();
+    if (resetView) {
+      frameImageSplatCamera(source);
+    }
+    if (!exportSettings.hideUi) {
+      selectImageSplatObject();
+    }
+    setStatus('Ready');
+    window.dispatchEvent(new Event('particle-studio-ready'));
+    return true;
+  } catch (error) {
+    console.error(error);
+    setStatus('Image failed');
+    modelName.textContent = `当前：${label} 读取失败`;
+    return false;
+  }
+}
+
+async function buildRealSplatObject(url, label, options = {}) {
+  const { extension = 'ply', resetView = false } = options;
+  const token = ++buildToken;
+  setStatus('Loading splat');
+  await nextFrame();
+
+  try {
+    await removeRealSplatObject({ keepObjectUrl: true });
+    realSplatRoot = new GaussianSplats3D.DropInViewer({
+      gpuAcceleratedSort: true,
+      sharedMemoryForWorkers: false,
+      integerBasedSort: true,
+      halfPrecisionCovariancesOnGPU: true,
+      dynamicScene: false,
+      renderMode: GaussianSplats3D.RenderMode.Always,
+      sceneRevealMode: GaussianSplats3D.SceneRevealMode.Instant,
+      sphericalHarmonicsDegree: 0,
+      splatRenderMode: GaussianSplats3D.SplatRenderMode.ThreeD,
+      logLevel: GaussianSplats3D.LogLevel.None
+    });
+    realSplatRoot.name = 'True Gaussian Splat Object';
+    realSplatRoot.renderOrder = 5;
+    realSplatRoot.visible = false;
+    scene.add(realSplatRoot);
+
+    await realSplatRoot.addSplatScene(url, {
+      format: getGaussianSceneFormat(extension),
+      splatAlphaRemovalThreshold: 4,
+      showLoadingUI: false,
+      progressiveLoad: extension === 'ply' || extension === 'splat',
+      position: [0, 0, 0],
+      rotation: [0, 0, 0, 1],
+      scale: [1, 1, 1]
+    });
+    if (token !== buildToken) {
+      await removeRealSplatObject({ keepObjectUrl: true });
+      return false;
+    }
+
+    setEffectMode('image');
+    applyImageSplatTransform();
+    modelName.textContent = `当前：${label}（真实 Gaussian Splat）`;
+    currentLabel = label;
+    updateStats();
+    if (resetView) {
+      resetCamera();
+    }
+    if (!exportSettings.hideUi) {
+      selectImageSplatObject();
+    }
+    setStatus('Ready');
+    window.dispatchEvent(new Event('particle-studio-ready'));
+    return true;
+  } catch (error) {
+    await removeRealSplatObject({ keepObjectUrl: true });
+    console.error(error);
+    setStatus('Splat failed');
+    modelName.textContent = `当前：${label} 读取失败`;
+    return false;
+  }
+}
+
+function getGaussianSceneFormat(extension) {
+  if (extension === 'splat') {
+    return GaussianSplats3D.SceneFormat.Splat;
+  }
+  if (extension === 'ksplat') {
+    return GaussianSplats3D.SceneFormat.KSplat;
+  }
+  if (extension === 'spz' && GaussianSplats3D.SceneFormat.Spz !== undefined) {
+    return GaussianSplats3D.SceneFormat.Spz;
+  }
+  return GaussianSplats3D.SceneFormat.Ply;
+}
+
+async function removeRealSplatObject(options = {}) {
+  const { keepObjectUrl = false } = options;
+  if (selectedImageSplat && realSplatRoot) {
+    selectedImageSplat = false;
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  if (realSplatRoot) {
+    scene.remove(realSplatRoot);
+    await realSplatRoot.dispose?.();
+    realSplatRoot = null;
+  }
+  if (!keepObjectUrl && realSplatObjectUrl) {
+    URL.revokeObjectURL(realSplatObjectUrl);
+    realSplatObjectUrl = '';
+  }
+}
+
+function createImageSplatReferenceMesh(source, material) {
+  if (source.isPanorama) {
+    const geometry = new THREE.SphereGeometry(source.radius || 16, 128, 64);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'Panorama Splat World';
+    mesh.renderOrder = 0;
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+
+  const mesh = new THREE.Mesh(
+    createImageDepthPlaneGeometry(source),
+    material
+  );
+  mesh.name = 'Image Reference Plane';
+  mesh.position.z = -0.018;
+  return mesh;
+}
+
+function createImageDepthPlaneGeometry(source) {
+  const segmentsX = Math.min(180, Math.max(24, Math.round(source.worldWidth * 42)));
+  const segmentsY = Math.min(130, Math.max(18, Math.round(source.worldHeight * 42)));
+  const geometry = new THREE.PlaneGeometry(source.worldWidth, source.worldHeight, segmentsX, segmentsY);
+  const position = geometry.attributes.position;
+
+  if (!source.depthData) {
+    return geometry;
+  }
+
+  for (let i = 0; i < position.count; i += 1) {
+    const u = THREE.MathUtils.clamp(position.getX(i) / source.worldWidth + 0.5, 0, 1);
+    const v = THREE.MathUtils.clamp(0.5 - position.getY(i) / source.worldHeight, 0, 1);
+    const depth = sampleImageDepth(source, u, v);
+    const edge = sampleImageEdge(source, u, v);
+    const relief = (depth - 0.5) * 0.36 + edge * 0.035;
+    position.setZ(i, relief);
+  }
+
+  position.needsUpdate = true;
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function createImageSplatGeometry(source, count, mist = false) {
+  const safeCount = Math.max(0, Math.round(Number(count) || 0));
+  const positions = new Float32Array(safeCount * 3);
+  const depths = new Float32Array(safeCount);
+  const scatters = new Float32Array(safeCount * 3);
+  const colors = new Float32Array(safeCount * 3);
+  const seeds = new Float32Array(safeCount);
+  const mixes = new Float32Array(safeCount);
+  const alphas = new Float32Array(safeCount);
+  const indexRatios = new Float32Array(safeCount);
+  const color = new THREE.Color();
+  const scatter = new THREE.Vector3();
+  const tangentA = new THREE.Vector3();
+  const tangentB = new THREE.Vector3();
+  const direction = new THREE.Vector3();
+
+  for (let i = 0; i < safeCount; i += 1) {
+    const sample = sampleImageSplatPixel(source, mist);
+    const offset = i * 3;
+    const u = sample.x / Math.max(source.width - 1, 1);
+    const v = sample.y / Math.max(source.height - 1, 1);
+    const depth = (sample.luma - 0.5) * 0.58 + sample.edge * 0.5 + (sample.seed - 0.5) * 0.75;
+    const angle = sample.seed * Math.PI * 2;
+    const radial = Math.sqrt(sample.seed);
+
+    color.setRGB(sample.r / 255, sample.g / 255, sample.b / 255).convertSRGBToLinear();
+
+    if (source.isPanorama) {
+      const theta = (u - 0.5) * Math.PI * 2;
+      const phi = (0.5 - v) * Math.PI;
+      const cosPhi = Math.cos(phi);
+      direction.set(Math.sin(theta) * cosPhi, Math.sin(phi), -Math.cos(theta) * cosPhi).normalize();
+      tangentA.set(Math.cos(theta), 0, Math.sin(theta)).normalize();
+      tangentB.crossVectors(direction, tangentA).normalize();
+      if (tangentB.lengthSq() < 0.00001) {
+        tangentB.set(0, 1, 0);
+      }
+
+      const shellRadius = source.radius || 16;
+      const inward = mist
+        ? 0.42 + Math.random() * 1.25 + sample.edge * 0.42
+        : 0.12 + Math.random() * 0.38 + sample.edge * 0.12;
+      const tangentJitter = (mist ? 0.19 : 0.035) * shellRadius * (0.25 + sample.edge + sample.saturation * 0.45);
+      positions[offset] = direction.x * (shellRadius - inward) +
+        tangentA.x * Math.cos(angle) * tangentJitter +
+        tangentB.x * Math.sin(angle * 1.31) * tangentJitter;
+      positions[offset + 1] = direction.y * (shellRadius - inward) +
+        tangentA.y * Math.cos(angle) * tangentJitter +
+        tangentB.y * Math.sin(angle * 1.31) * tangentJitter;
+      positions[offset + 2] = direction.z * (shellRadius - inward) +
+        tangentA.z * Math.cos(angle) * tangentJitter +
+        tangentB.z * Math.sin(angle * 1.31) * tangentJitter;
+
+      scatter
+        .copy(tangentA)
+        .multiplyScalar(Math.cos(angle) * (0.2 + radial * 0.22))
+        .addScaledVector(tangentB, Math.sin(angle * 1.73) * (0.18 + sample.edge * 0.42))
+        .addScaledVector(direction, mist ? -0.2 - sample.edge * 0.18 : -0.04);
+      if (mist) {
+        scatter.multiplyScalar(1.65 + sample.edge * 0.85);
+      }
+      depths[i] = 0;
+    } else {
+      const centeredX = (u - 0.5) * source.worldWidth;
+      const centeredY = (0.5 - v) * source.worldHeight;
+      const skyDampen = 1 - (sample.sky || 0) * 0.82;
+      const sceneDepth = THREE.MathUtils.lerp(
+        Number.isFinite(sample.depth) ? sample.depth : 0.5,
+        0.12,
+        (sample.sky || 0) * 0.72
+      );
+      const depthRelief = (sceneDepth - 0.5) * 1.58 + (sample.seed - 0.5) * 0.09;
+      const foregroundScale = 1 + (sceneDepth - 0.5) * 0.045;
+      const localBreakup = (mist ? 0.06 : 0.012) * (0.22 + sample.edge * 0.95 + sceneDepth * 0.2) * skyDampen;
+      scatter.set(
+        Math.cos(angle) * (0.08 + radial * 0.2 + sample.edge * 0.18) * skyDampen,
+        (Math.sin(angle * 1.37) * 0.12 + (0.5 - v) * 0.11) * skyDampen,
+        ((sceneDepth - 0.5) * 0.52 + Math.sin(angle) * (0.08 + sample.edge * 0.32)) * skyDampen
+      );
+      if (mist) {
+        scatter.multiplyScalar(1.05 + sample.edge * 0.42 + sceneDepth * 0.18);
+      }
+      positions[offset] = centeredX * foregroundScale + (mist ? (sample.seed - 0.5) * source.worldWidth * localBreakup : 0);
+      positions[offset + 1] = centeredY * (1 + (sceneDepth - 0.5) * 0.025) +
+        (mist ? (Math.random() - 0.5) * source.worldHeight * localBreakup * 0.86 : 0);
+      positions[offset + 2] = (sceneDepth - 0.5) * 0.08;
+      depths[i] = depthRelief * (mist ? 1.12 : 1);
+    }
+
+    scatters[offset] = scatter.x;
+    scatters[offset + 1] = scatter.y;
+    scatters[offset + 2] = scatter.z;
+    colors[offset] = color.r;
+    colors[offset + 1] = color.g;
+    colors[offset + 2] = color.b;
+    seeds[i] = sample.seed;
+    mixes[i] = THREE.MathUtils.clamp(v + sample.luma * 0.18 + sample.seed * 0.08, 0, 1);
+    alphas[i] = source.isPanorama
+      ? sample.alpha * (mist ? 0.18 : 0.46) * (0.42 + sample.edge * 0.45 + sample.saturation * 0.18)
+      : sample.alpha *
+        (mist ? 0.12 : 0.62) *
+        (0.82 + sample.edge * 0.2) *
+        (1 - (sample.sky || 0) * (mist ? 0.9 : 0.52));
+    indexRatios[i] = (i + 0.5) / safeCount;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('aDepth', new THREE.BufferAttribute(depths, 1));
+  geometry.setAttribute('aScatter', new THREE.BufferAttribute(scatters, 3));
+  geometry.setAttribute('aParticleColor', new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+  geometry.setAttribute('aMix', new THREE.BufferAttribute(mixes, 1));
+  geometry.setAttribute('aAlpha', new THREE.BufferAttribute(alphas, 1));
+  geometry.setAttribute('aIndexRatio', new THREE.BufferAttribute(indexRatios, 1));
+  if (safeCount > 0) {
+    geometry.computeBoundingSphere();
+  } else {
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 0);
+  }
+  geometry.userData.capacity = safeCount;
+  return geometry;
+}
+
+function sampleImageSplatPixel(source, mist = false) {
+  const maxAttempts = mist ? 12 : 18;
+  let fallback = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const x = Math.floor(Math.random() * source.width);
+    const y = Math.floor(Math.random() * source.height);
+    const sample = readImageSplatPixel(source, x, y);
+    if (!sample || sample.alpha <= 0.01) {
+      continue;
+    }
+    fallback = sample;
+    const weight = THREE.MathUtils.clamp(
+      sample.alpha * (
+        source.isPanorama
+          ? 0.12 + sample.saturation * 0.34 + sample.luma * 0.18 + sample.edge * 0.78
+          : 0.1 +
+            sample.saturation * 0.22 +
+            sample.luma * 0.1 +
+            sample.edge * 0.95 +
+            (sample.depth || 0.5) * 0.2 -
+            (sample.sky || 0) * 0.36
+      ),
+      0.02,
+      1
+    );
+    if (Math.random() < (mist ? Math.sqrt(weight) : weight)) {
+      return sample;
+    }
+  }
+
+  return fallback || readImageSplatPixel(source, Math.floor(source.width * 0.5), Math.floor(source.height * 0.5));
+}
+
+function readImageSplatPixel(source, x, y) {
+  const safeX = THREE.MathUtils.clamp(x, 0, source.width - 1);
+  const safeY = THREE.MathUtils.clamp(y, 0, source.height - 1);
+  const index = (safeY * source.width + safeX) * 4;
+  const data = source.data;
+  const r = data[index];
+  const g = data[index + 1];
+  const b = data[index + 2];
+  const alpha = data[index + 3] / 255;
+  const maxChannel = Math.max(r, g, b);
+  const minChannel = Math.min(r, g, b);
+  const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
+  const mapIndex = safeY * source.width + safeX;
+  const edge = source.edgeData?.[mapIndex] ?? computeFallbackImageEdge(source, safeX, safeY, r, g, b);
+  const depth = source.depthData?.[mapIndex] ?? 0.5;
+  const sky = source.skyData?.[mapIndex] ?? 0;
+
+  return {
+    x: safeX,
+    y: safeY,
+    r,
+    g,
+    b,
+    alpha,
+    luma,
+    saturation,
+    edge,
+    depth,
+    sky,
+    seed: Math.random()
+  };
+}
+
+function computeFallbackImageEdge(source, safeX, safeY, r, g, b) {
+  const x2 = Math.min(source.width - 1, safeX + 1);
+  const y2 = Math.min(source.height - 1, safeY + 1);
+  const data = source.data;
+  const right = ((safeY * source.width + x2) * 4);
+  const down = ((y2 * source.width + safeX) * 4);
+  return THREE.MathUtils.clamp(
+    (Math.abs(r - data[right]) + Math.abs(g - data[right + 1]) + Math.abs(b - data[right + 2]) +
+      Math.abs(r - data[down]) + Math.abs(g - data[down + 1]) + Math.abs(b - data[down + 2])) / 420,
+    0,
+    1
+  );
+}
+
+function sampleImageDepth(source, u, v) {
+  if (!source.depthData) {
+    return 0.5;
+  }
+  const x = THREE.MathUtils.clamp(Math.round(u * (source.width - 1)), 0, source.width - 1);
+  const y = THREE.MathUtils.clamp(Math.round(v * (source.height - 1)), 0, source.height - 1);
+  return source.depthData[y * source.width + x] ?? 0.5;
+}
+
+function sampleImageEdge(source, u, v) {
+  if (!source.edgeData) {
+    return 0;
+  }
+  const x = THREE.MathUtils.clamp(Math.round(u * (source.width - 1)), 0, source.width - 1);
+  const y = THREE.MathUtils.clamp(Math.round(v * (source.height - 1)), 0, source.height - 1);
+  return source.edgeData[y * source.width + x] ?? 0;
+}
+
+function removeImageSplatObject(options = {}) {
+  const { keepTexture = false } = options;
+  if (selectedImageSplat) {
+    selectedImageSplat = false;
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  if (imageSplatRoot) {
+    scene.remove(imageSplatRoot);
+    imageSplatRoot.traverse((node) => {
+      if (node.isMesh || node.isPoints) {
+        node.geometry?.dispose?.();
+        if (node.material !== imageSplatMaterial &&
+          node.material !== imageSplatGlowMaterial &&
+          node.material !== imageSplatMistMaterial) {
+          disposeDisplayMaterial(node.material);
+        }
+      }
+    });
+  }
+  imageSplatRoot = null;
+  imageSplatPlane = null;
+  imageSplatParticles = null;
+  imageSplatMistParticles = null;
+  imageSplatGlowParticles = null;
+  if (!keepTexture && imageSplatTexture) {
+    imageSplatTexture.dispose();
+    imageSplatTexture = null;
+  }
+}
+
+function createParticleGeometry(root, count) {
+  const targetCount = Math.max(1, Math.round(Number(count) || 1));
+  const cleanupStrength = THREE.MathUtils.clamp(Number(state.sampleCleanup ?? 0), 0, 1);
+  const candidateCount = getParticleCandidateCount(targetCount, cleanupStrength);
+  const { meshes, box, sampleBox } = collectSampleMeshes(root, { cleanupStrength });
+  if (!meshes.length || box.isEmpty()) {
+    throw new Error('No mesh geometry found in model.');
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const scale = 4 / Math.max(size.x, size.y, size.z, 0.0001);
+  const scaledMinY = (box.min.y - center.y) * scale;
+  const scaledMaxY = (box.max.y - center.y) * scale;
+  const scaledHeight = Math.max(scaledMaxY - scaledMinY, 0.0001);
+  const radiusScale = Math.max(size.x, size.z) * scale * 0.5 || 1;
+  const totalArea = meshes.reduce((sum, mesh) => sum + mesh.area, 0);
+  let cumulative = 0;
+
+  const weightedMeshes = meshes.map((mesh) => {
+    cumulative += mesh.area / totalArea;
+    return { ...mesh, cumulative };
+  });
+
+  const candidatePositions = new Float32Array(candidateCount * 3);
+  const candidateFlowStarts = new Float32Array(candidateCount * 3);
+  const candidateNormals = new Float32Array(candidateCount * 3);
+  const candidateOffsets = new Float32Array(candidateCount * 3);
+  const candidateParticleColors = new Float32Array(candidateCount * 3);
+  const candidateSeeds = new Float32Array(candidateCount);
+  const candidateMixes = new Float32Array(candidateCount);
+  const candidateTextureWeights = new Float32Array(candidateCount);
+  const candidateGrowthOrders = new Float32Array(candidateCount);
+  const candidateFilaments = new Float32Array(candidateCount);
+  const candidateCutoutWeights = new Float32Array(candidateCount);
+  const samplePosition = new THREE.Vector3();
+  const sampleNormal = new THREE.Vector3();
+  const sampleColor = new THREE.Color();
+  const sampleUV = createSamplerUvTarget();
+  const particleColor = new THREE.Color();
+  const randomDirection = new THREE.Vector3();
+  const flowStart = new THREE.Vector3();
+
+  for (let i = 0; i < candidateCount; i += 1) {
+    const { hasOriginalColor, hasCutoutAlpha } = sampleRenderableSurface(
+      weightedMeshes,
+      sampleBox,
+      samplePosition,
+      sampleNormal,
+      sampleColor,
+      sampleUV,
+      particleColor
+    );
+
+    samplePosition.sub(center).multiplyScalar(scale);
+    sampleNormal.normalize();
+    if (sampleNormal.lengthSq() === 0) {
+      sampleNormal.set(0, 1, 0);
+    }
+    const seed = Math.random();
+    const verticalOrder = THREE.MathUtils.clamp((samplePosition.y - scaledMinY) / scaledHeight, 0, 1);
+    const radialLength = Math.hypot(samplePosition.x, samplePosition.z);
+    const radialOrder = THREE.MathUtils.clamp(radialLength / Math.max(radiusScale, 0.0001), 0, 1);
+    const currentBand = Math.sin(samplePosition.x * 2.1 + samplePosition.z * 3.4 + seed * 6.28318) * 0.5 + 0.5;
+    const radialDirection = new THREE.Vector3(samplePosition.x, 0, samplePosition.z);
+    if (radialDirection.lengthSq() < 0.0001) {
+      radialDirection.set(Math.cos(seed * 6.28318), 0, Math.sin(seed * 6.28318));
+    } else {
+      radialDirection.normalize();
+    }
+    const upstreamDistance = 0.18 + radialOrder * 0.52 + (1 - verticalOrder) * 0.12 + currentBand * 0.16;
+    const upstreamDirection = radialDirection
+      .clone()
+      .multiplyScalar(0.58 + radialOrder * 0.4)
+      .add(new THREE.Vector3(0, 0.74 + verticalOrder * 0.28, 0))
+      .normalize();
+    flowStart.set(
+      samplePosition.x,
+      samplePosition.y,
+      samplePosition.z
+    );
+    flowStart.addScaledVector(upstreamDirection, -upstreamDistance);
+    flowStart.y = Math.max(flowStart.y, scaledMinY - 0.18);
+
+    randomDirection
+      .set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+      .normalize()
+      .multiplyScalar(0.55 + Math.random() * 1.25);
+
+    const offset = i * 3;
+    candidatePositions[offset] = samplePosition.x;
+    candidatePositions[offset + 1] = samplePosition.y;
+    candidatePositions[offset + 2] = samplePosition.z;
+    candidateFlowStarts[offset] = flowStart.x;
+    candidateFlowStarts[offset + 1] = flowStart.y;
+    candidateFlowStarts[offset + 2] = flowStart.z;
+    candidateNormals[offset] = sampleNormal.x;
+    candidateNormals[offset + 1] = sampleNormal.y;
+    candidateNormals[offset + 2] = sampleNormal.z;
+    candidateOffsets[offset] = randomDirection.x;
+    candidateOffsets[offset + 1] = randomDirection.y;
+    candidateOffsets[offset + 2] = randomDirection.z;
+    candidateParticleColors[offset] = particleColor.r;
+    candidateParticleColors[offset + 1] = particleColor.g;
+    candidateParticleColors[offset + 2] = particleColor.b;
+    candidateSeeds[i] = seed;
+    candidateMixes[i] = THREE.MathUtils.clamp(verticalOrder + (seed - 0.5) * 0.18, 0, 1);
+    candidateTextureWeights[i] = hasOriginalColor ? 1 : 0;
+    candidateCutoutWeights[i] = hasCutoutAlpha ? 1 : 0;
+    candidateFilaments[i] = THREE.MathUtils.clamp(
+      radialOrder * 0.58 + currentBand * 0.22 + (hasCutoutAlpha ? 0.2 : 0) + seed * 0.18,
+      0,
+      1
+    );
+    const growthOrder = THREE.MathUtils.clamp(
+      verticalOrder * 0.66 + radialOrder * 0.16 + currentBand * 0.1 + seed * 0.08 - 0.05,
+      0,
+      1
+    );
+    candidateGrowthOrders[i] = growthOrder;
+  }
+
+  meshes.forEach(({ geometry }) => geometry.dispose());
+
+  const selectedIndices = selectDenseParticleIndices(
+    candidatePositions,
+    candidateCutoutWeights,
+    candidateCount,
+    targetCount,
+    cleanupStrength
+  );
+  const finalCount = selectedIndices.length;
+  const positions = new Float32Array(finalCount * 3);
+  const flowStarts = new Float32Array(finalCount * 3);
+  const normals = new Float32Array(finalCount * 3);
+  const offsets = new Float32Array(finalCount * 3);
+  const particleColors = new Float32Array(finalCount * 3);
+  const seeds = new Float32Array(finalCount);
+  const mixes = new Float32Array(finalCount);
+  const textureWeights = new Float32Array(finalCount);
+  const growthOrders = new Float32Array(finalCount);
+  const filaments = new Float32Array(finalCount);
+
+  selectedIndices.forEach((sourceIndex, outputIndex) => {
+    const sourceOffset = sourceIndex * 3;
+    const outputOffset = outputIndex * 3;
+    positions[outputOffset] = candidatePositions[sourceOffset];
+    positions[outputOffset + 1] = candidatePositions[sourceOffset + 1];
+    positions[outputOffset + 2] = candidatePositions[sourceOffset + 2];
+    flowStarts[outputOffset] = candidateFlowStarts[sourceOffset];
+    flowStarts[outputOffset + 1] = candidateFlowStarts[sourceOffset + 1];
+    flowStarts[outputOffset + 2] = candidateFlowStarts[sourceOffset + 2];
+    normals[outputOffset] = candidateNormals[sourceOffset];
+    normals[outputOffset + 1] = candidateNormals[sourceOffset + 1];
+    normals[outputOffset + 2] = candidateNormals[sourceOffset + 2];
+    offsets[outputOffset] = candidateOffsets[sourceOffset];
+    offsets[outputOffset + 1] = candidateOffsets[sourceOffset + 1];
+    offsets[outputOffset + 2] = candidateOffsets[sourceOffset + 2];
+    particleColors[outputOffset] = candidateParticleColors[sourceOffset];
+    particleColors[outputOffset + 1] = candidateParticleColors[sourceOffset + 1];
+    particleColors[outputOffset + 2] = candidateParticleColors[sourceOffset + 2];
+    seeds[outputIndex] = candidateSeeds[sourceIndex];
+    mixes[outputIndex] = candidateMixes[sourceIndex];
+    textureWeights[outputIndex] = candidateTextureWeights[sourceIndex];
+    growthOrders[outputIndex] = candidateGrowthOrders[sourceIndex];
+    filaments[outputIndex] = candidateFilaments[sourceIndex];
+  });
+
+  const morphTarget = createMorphTargetAttributes(
+    morphTargetSource,
+    finalCount,
+    positions,
+    particleColors,
+    textureWeights
+  );
+
+  const particleGeometry = new THREE.BufferGeometry();
+  particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  particleGeometry.setAttribute('aFlowStart', new THREE.BufferAttribute(flowStarts, 3));
+  particleGeometry.setAttribute('aNormal', new THREE.BufferAttribute(normals, 3));
+  particleGeometry.setAttribute('aOffset', new THREE.BufferAttribute(offsets, 3));
+  particleGeometry.setAttribute('aParticleColor', new THREE.BufferAttribute(particleColors, 3));
+  particleGeometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+  particleGeometry.setAttribute('aMix', new THREE.BufferAttribute(mixes, 1));
+  particleGeometry.setAttribute('aTextureWeight', new THREE.BufferAttribute(textureWeights, 1));
+  particleGeometry.setAttribute('aGrowthOrder', new THREE.BufferAttribute(growthOrders, 1));
+  particleGeometry.setAttribute('aFilament', new THREE.BufferAttribute(filaments, 1));
+  particleGeometry.setAttribute('aMorphTarget', new THREE.BufferAttribute(morphTarget.positions, 3));
+  particleGeometry.setAttribute('aMorphColor', new THREE.BufferAttribute(morphTarget.colors, 3));
+  particleGeometry.setAttribute('aMorphTextureWeight', new THREE.BufferAttribute(morphTarget.textureWeights, 1));
+  particleGeometry.userData.capacity = finalCount;
+  particleGeometry.userData.hasMorphTarget = morphTarget.ready;
+  particleGeometry.computeBoundingSphere();
+  return particleGeometry;
+}
+
+function createMorphTargetAttributes(root, count, fallbackPositions, fallbackColors, fallbackTextureWeights) {
+  const safeCount = Math.max(0, Math.round(Number(count) || 0));
+  const positions = new Float32Array(safeCount * 3);
+  const colors = new Float32Array(safeCount * 3);
+  const textureWeights = new Float32Array(safeCount);
+
+  if (!root || safeCount <= 0) {
+    positions.set(fallbackPositions.subarray(0, safeCount * 3));
+    colors.set(fallbackColors.subarray(0, safeCount * 3));
+    textureWeights.set(fallbackTextureWeights.subarray(0, safeCount));
+    return { positions, colors, textureWeights, ready: false };
+  }
+
+  try {
+    const target = createNormalizedModelParticleArrays(root, safeCount);
+    return { ...target, ready: true };
+  } catch (error) {
+    console.warn('Could not sample morph target model.', error);
+    positions.set(fallbackPositions.subarray(0, safeCount * 3));
+    colors.set(fallbackColors.subarray(0, safeCount * 3));
+    textureWeights.set(fallbackTextureWeights.subarray(0, safeCount));
+    return { positions, colors, textureWeights, ready: false };
+  }
+}
+
+function createNormalizedModelParticleArrays(root, count) {
+  const safeCount = Math.max(0, Math.round(Number(count) || 0));
+  const positions = new Float32Array(safeCount * 3);
+  const colors = new Float32Array(safeCount * 3);
+  const textureWeights = new Float32Array(safeCount);
+
+  if (safeCount <= 0) {
+    return { positions, colors, textureWeights };
+  }
+
+  const { meshes, box, sampleBox } = collectSampleMeshes(root);
+  if (!meshes.length || box.isEmpty()) {
+    throw new Error('No mesh geometry found in morph target model.');
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const scale = 4 / Math.max(size.x, size.y, size.z, 0.0001);
+  const totalArea = meshes.reduce((sum, mesh) => sum + mesh.area, 0);
+  let cumulative = 0;
+  const weightedMeshes = meshes.map((mesh) => {
+    cumulative += mesh.area / totalArea;
+    return { ...mesh, cumulative };
+  });
+  const samplePosition = new THREE.Vector3();
+  const sampleNormal = new THREE.Vector3();
+  const sampleColor = new THREE.Color();
+  const sampleUV = createSamplerUvTarget();
+  const particleColor = new THREE.Color();
+
+  for (let index = 0; index < safeCount; index += 1) {
+    const { hasOriginalColor } = sampleRenderableSurface(
+      weightedMeshes,
+      sampleBox,
+      samplePosition,
+      sampleNormal,
+      sampleColor,
+      sampleUV,
+      particleColor
+    );
+    samplePosition.sub(center).multiplyScalar(scale);
+    const offset = index * 3;
+    positions[offset] = samplePosition.x;
+    positions[offset + 1] = samplePosition.y;
+    positions[offset + 2] = samplePosition.z;
+    colors[offset] = particleColor.r;
+    colors[offset + 1] = particleColor.g;
+    colors[offset + 2] = particleColor.b;
+    textureWeights[index] = hasOriginalColor ? 1 : 0;
+  }
+
+  meshes.forEach(({ geometry }) => geometry.dispose());
+  return { positions, colors, textureWeights };
+}
+
+function createEmissionGeometry(root, count) {
+  const safeCount = Math.max(MIN_PARTICLE_COUNT, Math.round(Number(count) || MIN_PARTICLE_COUNT));
+  const { meshes, box, sampleBox } = collectSampleMeshes(root);
+  if (!meshes.length || box.isEmpty()) {
+    throw new Error('No mesh geometry found in model.');
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const scale = 4 / Math.max(size.x, size.y, size.z, 0.0001);
+  const totalArea = meshes.reduce((sum, mesh) => sum + mesh.area, 0);
+  let cumulative = 0;
+  const weightedMeshes = meshes.map((mesh) => {
+    cumulative += mesh.area / totalArea;
+    return { ...mesh, cumulative };
+  });
+
+  const positions = new Float32Array(safeCount * 3);
+  const normals = new Float32Array(safeCount * 3);
+  const offsets = new Float32Array(safeCount * 3);
+  const particleColors = new Float32Array(safeCount * 3);
+  const seeds = new Float32Array(safeCount);
+  const lifeOffsets = new Float32Array(safeCount);
+  const indexRatios = new Float32Array(safeCount);
+  const textureWeights = new Float32Array(safeCount);
+  const samplePosition = new THREE.Vector3();
+  const sampleNormal = new THREE.Vector3();
+  const sampleColor = new THREE.Color();
+  const sampleUV = createSamplerUvTarget();
+  const particleColor = new THREE.Color();
+  const randomDirection = new THREE.Vector3();
+
+  for (let i = 0; i < safeCount; i += 1) {
+    const { hasOriginalColor } = sampleRenderableSurface(
+      weightedMeshes,
+      sampleBox,
+      samplePosition,
+      sampleNormal,
+      sampleColor,
+      sampleUV,
+      particleColor
+    );
+
+    samplePosition.sub(center).multiplyScalar(scale);
+    sampleNormal.normalize();
+    if (sampleNormal.lengthSq() === 0) {
+      sampleNormal.set(0, 1, 0);
+    }
+
+    randomDirection
+      .set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+      .normalize();
+    if (randomDirection.lengthSq() === 0) {
+      randomDirection.set(0, 1, 0);
+    }
+
+    const offset = i * 3;
+    positions[offset] = samplePosition.x;
+    positions[offset + 1] = samplePosition.y;
+    positions[offset + 2] = samplePosition.z;
+    normals[offset] = sampleNormal.x;
+    normals[offset + 1] = sampleNormal.y;
+    normals[offset + 2] = sampleNormal.z;
+    offsets[offset] = randomDirection.x;
+    offsets[offset + 1] = randomDirection.y;
+    offsets[offset + 2] = randomDirection.z;
+    particleColors[offset] = particleColor.r;
+    particleColors[offset + 1] = particleColor.g;
+    particleColors[offset + 2] = particleColor.b;
+    seeds[i] = Math.random();
+    lifeOffsets[i] = Math.random();
+    indexRatios[i] = (i + 0.5) / safeCount;
+    textureWeights[i] = hasOriginalColor ? 1 : 0;
+  }
+
+  meshes.forEach(({ geometry }) => geometry.dispose());
+
+  const emissionGeometry = new THREE.BufferGeometry();
+  emissionGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  emissionGeometry.setAttribute('aNormal', new THREE.BufferAttribute(normals, 3));
+  emissionGeometry.setAttribute('aOffset', new THREE.BufferAttribute(offsets, 3));
+  emissionGeometry.setAttribute('aParticleColor', new THREE.BufferAttribute(particleColors, 3));
+  emissionGeometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+  emissionGeometry.setAttribute('aLifeOffset', new THREE.BufferAttribute(lifeOffsets, 1));
+  emissionGeometry.setAttribute('aIndexRatio', new THREE.BufferAttribute(indexRatios, 1));
+  emissionGeometry.setAttribute('aTextureWeight', new THREE.BufferAttribute(textureWeights, 1));
+  emissionGeometry.userData.capacity = safeCount;
+  emissionGeometry.computeBoundingSphere();
+  return emissionGeometry;
+}
+
+function computeModelNormalization(root) {
+  root.updateWorldMatrix(true, true);
+  const box = new THREE.Box3().setFromObject(root);
+  if (box.isEmpty()) {
+    return {
+      center: new THREE.Vector3(),
+      scale: 1
+    };
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  return {
+    center,
+    scale: 4 / Math.max(size.x, size.y, size.z, 0.0001)
+  };
+}
+
+function rebuildVisibleModel(source) {
+  removeVisibleModel();
+  const { center, scale } = computeModelNormalization(source);
+  const wrapper = new THREE.Group();
+  wrapper.name = 'Visible Emission Model';
+  wrapper.renderOrder = 8;
+  wrapper.scale.setScalar(scale);
+  wrapper.position.copy(center).multiplyScalar(-scale);
+
+  const clone = source.clone(true);
+  clone.traverse((node) => {
+    if (!node.isMesh || node.userData.generatedSolidCap) {
+      return;
+    }
+    const sourceMaterial = node.material;
+    node.material = cloneDisplayMaterial(sourceMaterial);
+    node.frustumCulled = false;
+    node.renderOrder = 8;
+    addSolidCapsToMesh(node, sourceMaterial);
+  });
+
+  wrapper.add(clone);
+  visibleModelRoot = wrapper;
+  scene.add(visibleModelRoot);
+  updateVisibleModelMaterials();
+}
+
+function addSolidCapsToMesh(mesh, sourceMaterial) {
+  const capGeometry = createBoundaryCapGeometry(mesh.geometry);
+  if (!capGeometry) {
+    return;
+  }
+
+  const capMaterial = cloneDisplayMaterial(Array.isArray(sourceMaterial) ? sourceMaterial[0] : sourceMaterial);
+  capMaterial.userData.isSolidCap = true;
+  const capMesh = new THREE.Mesh(capGeometry, capMaterial);
+  capMesh.name = `${mesh.name || 'Mesh'} Solid Caps`;
+  capMesh.renderOrder = 9;
+  capMesh.frustumCulled = false;
+  capMesh.userData.generatedSolidCap = true;
+  mesh.add(capMesh);
+}
+
+function removeVisibleModel() {
+  if (!visibleModelRoot) {
+    return;
+  }
+
+  visibleModelRoot.traverse((node) => {
+    if (!node.isMesh) {
+      return;
+    }
+    if (node.userData.generatedSolidCap && node.geometry?.dispose) {
+      node.geometry.dispose();
+    }
+    disposeDisplayMaterial(node.material);
+  });
+  scene.remove(visibleModelRoot);
+  visibleModelRoot = null;
+}
+
+function cloneDisplayMaterial(material) {
+  if (Array.isArray(material)) {
+    return material.map((item) => cloneDisplayMaterial(item));
+  }
+
+  const source = material || new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const baseColor = source.color ? source.color.clone() : new THREE.Color(1, 1, 1);
+  const displayMaterial = new THREE.MeshStandardMaterial({
+    color: baseColor,
+    map: source.map || null,
+    normalMap: source.normalMap || null,
+    roughnessMap: source.roughnessMap || null,
+    metalnessMap: source.metalnessMap || null,
+    alphaMap: null,
+    emissiveMap: source.emissiveMap || null,
+    side: THREE.FrontSide,
+    vertexColors: Boolean(source.vertexColors),
+    transparent: false,
+    opacity: 1,
+    roughness: state.modelRoughness,
+    metalness: Math.min(source.metalness ?? 0, 0.25),
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
+    alphaTest: 0
+  });
+  displayMaterial.userData.baseColor = baseColor;
+  displayMaterial.userData.baseAlphaTest = Number(source.alphaTest) > 0.001 ? Number(source.alphaTest) : 0;
+  displayMaterial.userData.baseMap = source.map || null;
+  displayMaterial.userData.baseMetalness = source.metalness ?? 0;
+  applyBreakShader(displayMaterial);
+  return displayMaterial;
+}
+
+function createBoundaryCapGeometry(geometry) {
+  if (!geometry?.attributes?.position || geometry.attributes.position.count < 12) {
+    return null;
+  }
+
+  if (geometry.attributes.position.count > 120000) {
+    return null;
+  }
+
+  let merged = null;
+  try {
+    merged = mergeVertices(geometry.clone(), 1e-4);
+  } catch (error) {
+    console.warn('Could not merge geometry for solid caps.', error);
+    return null;
+  }
+
+  const position = merged.attributes.position;
+  const index = merged.index;
+  const indices = index ? index.array : [...Array(position.count).keys()];
+  const edgeMap = new Map();
+
+  for (let i = 0; i < indices.length; i += 3) {
+    registerBoundaryEdge(edgeMap, indices[i], indices[i + 1]);
+    registerBoundaryEdge(edgeMap, indices[i + 1], indices[i + 2]);
+    registerBoundaryEdge(edgeMap, indices[i + 2], indices[i]);
+  }
+
+  const boundaryEdges = [...edgeMap.values()]
+    .filter((edge) => edge.count === 1)
+    .map((edge) => [edge.a, edge.b]);
+
+  if (!boundaryEdges.length || boundaryEdges.length > 24000) {
+    merged.dispose();
+    return null;
+  }
+
+  const loops = buildBoundaryLoops(boundaryEdges);
+  const capPositions = [];
+  const capNormals = [];
+  const capUvs = [];
+  const point = new THREE.Vector3();
+  const loopPoints = [];
+  const capNormal = new THREE.Vector3();
+  const axisX = new THREE.Vector3();
+  const axisY = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  const projected = [];
+  const bbox = new THREE.Box3().setFromBufferAttribute(position);
+  const bboxSize = bbox.getSize(new THREE.Vector3());
+  const minArea = Math.max(bboxSize.lengthSq() * 0.00002, 1e-8);
+  const maxCapRadius = Math.max(bboxSize.length() * 0.32, 0.001);
+
+  loops.forEach((loop) => {
+    if (loop.length < 8 || loop.length > 96) {
+      return;
+    }
+
+    loopPoints.length = 0;
+    loop.forEach((vertexIndex) => {
+      loopPoints.push(new THREE.Vector3().fromBufferAttribute(position, vertexIndex));
+    });
+
+    computeLoopNormal(loopPoints, capNormal);
+    if (capNormal.lengthSq() < 1e-8) {
+      return;
+    }
+    capNormal.normalize();
+
+    center.set(0, 0, 0);
+    loopPoints.forEach((item) => center.add(item));
+    center.divideScalar(loopPoints.length);
+
+    axisX.subVectors(loopPoints[0], center);
+    axisX.addScaledVector(capNormal, -axisX.dot(capNormal));
+    if (axisX.lengthSq() < 1e-8) {
+      axisX.crossVectors(capNormal, new THREE.Vector3(0, 1, 0));
+      if (axisX.lengthSq() < 1e-8) {
+        axisX.crossVectors(capNormal, new THREE.Vector3(1, 0, 0));
+      }
+    }
+    axisX.normalize();
+    axisY.crossVectors(capNormal, axisX).normalize();
+
+    projected.length = 0;
+    let maxPlaneDistance = 0;
+    let maxRadius = 0;
+    loopPoints.forEach((item) => {
+      point.subVectors(item, center);
+      projected.push(new THREE.Vector2(point.dot(axisX), point.dot(axisY)));
+      maxPlaneDistance = Math.max(maxPlaneDistance, Math.abs(point.dot(capNormal)));
+      maxRadius = Math.max(maxRadius, point.length());
+    });
+
+    const area = Math.abs(THREE.ShapeUtils.area(projected));
+    if (area < minArea) {
+      return;
+    }
+
+    const perimeter = projectedPerimeter(projected);
+    const compactness = perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0;
+    if (
+      compactness < 0.24 ||
+      maxRadius > maxCapRadius ||
+      maxPlaneDistance > Math.max(maxRadius * 0.08, 0.002) ||
+      !isSimplePolygon(projected) ||
+      !isConvexPolygon(projected)
+    ) {
+      return;
+    }
+
+    appendFanCap(capPositions, capNormals, capUvs, loopPoints, projected, center, capNormal);
+  });
+
+  merged.dispose();
+
+  if (!capPositions.length) {
+    return null;
+  }
+
+  const capGeometry = new THREE.BufferGeometry();
+  capGeometry.setAttribute('position', new THREE.Float32BufferAttribute(capPositions, 3));
+  capGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(capNormals, 3));
+  capGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(capUvs, 2));
+  capGeometry.computeBoundingSphere();
+  return capGeometry;
+}
+
+function projectedPerimeter(points) {
+  let perimeter = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    perimeter += points[i].distanceTo(points[(i + 1) % points.length]);
+  }
+  return perimeter;
+}
+
+function isSimplePolygon(points) {
+  for (let i = 0; i < points.length; i += 1) {
+    const a1 = points[i];
+    const a2 = points[(i + 1) % points.length];
+    for (let j = i + 1; j < points.length; j += 1) {
+      if (Math.abs(i - j) <= 1 || (i === 0 && j === points.length - 1)) {
+        continue;
+      }
+      const b1 = points[j];
+      const b2 = points[(j + 1) % points.length];
+      if (segmentsIntersect(a1, a2, b1, b2)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function isConvexPolygon(points) {
+  let sign = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const cross = orientation2d(points[i], points[(i + 1) % points.length], points[(i + 2) % points.length]);
+    if (Math.abs(cross) < 1e-7) {
+      continue;
+    }
+    const nextSign = Math.sign(cross);
+    if (sign && nextSign !== sign) {
+      return false;
+    }
+    sign = nextSign;
+  }
+  return true;
+}
+
+function segmentsIntersect(a1, a2, b1, b2) {
+  const d1 = orientation2d(a1, a2, b1);
+  const d2 = orientation2d(a1, a2, b2);
+  const d3 = orientation2d(b1, b2, a1);
+  const d4 = orientation2d(b1, b2, a2);
+  return d1 * d2 < -1e-10 && d3 * d4 < -1e-10;
+}
+
+function orientation2d(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function appendFanCap(capPositions, capNormals, capUvs, loopPoints, projected, center, capNormal) {
+  if (loopPoints.length < 3) {
+    return;
+  }
+
+  const centerUv = new THREE.Vector2(0, 0);
+  const clockwise = THREE.ShapeUtils.area(projected) < 0;
+  for (let i = 0; i < loopPoints.length; i += 1) {
+    const next = (i + 1) % loopPoints.length;
+    const a = clockwise ? loopPoints[next] : loopPoints[i];
+    const b = clockwise ? loopPoints[i] : loopPoints[next];
+    const uvA = clockwise ? projected[next] : projected[i];
+    const uvB = clockwise ? projected[i] : projected[next];
+    pushCapTriangle(capPositions, capNormals, capUvs, center, a, b, centerUv, uvA, uvB, capNormal);
+  }
+}
+
+function pushCapTriangle(capPositions, capNormals, capUvs, a, b, c, uvA, uvB, uvC, normal) {
+  [a, b, c].forEach((point) => {
+    capPositions.push(point.x, point.y, point.z);
+    capNormals.push(normal.x, normal.y, normal.z);
+  });
+  [uvA, uvB, uvC].forEach((uv) => {
+    capUvs.push(uv.x, uv.y);
+  });
+}
+
+function registerBoundaryEdge(edgeMap, a, b) {
+  const min = Math.min(a, b);
+  const max = Math.max(a, b);
+  const key = `${min}:${max}`;
+  const edge = edgeMap.get(key);
+  if (edge) {
+    edge.count += 1;
+    return;
+  }
+
+  edgeMap.set(key, { a, b, count: 1 });
+}
+
+function buildBoundaryLoops(edges) {
+  const unused = new Set(edges.map((_, index) => index));
+  const adjacency = new Map();
+  edges.forEach(([a, b], index) => {
+    if (!adjacency.has(a)) {
+      adjacency.set(a, []);
+    }
+    if (!adjacency.has(b)) {
+      adjacency.set(b, []);
+    }
+    adjacency.get(a).push(index);
+    adjacency.get(b).push(index);
+  });
+  const loops = [];
+
+  while (unused.size) {
+    const startIndex = unused.values().next().value;
+    const startEdge = edges[startIndex];
+    unused.delete(startIndex);
+    const loop = [startEdge[0], startEdge[1]];
+    let previous = startEdge[0];
+    let current = startEdge[1];
+
+    let closed = false;
+    for (let guard = 0; guard < edges.length; guard += 1) {
+      if (current === loop[0]) {
+        loop.pop();
+        closed = true;
+        break;
+      }
+
+      const candidateIndex = (adjacency.get(current) || []).find((index) => unused.has(index));
+      if (candidateIndex === undefined) {
+        break;
+      }
+
+      unused.delete(candidateIndex);
+      const [a, b] = edges[candidateIndex];
+      const next = a === current ? b : a;
+      if (next === previous) {
+        break;
+      }
+
+      loop.push(next);
+      previous = current;
+      current = next;
+    }
+
+    if (closed && loop.length >= 3) {
+      loops.push(loop);
+    }
+  }
+
+  return loops;
+}
+
+function computeLoopNormal(points, target) {
+  target.set(0, 0, 0);
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    target.x += (current.y - next.y) * (current.z + next.z);
+    target.y += (current.z - next.z) * (current.x + next.x);
+    target.z += (current.x - next.x) * (current.y + next.y);
+  }
+  return target;
+}
+
+function applyBreakShader(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uBreakAmount = modelBreakUniforms.uBreakAmount;
+    shader.uniforms.uBreakProgress = modelBreakUniforms.uBreakProgress;
+    shader.uniforms.uBreakRadius = modelBreakUniforms.uBreakRadius;
+    shader.uniforms.uBreakFeather = modelBreakUniforms.uBreakFeather;
+    shader.uniforms.uBreakCenter = modelBreakUniforms.uBreakCenter;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying vec3 vBreakWorldPosition;`
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+vBreakWorldPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform float uBreakAmount;
+uniform float uBreakProgress;
+uniform float uBreakRadius;
+uniform float uBreakFeather;
+uniform vec3 uBreakCenter;
+varying vec3 vBreakWorldPosition;
+
+float breakHash(vec3 p) {
+  return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}`
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+diffuseColor.a = opacity;`
+      )
+      .replace(
+        '#include <clipping_planes_fragment>',
+        `#include <clipping_planes_fragment>
+float breakDistance = length(vBreakWorldPosition - uBreakCenter);
+float breakArea = 1.0 - smoothstep(uBreakRadius, uBreakRadius + max(uBreakFeather, 0.001), breakDistance);
+float breakNoise = breakHash(floor(vBreakWorldPosition * 18.0) + vec3(breakHash(vBreakWorldPosition * 3.0)));
+float breakCut = clamp(uBreakAmount, 0.0, 1.0) * breakArea *
+  smoothstep(breakNoise - 0.18, breakNoise + 0.18, clamp(uBreakProgress, 0.0, 1.0));
+if (breakCut > 0.52) {
+  discard;
+}`
+      );
+  };
+}
+
+function disposeDisplayMaterial(material) {
+  const materials = Array.isArray(material) ? material : [material];
+  materials.forEach((item) => {
+    if (item?.dispose) {
+      item.dispose();
+    }
+  });
+}
+
+function updateVisibleModelMaterials() {
+  if (!visibleModelRoot) {
+    return;
+  }
+
+  const whiteColor = new THREE.Color(0xf1f3f1);
+  const whiteAmount = THREE.MathUtils.clamp(state.modelWhite, 0, 1);
+  const roughness = THREE.MathUtils.clamp(state.modelRoughness, 0, 1);
+  visibleModelRoot.traverse((node) => {
+    if (!node.isMesh) {
+      return;
+    }
+
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    materials.forEach((material) => {
+      if (!material) {
+        return;
+      }
+      const baseColor = material.userData.baseColor || whiteColor;
+      material.color.copy(baseColor).lerp(whiteColor, whiteAmount);
+      material.opacity = 1;
+      material.transparent = false;
+      material.blending = THREE.NoBlending;
+      material.depthTest = true;
+      material.depthWrite = true;
+      material.side = THREE.DoubleSide;
+      material.forceSinglePass = false;
+      material.alphaMap = null;
+      material.alphaTest = 0;
+      material.roughness = roughness;
+      material.metalness = Math.min(material.userData.baseMetalness ?? 0, 0.25) * (1 - whiteAmount * 0.85);
+      material.emissive.copy(whiteColor);
+      material.emissiveIntensity = 0.025 + whiteAmount * 0.08;
+      const nextMap = whiteAmount > 0.42 ? null : material.userData.baseMap;
+      if (material.map !== nextMap) {
+        material.map = nextMap;
+        material.needsUpdate = true;
+      }
+      material.needsUpdate = true;
+    });
+  });
+}
+
+function collectSampleMeshes(root, options = {}) {
+  const cleanupStrength = THREE.MathUtils.clamp(Number(options.cleanupStrength ?? 0), 0, 1);
+  root.updateWorldMatrix(true, true);
+  const meshes = [];
+  const box = new THREE.Box3();
+
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry?.attributes?.position) {
+      return;
+    }
+
+    const originalGeometry = node.geometry.clone();
+    const geometry = originalGeometry.index ? originalGeometry.toNonIndexed() : originalGeometry;
+    if (geometry !== originalGeometry) {
+      originalGeometry.dispose();
+    }
+
+    geometry.applyMatrix4(node.matrixWorld);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+
+    const area = triangleArea(geometry);
+    if (area <= 0 || !Number.isFinite(area)) {
+      geometry.dispose();
+      return;
+    }
+
+    const meshBox = geometry.boundingBox.clone();
+    box.union(meshBox);
+    const samplingMesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial());
+    const sampler = new MeshSurfaceSampler(samplingMesh).build();
+    meshes.push({
+      geometry,
+      sampler,
+      area,
+      box: meshBox,
+      center: meshBox.getCenter(new THREE.Vector3()),
+      faceMaterialIndices: createFaceMaterialIndices(geometry),
+      hasVertexColors: Boolean(geometry.attributes.color),
+      materialSources: createMaterialSources(node.material)
+    });
+  });
+
+  if (cleanupStrength <= 0.01) {
+    return { meshes, box, sampleBox: box };
+  }
+
+  return filterSampleMeshesForOutliers(meshes, box, cleanupStrength);
+}
+
+function filterSampleMeshesForOutliers(meshes, rawBox, cleanupStrength = 0) {
+  if (!meshes.length || rawBox.isEmpty()) {
+    return { meshes, box: rawBox, sampleBox: rawBox };
+  }
+
+  const sampleBox = computeRobustSampleBox(meshes, rawBox, cleanupStrength);
+  const totalArea = meshes.reduce((sum, mesh) => sum + mesh.area, 0) || 1;
+  const minArea = totalArea * 0.00002;
+  const kept = [];
+  const rejected = [];
+
+  meshes.forEach((mesh) => {
+    const areaRatio = mesh.area / totalArea;
+    const keep =
+      areaRatio > 0.018 ||
+      mesh.box.intersectsBox(sampleBox) ||
+      sampleBox.containsPoint(mesh.center);
+
+    if (keep && mesh.area >= minArea) {
+      kept.push(mesh);
+    } else {
+      rejected.push(mesh);
+    }
+  });
+
+  if (!kept.length) {
+    return { meshes, box: rawBox, sampleBox: rawBox };
+  }
+
+  rejected.forEach((mesh) => mesh.geometry.dispose());
+
+  return {
+    meshes: kept,
+    box: sampleBox,
+    sampleBox
+  };
+}
+
+function computeRobustSampleBox(meshes, rawBox, cleanupStrength = 0) {
+  const totalArea = meshes.reduce((sum, mesh) => sum + mesh.area, 0) || 1;
+  const sorted = [...meshes].sort((a, b) => b.area - a.area);
+  const coreBox = new THREE.Box3();
+  let coveredArea = 0;
+  const coverageTarget = THREE.MathUtils.lerp(0.9995, 0.982, cleanupStrength);
+  const smallAreaThreshold = THREE.MathUtils.lerp(0.0006, 0.012, cleanupStrength);
+
+  for (const mesh of sorted) {
+    const areaRatio = mesh.area / totalArea;
+    if (coveredArea / totalArea > coverageTarget && areaRatio < smallAreaThreshold) {
+      continue;
+    }
+    coreBox.union(mesh.box);
+    coveredArea += mesh.area;
+  }
+
+  if (coreBox.isEmpty()) {
+    return rawBox.clone();
+  }
+
+  const rawSize = rawBox.getSize(new THREE.Vector3());
+  const coreSize = coreBox.getSize(new THREE.Vector3());
+  const rawMax = Math.max(rawSize.x, rawSize.y, rawSize.z, 0.0001);
+  const coreMax = Math.max(coreSize.x, coreSize.y, coreSize.z, 0.0001);
+
+  if (coreMax < rawMax * 0.08) {
+    return rawBox.clone();
+  }
+
+  const vertexBox = computeVertexPercentileBox(meshes, rawBox, cleanupStrength);
+  const expandedCore = coreBox.clone().expandByScalar(Math.max(coreMax * THREE.MathUtils.lerp(0.32, 0.18, cleanupStrength), rawMax * 0.018));
+  expandedCore.intersect(rawBox);
+
+  if (vertexBox && !vertexBox.isEmpty()) {
+    const intersection = expandedCore.clone().intersect(vertexBox);
+    const intersectionSize = intersection.getSize(new THREE.Vector3());
+    if (!intersection.isEmpty() && Math.max(intersectionSize.x, intersectionSize.y, intersectionSize.z) > coreMax * 0.35) {
+      return intersection.expandByScalar(rawMax * 0.012).intersect(rawBox);
+    }
+  }
+
+  return expandedCore;
+}
+
+function computeVertexPercentileBox(meshes, rawBox, cleanupStrength = 0) {
+  const totalVertices = meshes.reduce((sum, mesh) => sum + mesh.geometry.attributes.position.count, 0);
+  if (totalVertices < 128) {
+    return null;
+  }
+
+  const stride = Math.max(1, Math.ceil(totalVertices / 60000));
+  const xs = [];
+  const ys = [];
+  const zs = [];
+
+  meshes.forEach((mesh) => {
+    const position = mesh.geometry.attributes.position;
+    for (let index = 0; index < position.count; index += stride) {
+      xs.push(position.getX(index));
+      ys.push(position.getY(index));
+      zs.push(position.getZ(index));
+    }
+  });
+
+  if (xs.length < 64) {
+    return null;
+  }
+
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+  zs.sort((a, b) => a - b);
+
+  const lower = THREE.MathUtils.lerp(0.0005, 0.006, cleanupStrength);
+  const upper = THREE.MathUtils.lerp(0.9995, 0.994, cleanupStrength);
+  const rawSize = rawBox.getSize(new THREE.Vector3());
+  const margin = Math.max(Math.max(rawSize.x, rawSize.y, rawSize.z) * 0.04, 0.0001);
+  const box = new THREE.Box3(
+    new THREE.Vector3(pickQuantile(xs, lower), pickQuantile(ys, lower), pickQuantile(zs, lower)),
+    new THREE.Vector3(pickQuantile(xs, upper), pickQuantile(ys, upper), pickQuantile(zs, upper))
+  );
+
+  return box.expandByScalar(margin).intersect(rawBox);
+}
+
+function pickQuantile(sortedValues, ratio) {
+  const index = THREE.MathUtils.clamp(
+    Math.round((sortedValues.length - 1) * ratio),
+    0,
+    sortedValues.length - 1
+  );
+  return sortedValues[index];
+}
+
+function sampleRenderableSurface(weightedMeshes, sampleBox, samplePosition, sampleNormal, sampleColor, sampleUV, particleColor) {
+  let selected = weightedMeshes[weightedMeshes.length - 1];
+  let faceIndex = 0;
+  let hasOriginalColor = false;
+  let hasCutoutAlpha = false;
+  let fallback = null;
+
+  for (let attempt = 0; attempt < 72; attempt += 1) {
+    selected = pickWeightedMesh(weightedMeshes, Math.random());
+    faceIndex = selected.sampler.sampleFaceIndex();
+    sampleColor.set(1, 1, 1);
+    sampleUV.set(0, 0);
+    selected.sampler.sampleFace(faceIndex, samplePosition, sampleNormal, sampleColor, sampleUV);
+
+    if (sampleBox && !sampleBox.containsPoint(samplePosition)) {
+      continue;
+    }
+
+    const materialSource = getFaceMaterialSource(selected, faceIndex);
+    const materialSample = sampleOriginalColor(
+      materialSource,
+      sampleUV,
+      sampleColor,
+      selected.hasVertexColors,
+      particleColor
+    );
+    hasOriginalColor = materialSample.hasOriginalColor;
+    hasCutoutAlpha = Boolean(materialSource?.hasCutoutAlpha);
+
+    if (materialSample.alpha > 0.08) {
+      return { selected, faceIndex, hasOriginalColor, hasCutoutAlpha };
+    }
+
+    fallback ||= {
+      selected,
+      faceIndex,
+      hasOriginalColor,
+      hasCutoutAlpha,
+      position: samplePosition.clone(),
+      normal: sampleNormal.clone(),
+      color: particleColor.clone()
+    };
+  }
+
+  if (fallback) {
+    selected = fallback.selected;
+    faceIndex = fallback.faceIndex;
+    hasOriginalColor = fallback.hasOriginalColor;
+    hasCutoutAlpha = fallback.hasCutoutAlpha;
+    samplePosition.copy(fallback.position);
+    sampleNormal.copy(fallback.normal);
+    particleColor.copy(fallback.color);
+  } else {
+    selected = pickWeightedMesh(weightedMeshes, Math.random());
+    faceIndex = selected.sampler.sampleFaceIndex();
+    selected.sampler.sampleFace(faceIndex, samplePosition, sampleNormal, sampleColor, sampleUV);
+    const materialSource = getFaceMaterialSource(selected, faceIndex);
+    const materialSample = sampleOriginalColor(
+      materialSource,
+      sampleUV,
+      sampleColor,
+      selected.hasVertexColors,
+      particleColor
+    );
+    hasOriginalColor = materialSample.hasOriginalColor;
+    hasCutoutAlpha = Boolean(materialSource?.hasCutoutAlpha);
+    if (sampleBox && !sampleBox.containsPoint(samplePosition)) {
+      sampleBox.clampPoint(samplePosition, samplePosition);
+    }
+  }
+
+  return { selected, faceIndex, hasOriginalColor, hasCutoutAlpha };
+}
+
+function getParticleCandidateCount(targetCount, cleanupStrength = 0.78) {
+  if (targetCount < 12000 || cleanupStrength <= 0.01) {
+    return targetCount;
+  }
+
+  const extraRatio = 0.22 + cleanupStrength * 0.82;
+  const maxExtra = Math.round(60000 + cleanupStrength * 180000);
+  const extra = Math.min(Math.round(targetCount * extraRatio), maxExtra);
+  return targetCount + extra;
+}
+
+function selectDenseParticleIndices(positions, cutoutWeights, candidateCount, targetCount, cleanupStrength = 0.78) {
+  if (cleanupStrength <= 0.01 || candidateCount <= targetCount || candidateCount < 12000) {
+    return Array.from({ length: Math.min(candidateCount, targetCount) }, (_, index) => index);
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let index = 0; index < candidateCount; index += 1) {
+    const offset = index * 3;
+    const x = positions[offset];
+    const y = positions[offset + 1];
+    const z = positions[offset + 2];
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    minZ = Math.min(minZ, z);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+    maxZ = Math.max(maxZ, z);
+  }
+
+  const maxSpan = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 0.0001);
+  const cellSize = THREE.MathUtils.clamp(maxSpan / 48, 0.07, 0.16);
+  const grid = new Map();
+  const cellXs = new Int16Array(candidateCount);
+  const cellYs = new Int16Array(candidateCount);
+  const cellZs = new Int16Array(candidateCount);
+
+  const cellKey = (x, y, z) => `${x}|${y}|${z}`;
+
+  for (let index = 0; index < candidateCount; index += 1) {
+    const offset = index * 3;
+    const cx = Math.floor((positions[offset] - minX) / cellSize);
+    const cy = Math.floor((positions[offset + 1] - minY) / cellSize);
+    const cz = Math.floor((positions[offset + 2] - minZ) / cellSize);
+    const key = cellKey(cx, cy, cz);
+    cellXs[index] = cx;
+    cellYs[index] = cy;
+    cellZs[index] = cz;
+    grid.set(key, (grid.get(key) || 0) + 1);
+  }
+
+  const structuralCellMin = Math.max(1, Math.round(THREE.MathUtils.lerp(1, 7, cleanupStrength)));
+  const componentSizesByCell = computeStructuralComponentSizes(grid, structuralCellMin, cellKey);
+  const componentSizes = new Float32Array(candidateCount);
+  const densities = new Float32Array(candidateCount);
+  const scores = new Float32Array(candidateCount);
+  const cleanupCurve = cleanupStrength * cleanupStrength;
+  for (let index = 0; index < candidateCount; index += 1) {
+    const cx = cellXs[index];
+    const cy = cellYs[index];
+    const cz = cellZs[index];
+    let neighborCount = 0;
+
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          neighborCount += grid.get(cellKey(cx + dx, cy + dy, cz + dz)) || 0;
+        }
+      }
+    }
+
+    componentSizes[index] = componentSizesByCell.get(cellKey(cx, cy, cz)) || 0;
+    const solidBoost = cutoutWeights[index] > 0.5 ? 0 : 18 * (1 - cleanupCurve);
+    densities[index] = neighborCount;
+    scores[index] = neighborCount + solidBoost;
+  }
+
+  const passesDensity = (index) => {
+    const isCutout = cutoutWeights[index] > 0.5;
+    const threshold = isCutout
+      ? THREE.MathUtils.lerp(2, 34, cleanupCurve)
+      : THREE.MathUtils.lerp(0, 16, cleanupCurve);
+    const componentThreshold = isCutout
+      ? Math.max(24, targetCount * THREE.MathUtils.lerp(0.0002, 0.012, cleanupCurve))
+      : targetCount * THREE.MathUtils.lerp(0, 0.004, cleanupCurve);
+    return densities[index] >= threshold && componentSizes[index] >= componentThreshold;
+  };
+  const selected = [];
+  const rejectedBase = [];
+  const extras = [];
+
+  for (let index = 0; index < candidateCount; index += 1) {
+    if (index < targetCount) {
+      if (passesDensity(index)) {
+        selected.push(index);
+      } else {
+        rejectedBase.push(index);
+      }
+    } else {
+      extras.push(index);
+    }
+  }
+
+  extras.sort((a, b) => scores[b] - scores[a] || a - b);
+  for (const index of extras) {
+    if (selected.length >= targetCount) {
+      break;
+    }
+    if (passesDensity(index)) {
+      selected.push(index);
+    }
+  }
+
+  const minimumOutput = Math.round(targetCount * THREE.MathUtils.lerp(1, 0.86, cleanupCurve));
+  if (selected.length < minimumOutput) {
+    rejectedBase.sort((a, b) => scores[b] - scores[a] || a - b);
+    for (const index of rejectedBase) {
+      selected.push(index);
+      if (selected.length >= minimumOutput) {
+        break;
+      }
+    }
+  }
+
+  if (cleanupStrength < 0.92 && selected.length < targetCount) {
+    const selectedSet = new Set(selected);
+    const fallback = [...rejectedBase, ...extras]
+      .filter((index) => !selectedSet.has(index))
+      .sort((a, b) => scores[b] - scores[a] || a - b);
+    for (const index of fallback) {
+      selected.push(index);
+      if (selected.length >= targetCount) {
+        break;
+      }
+    }
+  }
+
+  return selected.slice(0, targetCount).sort((a, b) => a - b);
+}
+
+function computeStructuralComponentSizes(grid, minCellCount, cellKey) {
+  const structuralCells = new Set();
+  const componentSizes = new Map();
+
+  grid.forEach((count, key) => {
+    if (count >= minCellCount) {
+      structuralCells.add(key);
+    }
+  });
+
+  const visited = new Set();
+  const parseKey = (key) => key.split('|').map((value) => Number(value));
+
+  structuralCells.forEach((startKey) => {
+    if (visited.has(startKey)) {
+      return;
+    }
+
+    const queue = [startKey];
+    const cells = [];
+    let pointCount = 0;
+    visited.add(startKey);
+
+    while (queue.length) {
+      const key = queue.pop();
+      cells.push(key);
+      pointCount += grid.get(key) || 0;
+      const [cx, cy, cz] = parseKey(key);
+
+      for (let dz = -1; dz <= 1; dz += 1) {
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0 && dz === 0) {
+              continue;
+            }
+            const neighborKey = cellKey(cx + dx, cy + dy, cz + dz);
+            if (!structuralCells.has(neighborKey) || visited.has(neighborKey)) {
+              continue;
+            }
+            visited.add(neighborKey);
+            queue.push(neighborKey);
+          }
+        }
+      }
+    }
+
+    cells.forEach((key) => componentSizes.set(key, pointCount));
+  });
+
+  return componentSizes;
+}
+
+function createFaceMaterialIndices(geometry) {
+  const faceCount = geometry.attributes.position.count / 3;
+  const materialIndices = new Uint16Array(faceCount);
+
+  if (!geometry.groups.length) {
+    return materialIndices;
+  }
+
+  geometry.groups.forEach((group) => {
+    const startFace = Math.floor(group.start / 3);
+    const endFace = Math.min(faceCount, Math.ceil((group.start + group.count) / 3));
+    materialIndices.fill(group.materialIndex || 0, startFace, endFace);
+  });
+
+  return materialIndices;
+}
+
+function createMaterialSources(material) {
+  const materials = Array.isArray(material) ? material : [material];
+  return materials.map((item) => {
+    const color = item?.color ? item.color.clone() : new THREE.Color(1, 1, 1);
+    const mapSampler = item?.map ? createTextureSampler(item.map) : null;
+    const alphaMapSampler = item?.alphaMap ? createTextureSampler(item.alphaMap) : null;
+    const opacity = Number.isFinite(item?.opacity) ? item.opacity : 1;
+    const alphaTest = Number.isFinite(item?.alphaTest) ? item.alphaTest : 0;
+    const hasExplicitAlphaCutout = Boolean(alphaMapSampler || alphaTest > 0);
+    const hasTransparentTextureAlpha = Boolean(item?.transparent && mapSampler?.hasAlpha);
+
+    return {
+      color,
+      mapSampler,
+      alphaMapSampler,
+      opacity,
+      alphaTest,
+      hasExplicitAlphaCutout,
+      hasTransparentTextureAlpha,
+      hasCutoutAlpha: hasExplicitAlphaCutout || hasTransparentTextureAlpha,
+      hasMaterialColor: !isWhiteColor(color),
+      hasTextureColor: Boolean(mapSampler)
+    };
+  });
+}
+
+function getFaceMaterialSource(meshInfo, faceIndex) {
+  const materialIndex = meshInfo.faceMaterialIndices[faceIndex] || 0;
+  return meshInfo.materialSources[materialIndex] || meshInfo.materialSources[0] || null;
+}
+
+function sampleOriginalColor(materialSource, uv, vertexColor, hasVertexColors, target) {
+  target.set(1, 1, 1);
+
+  if (!materialSource) {
+    return { hasOriginalColor: false, alpha: 1 };
+  }
+
+  target.copy(materialSource.color);
+  let hasOriginalColor = materialSource.hasMaterialColor;
+  let alpha = THREE.MathUtils.clamp(materialSource.opacity ?? 1, 0, 1);
+
+  if (materialSource.mapSampler) {
+    target.multiply(materialSource.mapSampler.sample(uv));
+    alpha *= materialSource.mapSampler.sampleAlpha(uv);
+    hasOriginalColor = true;
+  }
+
+  if (materialSource.alphaMapSampler) {
+    alpha *= materialSource.alphaMapSampler.sampleAlpha(uv);
+  }
+
+  const cleanupStrength = THREE.MathUtils.clamp(Number(state.sampleCleanup ?? 0), 0, 1);
+  const alphaThreshold = materialSource.alphaTest > 0
+    ? THREE.MathUtils.clamp(materialSource.alphaTest, 0, 0.95)
+    : materialSource.alphaMapSampler
+      ? THREE.MathUtils.lerp(0.02, 0.7, cleanupStrength)
+      : materialSource.hasTransparentTextureAlpha
+        ? THREE.MathUtils.lerp(0.001, 0.55, cleanupStrength)
+        : 0.001;
+  if (alpha < alphaThreshold) {
+    alpha = 0;
+  }
+
+  if (hasVertexColors) {
+    target.multiply(vertexColor);
+    hasOriginalColor = true;
+  }
+
+  return { hasOriginalColor, alpha };
+}
+
+function createTextureSampler(texture) {
+  const image = texture.image;
+  const width = image?.videoWidth || image?.naturalWidth || image?.width || 0;
+  const height = image?.videoHeight || image?.naturalHeight || image?.height || 0;
+
+  if (!image || !width || !height) {
+    return null;
+  }
+
+  try {
+    const canvasElement = document.createElement('canvas');
+    canvasElement.width = width;
+    canvasElement.height = height;
+    const context = canvasElement.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    const uvBuffer = new THREE.Vector2();
+    const sampled = new THREE.Color();
+    let hasAlpha = false;
+    const alphaStride = Math.max(4, Math.floor((width * height) / 12000) * 4);
+    for (let index = 3; index < pixels.length; index += alphaStride) {
+      if (pixels[index] < 250) {
+        hasAlpha = true;
+        break;
+      }
+    }
+
+    const getPixelIndex = (uv) => {
+      uvBuffer.copy(uv);
+      texture.updateMatrix();
+      texture.transformUv(uvBuffer);
+
+      const x = Math.round(THREE.MathUtils.clamp(uvBuffer.x, 0, 1) * (width - 1));
+      const y = Math.round(THREE.MathUtils.clamp(uvBuffer.y, 0, 1) * (height - 1));
+      return (y * width + x) * 4;
+    };
+
+    return {
+      sample(uv) {
+        const pixelIndex = getPixelIndex(uv);
+        sampled.setRGB(
+          pixels[pixelIndex] / 255,
+          pixels[pixelIndex + 1] / 255,
+          pixels[pixelIndex + 2] / 255
+        );
+
+        if (texture.colorSpace === THREE.SRGBColorSpace) {
+          sampled.convertSRGBToLinear();
+        }
+
+        return sampled;
+      },
+      sampleAlpha(uv) {
+        return pixels[getPixelIndex(uv) + 3] / 255;
+      },
+      hasAlpha
+    };
+  } catch (error) {
+    console.warn('Could not sample texture pixels.', error);
+    return null;
+  }
+}
+
+function isWhiteColor(color) {
+  return Math.abs(color.r - 1) < 0.001 && Math.abs(color.g - 1) < 0.001 && Math.abs(color.b - 1) < 0.001;
+}
+
+function triangleArea(geometry) {
+  const position = geometry.attributes.position;
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  let area = 0;
+
+  for (let i = 0; i < position.count; i += 3) {
+    a.fromBufferAttribute(position, i);
+    b.fromBufferAttribute(position, i + 1);
+    c.fromBufferAttribute(position, i + 2);
+    area += b.sub(a).cross(c.sub(a)).length() * 0.5;
+  }
+
+  return area;
+}
+
+function pickWeightedMesh(meshes, value) {
+  for (const mesh of meshes) {
+    if (value <= mesh.cumulative) {
+      return mesh;
+    }
+  }
+  return meshes[meshes.length - 1];
+}
+
+function createSamplerUvTarget() {
+  return {
+    x: 0,
+    y: 0,
+    set(x = 0, y = 0) {
+      this.x = x;
+      this.y = y;
+      return this;
+    },
+    addScaledVector(vector, scale) {
+      this.x += vector.x * scale;
+      this.y += vector.y * scale;
+      return this;
+    }
+  };
+}
+
+async function loadAssetFile(file) {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (!extension) {
+    return;
+  }
+
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    await loadImageSplatFile(file, extension);
+    return;
+  }
+
+  if (GAUSSIAN_SPLAT_EXTENSIONS.has(extension)) {
+    await loadGaussianSplatFile(file, extension);
+    return;
+  }
+
+  await loadModelFile(file, extension);
+}
+
+async function loadModelFile(file, explicitExtension) {
+  const extension = explicitExtension || file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !MODEL_EXTENSIONS.has(extension)) {
+    setStatus('Load failed');
+    modelName.textContent = `当前：${file.name} 格式不支持`;
+    return;
+  }
+
+  setStatus('Loading');
+
+  try {
+    const [source, payload] = await Promise.all([parseModel(file, extension), createModelPayload(file, extension)]);
+    currentModelPayload = payload;
+    clearMorphTarget({ rebuild: false });
+    currentImageSplatPayload = null;
+    currentGaussianSplatPayload = null;
+    selectedImageSplat = false;
+    removeImageSplatObject();
+    await removeRealSplatObject();
+    state.effectMode = 'particles';
+    transformControls.detach();
+    transformControls.visible = false;
+    await buildParticles(source, file.name, { resetView: true });
+  } catch (error) {
+    console.error(error);
+    setStatus('Load failed');
+    modelName.textContent = `当前：${file.name} 读取失败`;
+  }
+}
+
+async function loadMorphTargetFile(file, explicitExtension) {
+  const extension = explicitExtension || file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !MODEL_EXTENSIONS.has(extension)) {
+    setStatus('Target failed');
+    if (morphUi.name) {
+      morphUi.name.textContent = `当前：${file.name} 格式不支持`;
+    }
+    return false;
+  }
+
+  setStatus('Loading target');
+  try {
+    const [source, payload] = await Promise.all([parseModel(file, extension), createModelPayload(file, extension)]);
+    morphTargetSource = source;
+    morphTargetLabel = file.name;
+    currentMorphTargetPayload = payload;
+    if (morphUi.name) {
+      morphUi.name.textContent = `当前：${file.name}`;
+    }
+    state.effectMode = 'morph';
+    await buildParticles(currentSource, currentLabel, { resetView: false });
+    syncUi();
+    setStatus('Ready');
+    return true;
+  } catch (error) {
+    console.error(error);
+    setStatus('Target failed');
+    if (morphUi.name) {
+      morphUi.name.textContent = `当前：${file.name} 读取失败`;
+    }
+    return false;
+  }
+}
+
+function clearMorphTarget(options = {}) {
+  const { rebuild = false } = options;
+  morphTargetSource = null;
+  morphTargetLabel = '';
+  currentMorphTargetPayload = null;
+  if (morphUi.name) {
+    morphUi.name.textContent = '当前：未导入目标模型';
+  }
+  if (rebuild && particles) {
+    scheduleRebuild();
+  } else {
+    syncUniforms();
+  }
+}
+
+async function loadImageSplatFile(file, explicitExtension) {
+  const extension = explicitExtension || file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !IMAGE_EXTENSIONS.has(extension)) {
+    setStatus('Image failed');
+    modelName.textContent = `当前：${file.name} 格式不支持`;
+    return;
+  }
+
+  setStatus('Loading image');
+
+  try {
+    const payload = await createImageSplatPayload(file, extension);
+    const source = await decodeImageSplatSource(payload.dataUrl, { extension });
+    applyImageSplatImportPreset(source);
+    currentImageSplatPayload = payload;
+    currentGaussianSplatPayload = null;
+    clearMorphTarget({ rebuild: false });
+    await removeRealSplatObject();
+    resetImageSplatTransform();
+    await buildImageSplatObject(source, file.name, { resetView: true });
+  } catch (error) {
+    console.error(error);
+    setStatus('Image failed');
+    modelName.textContent = `当前：${file.name} 读取失败`;
+  }
+}
+
+async function loadGaussianSplatFile(file, explicitExtension) {
+  const extension = explicitExtension || file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !GAUSSIAN_SPLAT_EXTENSIONS.has(extension)) {
+    setStatus('Splat failed');
+    modelName.textContent = `当前：${file.name} 格式不支持`;
+    return;
+  }
+
+  setStatus('Loading splat');
+  const nextUrl = URL.createObjectURL(file);
+
+  try {
+    const payload = await createGaussianSplatPayload(file, extension);
+    currentGaussianSplatPayload = payload;
+    currentImageSplatPayload = null;
+    currentModelPayload = null;
+    clearMorphTarget({ rebuild: false });
+    removeImageSplatObject();
+    resetImageSplatTransform();
+    await buildRealSplatObject(nextUrl, file.name, { extension, resetView: true });
+    if (realSplatObjectUrl) {
+      URL.revokeObjectURL(realSplatObjectUrl);
+    }
+    realSplatObjectUrl = nextUrl;
+  } catch (error) {
+    URL.revokeObjectURL(nextUrl);
+    console.error(error);
+    setStatus('Splat failed');
+    modelName.textContent = `当前：${file.name} 读取失败`;
+  }
+}
+
+async function loadGaussianSplatUrl(url, options = {}) {
+  if (!url) {
+    return false;
+  }
+
+  const extension = (options.extension || url.split('?')[0].split('.').pop() || 'ply').toLowerCase();
+  const name = options.name || url.split('/').pop()?.split('?')[0] || `scene.${extension}`;
+  if (options.params) {
+    await applyOptionsSnapshot({ ...options.params, effectMode: 'image' }, false);
+  } else {
+    state.effectMode = 'image';
+  }
+  if (options.transform) {
+    applyImageSplatTransformSnapshot(options.transform);
+  } else {
+    resetImageSplatTransform();
+  }
+  currentGaussianSplatPayload = {
+    name,
+    extension,
+    dataUrl: options.dataUrl || null
+  };
+  currentImageSplatPayload = null;
+  removeImageSplatObject();
+  return buildRealSplatObject(url, name, { extension, resetView: Boolean(options.resetView) });
+}
+
+function createGaussianSplatPayload(file, extension) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      resolve({
+        name: file.name,
+        extension,
+        dataUrl: reader.result
+      });
+    });
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadImageSplatUrl(url, options = {}) {
+  if (!url) {
+    return false;
+  }
+
+  const extension = (options.extension || url.split('?')[0].split('.').pop() || 'png').toLowerCase();
+  const name = options.name || url.split('/').pop()?.split('?')[0] || `image.${extension}`;
+  const source = await decodeImageSplatSource(url, { extension });
+  currentImageSplatPayload = options.dataUrl
+    ? { name, extension, dataUrl: options.dataUrl }
+    : { name, extension, dataUrl: null };
+  if (options.transform) {
+    applyImageSplatTransformSnapshot(options.transform);
+  } else {
+    resetImageSplatTransform();
+  }
+  if (options.resetView) {
+    applyImageSplatImportPreset(source);
+  }
+  return buildImageSplatObject(source, name, { resetView: Boolean(options.resetView) });
+}
+
+function createImageSplatPayload(file, extension) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      resolve({
+        name: file.name,
+        extension,
+        dataUrl: reader.result
+      });
+    });
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function decodeImageSplatSource(url, options = {}) {
+  const extension = (options.extension || '').toLowerCase();
+  if (PANORAMA_TEXTURE_EXTENSIONS.has(extension)) {
+    return decodePanoramaTextureSource(url, extension);
+  }
+
+  const image = await loadHtmlImage(url);
+  const maxSide = 1600;
+  const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+  const width = Math.max(2, Math.round((image.naturalWidth || image.width) * scale));
+  const height = Math.max(2, Math.round((image.naturalHeight || image.height) * scale));
+  const canvas2d = document.createElement('canvas');
+  canvas2d.width = width;
+  canvas2d.height = height;
+  const context = canvas2d.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, 0, 0, width, height);
+  const imageData = context.getImageData(0, 0, width, height);
+  const analysis = analyzeImageSplatImageData(imageData, width, height);
+  if (imageSplatTexture) {
+    imageSplatTexture.dispose();
+  }
+  imageSplatTexture = new THREE.CanvasTexture(canvas2d);
+  imageSplatTexture.colorSpace = THREE.SRGBColorSpace;
+  imageSplatTexture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  imageSplatTexture.wrapS = THREE.RepeatWrapping;
+  imageSplatTexture.wrapT = THREE.ClampToEdgeWrapping;
+  imageSplatTexture.needsUpdate = true;
+  const aspect = width / Math.max(height, 1);
+  const isPanorama = isLikelyPanoramaSource(width, height, extension);
+  const worldWidth = aspect >= 1 ? 4 : 4 * aspect;
+  const worldHeight = aspect >= 1 ? 4 / aspect : 4;
+
+  return {
+    mode: isPanorama ? 'panorama' : 'image',
+    isPanorama,
+    width,
+    height,
+    data: imageData.data,
+    depthData: analysis.depthData,
+    edgeData: analysis.edgeData,
+    skyData: analysis.skyData,
+    skyRatio: analysis.skyRatio,
+    worldWidth,
+    worldHeight,
+    radius: isPanorama ? 16 : 0
+  };
+}
+
+function analyzeImageSplatImageData(imageData, width, height) {
+  const data = imageData.data;
+  const total = width * height;
+  const lumaData = new Float32Array(total);
+  const edgeData = new Float32Array(total);
+  const rawDepth = new Float32Array(total);
+  const skyData = new Float32Array(total);
+
+  for (let index = 0; index < total; index += 1) {
+    const offset = index * 4;
+    lumaData[index] = (0.2126 * data[offset] + 0.7152 * data[offset + 1] + 0.0722 * data[offset + 2]) / 255;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    const v = y / Math.max(height - 1, 1);
+    const top = 1 - v;
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      const offset = index * 4;
+      const r = data[offset] / 255;
+      const g = data[offset + 1] / 255;
+      const b = data[offset + 2] / 255;
+      const maxChannel = Math.max(r, g, b);
+      const minChannel = Math.min(r, g, b);
+      const saturation = maxChannel > 0 ? (maxChannel - minChannel) / maxChannel : 0;
+      const luma = lumaData[index];
+      const left = lumaData[y * width + Math.max(0, x - 1)];
+      const right = lumaData[y * width + Math.min(width - 1, x + 1)];
+      const up = lumaData[Math.max(0, y - 1) * width + x];
+      const down = lumaData[Math.min(height - 1, y + 1) * width + x];
+      const edge = THREE.MathUtils.clamp((Math.abs(right - left) + Math.abs(down - up)) * 2.2, 0, 1);
+      const blueBias = b - Math.max(r, g) * 0.88;
+      const greenBias = g - Math.max(r, b) * 0.74;
+      const skyBlue = smooth01(0.025, 0.2, blueBias) *
+        smooth01(0.32, 0.86, luma) *
+        (1 - smooth01(0.05, 0.42, edge)) *
+        smooth01(0.14, 0.92, top);
+      const brightLowDetailSky = smooth01(0.62, 0.94, luma) *
+        (1 - smooth01(0.1, 0.42, saturation)) *
+        (1 - smooth01(0.04, 0.3, edge)) *
+        smooth01(0.34, 0.95, top) * 0.68;
+      const sky = THREE.MathUtils.clamp(Math.max(skyBlue, brightLowDetailSky), 0, 1);
+      const verticalNear = Math.pow(smooth01(0.06, 1, v), 1.45);
+      const detailNear = smooth01(0.035, 0.28, edge);
+      const saturationNear = smooth01(0.12, 0.68, saturation);
+      const darkObject = 1 - smooth01(0.18, 0.74, luma);
+      const greenObject = smooth01(0.035, 0.24, greenBias) * (0.35 + detailNear * 0.65);
+      const centerWeight = 1 - Math.abs((x / Math.max(width - 1, 1)) - 0.5) * 0.28;
+      const raw = THREE.MathUtils.clamp(
+        0.1 +
+          verticalNear * 0.58 +
+          detailNear * 0.25 +
+          saturationNear * 0.12 +
+          darkObject * 0.08 +
+          greenObject * 0.12 -
+          sky * 0.72,
+        0,
+        1
+      ) * centerWeight;
+      edgeData[index] = edge;
+      skyData[index] = sky;
+      rawDepth[index] = THREE.MathUtils.clamp(raw, 0, 1);
+    }
+  }
+
+  const blurredDepth = blurScalarMap(rawDepth, width, height);
+  const depthData = new Float32Array(total);
+  let skySum = 0;
+  for (let index = 0; index < total; index += 1) {
+    skySum += skyData[index];
+    depthData[index] = THREE.MathUtils.clamp(
+      blurredDepth[index] * 0.72 + rawDepth[index] * 0.28 + edgeData[index] * 0.08 - skyData[index] * 0.1,
+      0,
+      1
+    );
+  }
+
+  return {
+    depthData,
+    edgeData,
+    skyData,
+    skyRatio: skySum / Math.max(total, 1)
+  };
+}
+
+function blurScalarMap(input, width, height) {
+  const total = width * height;
+  const temp = new Float32Array(total);
+  const output = new Float32Array(total);
+  const radius = 3;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const sx = THREE.MathUtils.clamp(x + dx, 0, width - 1);
+        sum += input[y * width + sx];
+        count += 1;
+      }
+      temp[y * width + x] = sum / count;
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const sy = THREE.MathUtils.clamp(y + dy, 0, height - 1);
+        sum += temp[sy * width + x];
+        count += 1;
+      }
+      output[y * width + x] = sum / count;
+    }
+  }
+
+  return output;
+}
+
+function smooth01(edge0, edge1, value) {
+  if (Math.abs(edge1 - edge0) < 0.000001) {
+    return value >= edge1 ? 1 : 0;
+  }
+  const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+async function decodePanoramaTextureSource(url, extension = 'hdr') {
+  const loader = extension === 'exr' ? new EXRLoader() : new RGBELoader();
+  const hdrTexture = await loader.loadAsync(url);
+  const preview = createPanoramaPreviewCanvas(hdrTexture);
+  if (imageSplatTexture) {
+    imageSplatTexture.dispose();
+  }
+  imageSplatTexture = new THREE.CanvasTexture(preview.canvas);
+  imageSplatTexture.colorSpace = THREE.SRGBColorSpace;
+  imageSplatTexture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  imageSplatTexture.wrapS = THREE.RepeatWrapping;
+  imageSplatTexture.wrapT = THREE.ClampToEdgeWrapping;
+  imageSplatTexture.needsUpdate = true;
+  hdrTexture.dispose();
+
+  return {
+    mode: 'panorama',
+    isPanorama: true,
+    width: preview.width,
+    height: preview.height,
+    data: preview.imageData.data,
+    depthData: null,
+    edgeData: null,
+    skyRatio: 0,
+    worldWidth: 4,
+    worldHeight: 2,
+    radius: 16
+  };
+}
+
+function createPanoramaPreviewCanvas(texture) {
+  const sourceImage = texture.image || {};
+  const sourceWidth = Math.max(2, sourceImage.width || 2);
+  const sourceHeight = Math.max(2, sourceImage.height || 2);
+  const maxSide = 2048;
+  const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(2, Math.round(sourceWidth * scale));
+  const height = Math.max(2, Math.round(sourceHeight * scale));
+  const canvas2d = document.createElement('canvas');
+  canvas2d.width = width;
+  canvas2d.height = height;
+  const context = canvas2d.getContext('2d', { willReadFrequently: true });
+  const imageData = context.createImageData(width, height);
+  const autoExposure = computeHdrPreviewExposure(texture);
+
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = Math.min(sourceHeight - 1, Math.floor((y / Math.max(height - 1, 1)) * (sourceHeight - 1)));
+    for (let x = 0; x < width; x += 1) {
+      const sourceX = Math.min(sourceWidth - 1, Math.floor((x / Math.max(width - 1, 1)) * (sourceWidth - 1)));
+      const color = readHdrTexturePixel(texture, sourceX, sourceY);
+      const offset = (y * width + x) * 4;
+      imageData.data[offset] = linearHdrToPreviewByte(color.r, autoExposure);
+      imageData.data[offset + 1] = linearHdrToPreviewByte(color.g, autoExposure);
+      imageData.data[offset + 2] = linearHdrToPreviewByte(color.b, autoExposure);
+      imageData.data[offset + 3] = 255;
+    }
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return { canvas: canvas2d, imageData, width, height };
+}
+
+function computeHdrPreviewExposure(texture) {
+  const sourceImage = texture.image || {};
+  const width = Math.max(2, sourceImage.width || 2);
+  const height = Math.max(2, sourceImage.height || 2);
+  let luminanceSum = 0;
+  let samples = 0;
+  const strideX = Math.max(1, Math.floor(width / 48));
+  const strideY = Math.max(1, Math.floor(height / 24));
+
+  for (let y = 0; y < height; y += strideY) {
+    for (let x = 0; x < width; x += strideX) {
+      const color = readHdrTexturePixel(texture, x, y);
+      luminanceSum += 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+      samples += 1;
+    }
+  }
+
+  const averageLuminance = luminanceSum / Math.max(samples, 1);
+  return THREE.MathUtils.clamp(0.44 / Math.max(averageLuminance, 0.025), 0.08, 1.65);
+}
+
+function readHdrTexturePixel(texture, x, y) {
+  const sourceImage = texture.image || {};
+  const data = sourceImage.data;
+  const width = Math.max(1, sourceImage.width || 1);
+  const height = Math.max(1, sourceImage.height || 1);
+  if (!data || !data.length) {
+    return { r: 0, g: 0, b: 0 };
+  }
+
+  const components = Math.max(1, Math.round(data.length / Math.max(width * height, 1)));
+  const safeX = THREE.MathUtils.clamp(Math.round(x), 0, width - 1);
+  const safeY = THREE.MathUtils.clamp(Math.round(y), 0, height - 1);
+  const offset = (safeY * width + safeX) * components;
+  const read = (channel) => readHdrComponent(data, offset + Math.min(channel, components - 1), texture.type);
+  const r = read(0);
+  const g = components > 1 ? read(1) : r;
+  const b = components > 2 ? read(2) : r;
+  return { r, g, b };
+}
+
+function readHdrComponent(data, index, textureType) {
+  const value = data[index] ?? 0;
+  if (textureType === THREE.HalfFloatType && data instanceof Uint16Array) {
+    return Math.max(0, THREE.DataUtils.fromHalfFloat(value));
+  }
+  return Math.max(0, Number(value) || 0);
+}
+
+function linearHdrToPreviewByte(value, exposure) {
+  const mapped = 1 - Math.exp(-Math.max(0, value) * exposure);
+  const srgb = mapped <= 0.0031308
+    ? mapped * 12.92
+    : 1.055 * Math.pow(mapped, 1 / 2.4) - 0.055;
+  return Math.round(THREE.MathUtils.clamp(srgb, 0, 1) * 255);
+}
+
+function isLikelyPanoramaSource(width, height, extension = '') {
+  if (PANORAMA_TEXTURE_EXTENSIONS.has(extension)) {
+    return true;
+  }
+  const aspect = width / Math.max(height, 1);
+  return width >= 1024 && aspect >= 1.75 && aspect <= 2.25;
+}
+
+function loadHtmlImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = 'async';
+    image.crossOrigin = 'anonymous';
+    image.addEventListener('load', () => resolve(image), { once: true });
+    image.addEventListener('error', () => reject(new Error('Image could not be decoded.')), { once: true });
+    image.src = url;
+  });
+}
+
+async function loadBundledModel(url) {
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      return false;
+    }
+
+    const buffer = await response.arrayBuffer();
+    const extension = url.split('?')[0].split('.').pop()?.toLowerCase();
+    if (!extension) {
+      return false;
+    }
+
+    setStatus('Loading model');
+    const file = new File([buffer], url.split('/').pop()?.split('?')[0] || `model.${extension}`, {
+      type: extension === 'glb' ? 'model/gltf-binary' : 'application/octet-stream'
+    });
+    const source = await parseModel(file, extension);
+    currentModelPayload = await createModelPayload(file, extension);
+    return await buildParticles(source, file.name, { resetView: true });
+  } catch (error) {
+    console.info('No bundled model loaded.', error);
+    return false;
+  }
+}
+
+async function loadMorphTargetUrl(url, options = {}) {
+  if (!url) {
+    clearMorphTarget({ rebuild: true });
+    return false;
+  }
+
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Morph target request failed: ${response.status}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  const extension = (options.extension || url.split('?')[0].split('.').pop() || 'glb').toLowerCase();
+  if (!MODEL_EXTENSIONS.has(extension)) {
+    throw new Error(`Unsupported morph target extension: ${extension}`);
+  }
+
+  const name = options.name || url.split('/').pop()?.split('?')[0] || `target.${extension}`;
+  const file = new File([buffer], name, {
+    type: extension === 'glb' ? 'model/gltf-binary' : 'application/octet-stream'
+  });
+  const source = await parseModel(file, extension);
+  morphTargetSource = source;
+  morphTargetLabel = name;
+  currentMorphTargetPayload = options.dataUrl
+    ? { name, extension, dataUrl: options.dataUrl }
+    : await createModelPayload(file, extension);
+  if (morphUi.name) {
+    morphUi.name.textContent = `当前：${name}`;
+  }
+  await buildParticles(currentSource, currentLabel, { resetView: false });
+  return true;
+}
+
+async function createModelPayload(file, extension) {
+  const filePath = getLocalFilePath(file);
+  const payload = {
+    name: file.name,
+    extension,
+    path: filePath || undefined,
+    size: file.size || 0
+  };
+
+  if (filePath && file.size > INLINE_MODEL_PAYLOAD_LIMIT) {
+    return payload;
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  return {
+    ...payload,
+    dataUrl
+  };
+}
+
+function getLocalFilePath(file) {
+  try {
+    return window.electronAPI?.getPathForFile?.(file) || file?.path || '';
+  } catch {
+    return file?.path || '';
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function initializeStartupWorld() {
+  if (!exportSettings.worldUrl) {
+    syncWorldEnvironment();
+    return;
+  }
+
+  try {
+    await loadWorldEnvironmentUrl(exportSettings.worldUrl, {
+      name: exportSettings.worldUrl.split('/').pop()?.split('?')[0] || 'HDR Environment',
+      enabled: true,
+      preservePayload: true
+    });
+  } catch (error) {
+    console.warn('Could not load startup world environment.', error);
+    syncWorldEnvironment();
+  }
+}
+
+async function loadWorldFile(file) {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (!['hdr', 'exr'].includes(extension)) {
+    setStatus('HDR failed');
+    if (worldUi.name) {
+      worldUi.name.textContent = `当前：${file.name} 格式不支持`;
+    }
+    return;
+  }
+
+  setStatus('Loading HDR');
+  const nextObjectUrl = URL.createObjectURL(file);
+
+  try {
+    const [payload] = await Promise.all([
+      createWorldPayload(file, extension),
+      loadWorldEnvironmentUrl(nextObjectUrl, { name: file.name, enabled: true, revokePreviousObjectUrl: false })
+    ]);
+    currentWorldPayload = payload;
+    if (worldObjectUrl) {
+      URL.revokeObjectURL(worldObjectUrl);
+    }
+    worldObjectUrl = nextObjectUrl;
+    setStatus('Ready');
+  } catch (error) {
+    URL.revokeObjectURL(nextObjectUrl);
+    console.error(error);
+    setStatus('HDR failed');
+    if (worldUi.name) {
+      worldUi.name.textContent = `当前：${file.name} 读取失败`;
+    }
+  }
+}
+
+function createWorldPayload(file, extension) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      resolve({
+        name: file.name,
+        extension,
+        dataUrl: reader.result
+      });
+    });
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadWorldEnvironmentUrl(url, options = {}) {
+  if (!url) {
+    disposeWorldEnvironment();
+    syncWorldEnvironment();
+    return false;
+  }
+
+  const extension = (options.extension || url.split('?')[0].split('.').pop() || 'hdr').toLowerCase();
+  const loader = extension === 'exr' ? new EXRLoader() : new RGBELoader();
+  const texture = await loader.loadAsync(url);
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.needsUpdate = true;
+
+  const pmremTarget = pmremGenerator.fromEquirectangular(texture);
+  disposeWorldEnvironment();
+  worldSourceTexture = texture;
+  worldPmremTarget = pmremTarget;
+  if (options.name && worldUi.name) {
+    worldUi.name.textContent = `当前：${options.name}`;
+  }
+  if (options.enabled !== undefined) {
+    state.worldEnabled = Boolean(options.enabled);
+  } else {
+    state.worldEnabled = true;
+  }
+  syncUi();
+  syncWorldEnvironment();
+  return true;
+}
+
+function disposeWorldEnvironment() {
+  if (worldSourceTexture) {
+    worldSourceTexture.dispose();
+    worldSourceTexture = null;
+  }
+  if (worldPmremTarget) {
+    worldPmremTarget.dispose();
+    worldPmremTarget = null;
+  }
+  scene.environment = null;
+  scene.background = null;
+}
+
+function syncWorldEnvironment() {
+  const hasWorld = Boolean(worldPmremTarget?.texture);
+  const enabled = hasWorld && state.worldEnabled;
+  const rotationY = THREE.MathUtils.degToRad(Number(state.worldRotation) || 0);
+  const hdrStrength = Math.max(0, Number(state.worldIntensity) || 0);
+  scene.environment = enabled ? worldPmremTarget.texture : null;
+  scene.background = enabled && state.worldVisible ? worldSourceTexture : null;
+  scene.environmentIntensity = enabled ? hdrStrength : 1;
+  scene.backgroundIntensity = enabled ? hdrStrength : 1;
+  scene.backgroundBlurriness = enabled ? THREE.MathUtils.clamp(state.worldBlur, 0, 1) : 0;
+  scene.environmentRotation.set(0, rotationY, 0);
+  scene.backgroundRotation.set(0, rotationY, 0);
+  syncBaseLightRig(enabled);
+  sceneLights.forEach((light) => applyLightRecord(light));
+}
+
+function syncBaseLightRig(worldEnabled) {
+  const scale = worldEnabled ? 0 : 1;
+  ambientLight.intensity = baseLightIntensities.ambient * scale;
+  keyLight.intensity = baseLightIntensities.key * scale;
+  rimLight.intensity = baseLightIntensities.rim * scale;
+}
+
+function serializeWorldEnvironment() {
+  if (!state.worldExport || !currentWorldPayload?.dataUrl || !currentWorldPayload?.extension) {
+    return null;
+  }
+
+  return {
+    ...currentWorldPayload,
+    enabled: state.worldEnabled,
+    visible: state.worldVisible,
+    intensity: state.worldIntensity,
+    backgroundIntensity: state.worldIntensity,
+    blur: state.worldBlur,
+    rotation: state.worldRotation
+  };
+}
+
+function serializeImageSplatObject() {
+  if (currentGaussianSplatPayload?.dataUrl || realSplatRoot) {
+    return {
+      ...(currentGaussianSplatPayload || {}),
+      kind: 'gaussian',
+      params: captureKeyframeOptions(),
+      transform: captureImageSplatTransform()
+    };
+  }
+
+  if (!currentImageSplatPayload && !imageSplatSource) {
+    return null;
+  }
+
+  return {
+    ...(currentImageSplatPayload || {}),
+    kind: 'image-preview',
+    params: captureKeyframeOptions(),
+    transform: captureImageSplatTransform()
+  };
+}
+
+function serializeMorphTargetModel() {
+  if (!currentMorphTargetPayload?.extension || (!currentMorphTargetPayload.path && !currentMorphTargetPayload.dataUrl)) {
+    return null;
+  }
+
+  return {
+    ...currentMorphTargetPayload,
+    label: morphTargetLabel
+  };
+}
+
+async function parseModel(file, extension) {
+  if (extension === 'glb') {
+    const buffer = await file.arrayBuffer();
+    const loader = new GLTFLoader();
+    const gltf = await new Promise((resolve, reject) => {
+      loader.parse(buffer, '', resolve, reject);
+    });
+    return gltf.scene;
+  }
+
+  if (extension === 'gltf') {
+    const text = await file.text();
+    const loader = new GLTFLoader();
+    const gltf = await new Promise((resolve, reject) => {
+      loader.parse(text, '', resolve, reject);
+    });
+    return gltf.scene;
+  }
+
+  if (extension === 'obj') {
+    const text = await file.text();
+    return new OBJLoader().parse(text);
+  }
+
+  if (extension === 'stl') {
+    const buffer = await file.arrayBuffer();
+    const geometry = new STLLoader().parse(buffer);
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    const group = new THREE.Group();
+    group.add(mesh);
+    return group;
+  }
+
+  if (extension === 'fbx') {
+    const buffer = await file.arrayBuffer();
+    return new FBXLoader().parse(buffer, '');
+  }
+
+  throw new Error(`Unsupported extension: ${extension}`);
+}
+
+function syncUniforms() {
+  uniforms.uPointSize.value = state.pointSize;
+  uniforms.uEdgeFeather.value = state.edgeFeather;
+  uniforms.uSizeRandom.value = state.sizeRandom;
+  uniforms.uGlowRadius.value = state.glowRadius;
+  uniforms.uGlowExposure.value = state.glowExposure;
+  uniforms.uSpread.value = state.spread;
+  uniforms.uNoise.value = state.noise;
+  uniforms.uNoiseScale.value = state.noiseScale;
+  uniforms.uSwirl.value = state.swirl;
+  uniforms.uDissolve.value = state.dissolve;
+  uniforms.uGrowth.value = state.growth;
+  uniforms.uGrowthFlow.value = state.growthFlow;
+  uniforms.uGrowthWidth.value = state.growthWidth;
+  uniforms.uGrowthTurbulence.value = state.growthTurbulence;
+  uniforms.uOrganicFlow.value = state.organicFlow;
+  uniforms.uEdgeBreak.value = state.edgeBreak;
+  uniforms.uFilamentLength.value = state.filamentLength;
+  uniforms.uFilamentCurl.value = state.filamentCurl;
+  uniforms.uMorphMode.value = state.effectMode === 'morph' ? 1 : 0;
+  uniforms.uMorphReady.value = morphTargetSource && particles?.geometry?.userData?.hasMorphTarget ? 1 : 0;
+  uniforms.uMorphProgress.value = state.morphProgress;
+  uniforms.uMorphFlow.value = state.morphFlow;
+  uniforms.uMorphScatter.value = state.morphScatter;
+  uniforms.uMorphTurbulence.value = state.morphTurbulence;
+  uniforms.uMorphTrail.value = state.morphTrail;
+  uniforms.uMorphDirection.value.set(state.morphDirX, state.morphDirY, state.morphDirZ);
+  uniforms.uUseTexture.value = state.useTexture ? 1 : 0;
+  uniforms.uColorA.value.set(state.colorA);
+  uniforms.uColorB.value.set(state.colorB);
+  syncEmissionUniforms();
+  syncImageSplatUniforms();
+  updateVisibleModelMaterials();
+  syncEffectVisibility();
+  syncWorldEnvironment();
+}
+
+function syncEmissionUniforms() {
+  emissionUniforms.uEmissionEnabled.value = state.emissionEnabled ? 1 : 0;
+  emissionUniforms.uEmissionIntensity.value = state.emissionIntensity;
+  emissionUniforms.uEmissionDistance.value = state.emissionDistance;
+  emissionUniforms.uEmissionSpeed.value = state.emissionSpeed;
+  emissionUniforms.uEmissionWind.value.set(state.emissionWindX, state.emissionWindY, state.emissionWindZ);
+  emissionUniforms.uEmissionTurbulence.value = state.emissionTurbulence;
+  emissionUniforms.uEmissionSize.value = state.emissionSize;
+  emissionUniforms.uEmissionOpacity.value = state.emissionOpacity;
+  emissionUniforms.uEmissionGlow.value = state.emissionGlow;
+  emissionUniforms.uModelWhite.value = state.modelWhite;
+  emissionUniforms.uUseTexture.value = state.useTexture ? 1 : 0;
+  emissionUniforms.uColorA.value.set(state.colorA);
+  emissionUniforms.uColorB.value.set(state.colorB);
+  emissionUniforms.uBreakAmount.value = state.breakAmount;
+  emissionUniforms.uBreakProgress.value = state.breakProgress;
+  emissionUniforms.uBreakRadius.value = state.breakRadius;
+  emissionUniforms.uBreakFeather.value = state.breakFeather;
+  emissionUniforms.uBreakCenter.value.set(state.breakCenterX, state.breakCenterY, state.breakCenterZ);
+  emissionUniforms.uBreakSpeed.value = state.breakSpeed;
+  emissionUniforms.uBreakSize.value = state.breakSize;
+  const capacity = emissionParticles?.geometry?.userData?.capacity || state.emissionCount || 1;
+  emissionUniforms.uEmissionCountRatio.value = THREE.MathUtils.clamp(state.emissionCount / Math.max(capacity, 1), 0, 1);
+}
+
+function syncImageSplatUniforms() {
+  imageSplatUniforms.uDepth.value = state.imageSplatDepth;
+  imageSplatUniforms.uScatter.value = state.imageSplatScatter;
+  imageSplatUniforms.uSpeed.value = state.imageSplatSpeed;
+  imageSplatUniforms.uScatterDirection.value.set(state.imageSplatDirX, state.imageSplatDirY, state.imageSplatDirZ);
+  imageSplatUniforms.uTurbulence.value = state.imageSplatTurbulence;
+  imageSplatUniforms.uSize.value = state.imageSplatSize;
+  imageSplatUniforms.uFeather.value = state.imageSplatFeather;
+  imageSplatUniforms.uColorKeep.value = state.imageSplatColorKeep;
+  imageSplatUniforms.uOpacity.value = state.imageSplatOpacity;
+  imageSplatUniforms.uGlow.value = state.imageSplatGlow;
+  imageSplatUniforms.uCountRatio.value = THREE.MathUtils.clamp(
+    state.imageSplatCount / Math.max(imageSplatRoot?.userData?.capacity || state.imageSplatCount || 1, 1),
+    0,
+    1
+  );
+  imageSplatUniforms.uColorA.value.set(state.colorA);
+  imageSplatUniforms.uColorB.value.set(state.colorB);
+  if (imageSplatPlane) {
+    imageSplatPlane.visible = state.imageSplatPlaneVisible && state.effectMode === 'image';
+    imageSplatPlane.material.opacity = state.imageSplatPlaneOpacity;
+    imageSplatPlane.material.transparent = imageSplatSource?.isPanorama
+      ? state.imageSplatPlaneOpacity < 0.999
+      : true;
+    imageSplatPlane.material.needsUpdate = true;
+  }
+  applyImageSplatTransform();
+}
+
+function syncEffectVisibility() {
+  const emissionMode = state.effectMode === 'emission';
+  const imageMode = state.effectMode === 'image';
+  const morphMode = state.effectMode === 'morph';
+  panel?.classList.toggle('emission-mode', emissionMode);
+  panel?.classList.toggle('image-mode', imageMode);
+  panel?.classList.toggle('morph-mode', morphMode);
+  effectModeButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.effectMode === state.effectMode);
+  });
+
+  if (particles) {
+    particles.visible = !emissionMode && !imageMode;
+  }
+  if (glowParticles) {
+    glowParticles.visible = false;
+  }
+  if (visibleModelRoot) {
+    visibleModelRoot.visible = emissionMode;
+  }
+  if (emissionParticles) {
+    emissionParticles.visible = emissionMode && state.emissionEnabled;
+  }
+  if (emissionGlowParticles) {
+    emissionGlowParticles.visible = false;
+  }
+  if (imageSplatRoot) {
+    imageSplatRoot.visible = imageMode && !realSplatRoot;
+  }
+  if (realSplatRoot) {
+    realSplatRoot.visible = imageMode;
+  }
+  if (imageSplatPlane) {
+    imageSplatPlane.visible = imageMode && state.imageSplatPlaneVisible;
+  }
+  if (imageSplatParticles) {
+    imageSplatParticles.visible = imageMode;
+  }
+  if (imageSplatMistParticles) {
+    imageSplatMistParticles.visible = imageMode;
+  }
+  if (imageSplatGlowParticles) {
+    imageSplatGlowParticles.visible = false;
+  }
+  updateStats();
+}
+
+function updateStats() {
+  if (state.effectMode === 'image') {
+    statsText.textContent = realSplatRoot
+      ? 'true Gaussian splat scene'
+      : imageSplatSource?.isPanorama
+        ? `${formatCount(state.imageSplatCount)} panorama splats`
+        : `${formatCount(state.imageSplatCount)} image preview splats`;
+    return;
+  }
+
+  if (state.effectMode === 'emission') {
+    statsText.textContent = `${formatCount(state.emissionCount)} emission particles`;
+    return;
+  }
+
+  const actualParticleCount = particles?.geometry?.userData?.capacity || state.particleCount;
+  statsText.textContent = state.effectMode === 'morph'
+    ? `${formatCount(actualParticleCount)} morph particles`
+    : `${formatCount(actualParticleCount)} particles`;
+}
+
+function resetImageSplatTransform() {
+  state.imageSplatPositionX = 0;
+  state.imageSplatPositionY = 0;
+  state.imageSplatPositionZ = 0;
+  state.imageSplatRotationX = 0;
+  state.imageSplatRotationY = 0;
+  state.imageSplatRotationZ = 0;
+  state.imageSplatScale = 1;
+}
+
+function applyImageSplatImportPreset(source) {
+  if (source?.isPanorama) {
+    Object.assign(state, {
+      imageSplatCount: Math.max(state.imageSplatCount, 320000),
+      imageSplatDepth: 0.18,
+      imageSplatScatter: 0.06,
+      imageSplatSpeed: 0.025,
+      imageSplatDirX: 0.08,
+      imageSplatDirY: 0.02,
+      imageSplatDirZ: -0.08,
+      imageSplatTurbulence: 0.18,
+      imageSplatSize: 0.78,
+      imageSplatFeather: 0.32,
+      imageSplatColorKeep: 1,
+      imageSplatOpacity: 0.26,
+      imageSplatGlow: 0,
+      imageSplatPlaneVisible: true,
+      imageSplatPlaneOpacity: 1
+    });
+  } else {
+    Object.assign(state, {
+      imageSplatCount: Math.max(state.imageSplatCount, 320000),
+      imageSplatDepth: 2.25,
+      imageSplatScatter: 0.025,
+      imageSplatSpeed: 0.012,
+      imageSplatDirX: 0.02,
+      imageSplatDirY: 0.01,
+      imageSplatDirZ: 0.2,
+      imageSplatTurbulence: 0.1,
+      imageSplatSize: 0.42,
+      imageSplatFeather: 0.12,
+      imageSplatColorKeep: 1,
+      imageSplatOpacity: 0.2,
+      imageSplatGlow: 0,
+      imageSplatPlaneVisible: true,
+      imageSplatPlaneOpacity: 0.68
+    });
+  }
+  syncUi();
+}
+
+function applyImageSplatTransform() {
+  const root = realSplatRoot || imageSplatRoot;
+  if (!root) {
+    return;
+  }
+
+  root.position.set(state.imageSplatPositionX, state.imageSplatPositionY, state.imageSplatPositionZ);
+  root.rotation.set(
+    THREE.MathUtils.degToRad(state.imageSplatRotationX),
+    THREE.MathUtils.degToRad(state.imageSplatRotationY),
+    THREE.MathUtils.degToRad(state.imageSplatRotationZ)
+  );
+  root.scale.setScalar(Math.max(0.01, state.imageSplatScale));
+}
+
+function captureImageSplatTransform() {
+  return {
+    position: [state.imageSplatPositionX, state.imageSplatPositionY, state.imageSplatPositionZ],
+    rotation: [state.imageSplatRotationX, state.imageSplatRotationY, state.imageSplatRotationZ],
+    scale: state.imageSplatScale
+  };
+}
+
+function applyImageSplatTransformSnapshot(transform = {}) {
+  const position = normalizeVectorArray(transform.position, [0, 0, 0]);
+  const rotation = normalizeVectorArray(transform.rotation, [0, 0, 0]);
+  state.imageSplatPositionX = position[0];
+  state.imageSplatPositionY = position[1];
+  state.imageSplatPositionZ = position[2];
+  state.imageSplatRotationX = rotation[0];
+  state.imageSplatRotationY = rotation[1];
+  state.imageSplatRotationZ = rotation[2];
+  state.imageSplatScale = Math.max(0.01, Number(transform.scale) || 1);
+  applyImageSplatTransform();
+}
+
+function syncTransformProxyFromImageSplat() {
+  selectedTransformProxy.position.set(state.imageSplatPositionX, state.imageSplatPositionY, state.imageSplatPositionZ);
+  selectedTransformProxy.rotation.set(
+    THREE.MathUtils.degToRad(state.imageSplatRotationX),
+    THREE.MathUtils.degToRad(state.imageSplatRotationY),
+    THREE.MathUtils.degToRad(state.imageSplatRotationZ)
+  );
+  selectedTransformProxy.scale.setScalar(Math.max(0.01, state.imageSplatScale));
+  selectedTransformProxy.updateMatrixWorld(true);
+}
+
+function commitSelectedImageSplatTransform() {
+  if (!selectedImageSplat || (!imageSplatRoot && !realSplatRoot)) {
+    return;
+  }
+
+  state.imageSplatPositionX = selectedTransformProxy.position.x;
+  state.imageSplatPositionY = selectedTransformProxy.position.y;
+  state.imageSplatPositionZ = selectedTransformProxy.position.z;
+  state.imageSplatRotationX = THREE.MathUtils.radToDeg(selectedTransformProxy.rotation.x);
+  state.imageSplatRotationY = THREE.MathUtils.radToDeg(selectedTransformProxy.rotation.y);
+  state.imageSplatRotationZ = THREE.MathUtils.radToDeg(selectedTransformProxy.rotation.z);
+  state.imageSplatScale = Math.max(0.01, (selectedTransformProxy.scale.x + selectedTransformProxy.scale.y + selectedTransformProxy.scale.z) / 3);
+  applyImageSplatTransform();
+  syncUi();
+}
+
+function selectImageSplatObject() {
+  if ((!imageSplatRoot && !realSplatRoot) || exportSettings.hideUi) {
+    return;
+  }
+
+  selectedImageSplat = true;
+  selectedLightId = null;
+  selectedKeyframeId = null;
+  selectedKeyframeObject = null;
+  renderLightList();
+  syncLightUi();
+  syncTransformProxyFromImageSplat();
+  transformControls.setMode(selectedImageSplatMode);
+  transformControls.setSpace(selectedImageSplatMode === 'rotate' || selectedImageSplatMode === 'scale' ? 'local' : 'world');
+  transformControls.attach(selectedTransformProxy);
+  transformControls.visible = true;
+  transformControls.enabled = true;
+  syncImageSplatTransformButtons();
+}
+
+function setSelectedImageSplatMode(mode) {
+  selectedImageSplatMode = ['translate', 'rotate', 'scale'].includes(mode) ? mode : 'translate';
+  if (selectedImageSplat) {
+    transformControls.setMode(selectedImageSplatMode);
+    transformControls.setSpace(selectedImageSplatMode === 'rotate' || selectedImageSplatMode === 'scale' ? 'local' : 'world');
+    transformControls.attach(selectedTransformProxy);
+    transformControls.visible = true;
+  }
+  syncImageSplatTransformButtons();
+}
+
+function syncImageSplatTransformButtons() {
+  controlsUi.moveImageSplat?.classList.toggle('active', selectedImageSplatMode === 'translate');
+  controlsUi.rotateImageSplat?.classList.toggle('active', selectedImageSplatMode === 'rotate');
+  controlsUi.scaleImageSplat?.classList.toggle('active', selectedImageSplatMode === 'scale');
+}
+
+function createSceneLight(type = 'point', options = {}, selectAfterCreate = true) {
+  const normalizedType = LIGHT_TYPES[type] ? type : 'point';
+  const defaults = LIGHT_DEFAULTS[normalizedType];
+  const record = {
+    id: options.id || crypto.randomUUID(),
+    isDefault: Boolean(options.isDefault || options.id === 'default-sun'),
+    type: normalizedType,
+    name: options.name || nextLightName(normalizedType),
+    color: options.color || defaults.color,
+    intensity: Number.isFinite(Number(options.intensity)) ? Number(options.intensity) : defaults.intensity,
+    size: Math.max(0.01, Number.isFinite(Number(options.size)) ? Number(options.size) : Math.max(defaults.size, 0.01)),
+    position: normalizeVectorArray(options.position, defaults.position),
+    quaternion: normalizeQuaternionArray(options.quaternion, defaults.rotation),
+    object: null,
+    target: null,
+    handle: null
+  };
+
+  sceneLights.push(record);
+  rebuildLightObject(record);
+  rebuildLightHandle(record);
+  renderLightList();
+
+  if (selectAfterCreate && !exportSettings.hideUi) {
+    selectLightHandle(record.id);
+  } else {
+    syncLightUi();
+  }
+
+  return record;
+}
+
+function nextLightName(type) {
+  const label = LIGHT_TYPES[type] || LIGHT_TYPES.point;
+  const count = sceneLights.filter((light) => light.type === type).length + 1;
+  return `${label} ${count}`;
+}
+
+function normalizeVectorArray(value, fallback) {
+  const values = Array.isArray(value) ? value.map(Number).slice(0, 3) : [];
+  return values.length === 3 && values.every(Number.isFinite) ? values : [...fallback];
+}
+
+function normalizeQuaternionArray(value, fallbackEuler) {
+  if (Array.isArray(value) && value.length >= 4) {
+    const values = value.map(Number).slice(0, 4);
+    const quaternion = new THREE.Quaternion().fromArray(values);
+    if (values.every(Number.isFinite) && quaternion.lengthSq() > 0.000001) {
+      return quaternion.normalize().toArray();
+    }
+  }
+
+  const eulerValues = Array.isArray(fallbackEuler) ? fallbackEuler : [0, 0, 0];
+  return new THREE.Quaternion()
+    .setFromEuler(new THREE.Euler(eulerValues[0], eulerValues[1], eulerValues[2]))
+    .toArray();
+}
+
+function rebuildLightObject(record) {
+  removeLightObject(record);
+
+  const color = new THREE.Color(record.color);
+  if (record.type === 'sun') {
+    record.object = new THREE.DirectionalLight(color, record.intensity);
+    record.target = new THREE.Object3D();
+    sceneLightGroup.add(record.target);
+    record.object.target = record.target;
+  } else if (record.type === 'spot') {
+    record.object = new THREE.SpotLight(color, record.intensity, 0, spotSizeToAngle(record.size), 0.36, 2);
+    record.target = new THREE.Object3D();
+    sceneLightGroup.add(record.target);
+    record.object.target = record.target;
+  } else if (record.type === 'area') {
+    record.object = new THREE.RectAreaLight(color, record.intensity, record.size, record.size);
+  } else {
+    record.object = new THREE.PointLight(color, record.intensity, pointSizeToDistance(record.size), 2);
+    record.object.shadow.radius = record.size;
+  }
+
+  record.object.name = record.name;
+  sceneLightGroup.add(record.object);
+  applyLightRecord(record);
+}
+
+function removeLightObject(record) {
+  if (record.object) {
+    sceneLightGroup.remove(record.object);
+    record.object.dispose?.();
+    record.object = null;
+  }
+  if (record.target) {
+    sceneLightGroup.remove(record.target);
+    record.target = null;
+  }
+}
+
+function rebuildLightHandle(record) {
+  if (record.handle) {
+    lightHandleGroup.remove(record.handle);
+    disposeObject3D(record.handle);
+    record.handle = null;
+  }
+
+  const color = new THREE.Color(record.color);
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    wireframe: true,
+    transparent: true,
+    opacity: selectedLightId === record.id ? 1 : 0.72,
+    depthTest: false
+  });
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: selectedLightId === record.id ? 0.98 : 0.62,
+    depthTest: false
+  });
+  const group = new THREE.Group();
+  group.userData.lightId = record.id;
+  group.userData.lightHandle = true;
+
+  if (record.type === 'sun') {
+    group.add(new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), material));
+    group.add(new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.01, 6, 32), material));
+  } else if (record.type === 'spot') {
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(Math.max(0.18, record.size * 0.32), 0.86, 28, 1, true),
+      material
+    );
+    cone.rotation.x = -Math.PI / 2;
+    cone.position.z = -0.42;
+    group.add(cone);
+  } else if (record.type === 'area') {
+    group.add(new THREE.Mesh(new THREE.PlaneGeometry(record.size, record.size), material));
+  } else {
+    group.add(new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.11, record.size * 0.17), 18, 12), material));
+  }
+
+  if (record.type !== 'point') {
+    const forward = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.85)]),
+      lineMaterial
+    );
+    group.add(forward);
+  }
+
+  markLightHandle(group, record.id);
+  record.handle = group;
+  lightHandleGroup.add(group);
+  applyLightRecord(record);
+}
+
+function markLightHandle(root, lightId) {
+  root.traverse((node) => {
+    node.userData.lightId = lightId;
+    node.userData.lightHandle = true;
+  });
+}
+
+function disposeObject3D(root) {
+  root.traverse((node) => {
+    node.geometry?.dispose?.();
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    materials.forEach((material) => material?.dispose?.());
+  });
+}
+
+function applyLightRecord(record) {
+  const position = new THREE.Vector3().fromArray(record.position);
+  const quaternion = new THREE.Quaternion().fromArray(record.quaternion).normalize();
+  const color = new THREE.Color(record.color);
+
+  if (record.object) {
+    record.object.name = record.name;
+    record.object.color.copy(color);
+    record.object.intensity = getEffectiveLightIntensity(record);
+    record.object.position.copy(position);
+    record.object.quaternion.copy(quaternion);
+
+    if (record.object.isPointLight) {
+      record.object.distance = pointSizeToDistance(record.size);
+      record.object.shadow.radius = record.size;
+    }
+    if (record.object.isSpotLight) {
+      record.object.angle = spotSizeToAngle(record.size);
+      record.object.penumbra = 0.36;
+    }
+    if (record.object.isRectAreaLight) {
+      record.object.width = record.size;
+      record.object.height = record.size;
+    }
+  }
+
+  if (record.target) {
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(quaternion).normalize();
+    record.target.position.copy(position).addScaledVector(forward, 1);
+    record.target.updateMatrixWorld(true);
+  }
+
+  if (record.handle) {
+    record.handle.position.copy(position);
+    record.handle.quaternion.copy(quaternion);
+    record.handle.traverse((node) => {
+      if (node.material?.color) {
+        node.material.color.copy(color);
+        node.material.opacity = selectedLightId === record.id ? 1 : 0.68;
+      }
+    });
+  }
+}
+
+function getEffectiveLightIntensity(record) {
+  if (record.isDefault && state.worldEnabled && worldPmremTarget?.texture) {
+    return 0;
+  }
+
+  return record.intensity;
+}
+
+function pointSizeToDistance(size) {
+  return THREE.MathUtils.clamp(8 + size * 8, 2, 120);
+}
+
+function spotSizeToAngle(size) {
+  return THREE.MathUtils.clamp(size, 0.08, 1.35);
+}
+
+function renderLightList() {
+  if (!lightsUi.list) {
+    return;
+  }
+
+  lightsUi.list.innerHTML = '';
+  sceneLights.forEach((light) => {
+    const button = document.createElement('button');
+    button.className = `light-item${light.id === selectedLightId ? ' active' : ''}`;
+    button.type = 'button';
+    button.dataset.lightId = light.id;
+    button.innerHTML = `
+      <span class="light-swatch" style="background:${light.color}"></span>
+      <span>${light.name}</span>
+      <span class="light-kind">${LIGHT_TYPES[light.type]}</span>
+    `;
+    button.addEventListener('click', () => selectLightHandle(light.id));
+    lightsUi.list.append(button);
+  });
+}
+
+function getSelectedLight() {
+  return sceneLights.find((light) => light.id === selectedLightId) || null;
+}
+
+function selectLightHandle(lightId) {
+  const light = sceneLights.find((item) => item.id === lightId);
+  if (!light || exportSettings.hideUi) {
+    return;
+  }
+
+  selectedImageSplat = false;
+  selectedLightId = light.id;
+  selectedKeyframeId = null;
+  selectedKeyframeObject = null;
+  activeCameraQuaternion = null;
+  rebuildCameraPath();
+  syncTransformProxyFromLight(light);
+  transformControls.setMode(selectedLightMode);
+  transformControls.setSpace(selectedLightMode === 'rotate' ? 'local' : 'world');
+  transformControls.attach(selectedTransformProxy);
+  transformControls.visible = true;
+  transformControls.enabled = true;
+  renderLightList();
+  syncLightUi();
+  updateLightModeButtons();
+}
+
+function syncTransformProxyFromLight(light) {
+  selectedTransformProxy.position.fromArray(light.position);
+  selectedTransformProxy.quaternion.fromArray(light.quaternion);
+  selectedTransformProxy.updateMatrixWorld(true);
+}
+
+function commitSelectedLightTransform() {
+  const light = getSelectedLight();
+  if (!light) {
+    return null;
+  }
+
+  light.position = selectedTransformProxy.position.toArray();
+  light.quaternion = selectedTransformProxy.quaternion.normalize().toArray();
+  applyLightRecord(light);
+  return light;
+}
+
+function syncLightUi() {
+  const light = getSelectedLight();
+  const hasLight = Boolean(light);
+  [lightsUi.type, lightsUi.color, lightsUi.intensity, lightsUi.intensityValue, lightsUi.size, lightsUi.sizeValue, lightsUi.delete, lightsUi.move, lightsUi.rotate]
+    .forEach((control) => {
+      if (control) {
+        control.disabled = !hasLight;
+      }
+    });
+
+  if (!light) {
+    lightsUi.colorValue.value = '无';
+    return;
+  }
+
+  lightsUi.type.value = light.type;
+  lightsUi.color.value = light.color;
+  lightsUi.colorValue.value = light.color;
+  lightsUi.intensity.value = light.intensity;
+  lightsUi.intensityValue.value = light.intensity.toFixed(2);
+  lightsUi.size.value = light.size;
+  lightsUi.sizeValue.value = light.size.toFixed(2);
+
+  const hasSize = light.type !== 'sun';
+  lightsUi.size.disabled = !hasSize;
+  lightsUi.sizeValue.disabled = !hasSize;
+  lightsUi.sizeLabel.textContent = light.type === 'spot' ? '大小/角度' : '大小';
+}
+
+function updateSelectedLightProperty(key, value) {
+  const light = getSelectedLight();
+  if (!light) {
+    syncLightUi();
+    return;
+  }
+
+  if (key === 'type') {
+    light.type = LIGHT_TYPES[value] ? value : 'point';
+    light.size = light.type === 'sun' ? 0.01 : Math.max(0.01, light.size || LIGHT_DEFAULTS[light.type].size);
+    light.name = `${LIGHT_TYPES[light.type]} ${
+      sceneLights.filter((item) => item !== light && item.type === light.type).length + 1
+    }`;
+    rebuildLightObject(light);
+    rebuildLightHandle(light);
+    syncTransformProxyFromLight(light);
+  } else if (key === 'color') {
+    light.color = String(value);
+    applyLightRecord(light);
+  } else if (key === 'intensity') {
+    light.intensity = Math.max(0, Number(value) || 0);
+    applyLightRecord(light);
+  } else if (key === 'size') {
+    light.size = Math.max(0.01, Number(value) || 0.01);
+    rebuildLightHandle(light);
+    applyLightRecord(light);
+  }
+
+  renderLightList();
+  syncLightUi();
+}
+
+function deleteSelectedLight() {
+  const light = getSelectedLight();
+  if (!light) {
+    return;
+  }
+
+  removeLightObject(light);
+  if (light.handle) {
+    lightHandleGroup.remove(light.handle);
+    disposeObject3D(light.handle);
+  }
+  const index = sceneLights.indexOf(light);
+  if (index >= 0) {
+    sceneLights.splice(index, 1);
+  }
+  selectedLightId = sceneLights[0]?.id || null;
+  if (selectedLightId) {
+    selectLightHandle(selectedLightId);
+  } else {
+    transformControls.detach();
+    transformControls.visible = false;
+    renderLightList();
+    syncLightUi();
+  }
+}
+
+function setSelectedLightMode(mode) {
+  selectedLightMode = mode === 'rotate' ? 'rotate' : 'translate';
+  if (selectedLightId) {
+    transformControls.setMode(selectedLightMode);
+    transformControls.setSpace(selectedLightMode === 'rotate' ? 'local' : 'world');
+    transformControls.attach(selectedTransformProxy);
+    transformControls.visible = true;
+  }
+  updateLightModeButtons();
+}
+
+function updateLightModeButtons() {
+  lightsUi.move?.classList.toggle('active', selectedLightMode === 'translate');
+  lightsUi.rotate?.classList.toggle('active', selectedLightMode === 'rotate');
+}
+
+function serializeSceneLights() {
+  return sceneLights.map((light) => ({
+    id: light.id,
+    isDefault: light.isDefault,
+    type: light.type,
+    name: light.name,
+    color: light.color,
+    intensity: light.intensity,
+    size: light.size,
+    position: light.position,
+    quaternion: light.quaternion
+  }));
+}
+
+function importSceneLights(lights, selectFirst = false) {
+  clearSceneLights();
+  const source = Array.isArray(lights) ? lights : [];
+  source.forEach((light) => createSceneLight(light.type, light, false));
+  selectedLightId = !exportSettings.hideUi && selectFirst ? sceneLights[0]?.id || null : null;
+  renderLightList();
+  if (selectedLightId) {
+    selectLightHandle(selectedLightId);
+  } else {
+    syncLightUi();
+  }
+}
+
+function clearSceneLights() {
+  sceneLights.forEach((light) => {
+    removeLightObject(light);
+    if (light.handle) {
+      lightHandleGroup.remove(light.handle);
+      disposeObject3D(light.handle);
+    }
+  });
+  sceneLights.length = 0;
+  selectedLightId = null;
+  if (!selectedKeyframeId) {
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+}
+
+function createDefaultLightConfig() {
+  const defaults = LIGHT_DEFAULTS.sun;
+  return {
+    id: 'default-sun',
+    type: 'sun',
+    name: '日光 1',
+    color: defaults.color,
+    intensity: defaults.intensity,
+    size: 0.01,
+    position: defaults.position,
+    quaternion: normalizeQuaternionArray(null, defaults.rotation)
+  };
+}
+
+function syncUi() {
+  setRangeValue('particleCount', state.particleCount);
+  NUMERIC_KEYFRAME_FIELDS.forEach((field) => setRangeValue(field, state[field]));
+  controlsUi.emissionEnabled.checked = state.emissionEnabled;
+  controlsUi.colorA.value = state.colorA;
+  controlsUi.colorB.value = state.colorB;
+  controlsUi.useTexture.checked = state.useTexture;
+  controlsUi.autoRotate.checked = state.autoRotate;
+  controlsUi.imageSplatPlaneVisible.checked = state.imageSplatPlaneVisible;
+  controlsUi.worldEnabled.checked = state.worldEnabled;
+  controlsUi.worldVisible.checked = state.worldVisible;
+  controlsUi.worldExport.checked = state.worldExport;
+  controlsUi.duration.value = cameraAnimation.duration;
+  controlsUi.timeline.max = cameraAnimation.duration;
+  controlsUi.timeline.value = cameraAnimation.time;
+  syncCameraCurveUi();
+
+  setValueInput('particleCount', state.particleCount);
+  NUMERIC_KEYFRAME_FIELDS.forEach((field) => setValueInput(field, state[field]));
+  outputUi.timeline.value = `${cameraAnimation.time.toFixed(2)}s`;
+  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length);
+  syncEffectVisibility();
+}
+
+function setRangeValue(key, value) {
+  const control = controlsUi[key];
+  if (!control) {
+    return;
+  }
+
+  const min = Number(control.min);
+  const max = Number(control.max);
+  const numericValue = Number(value);
+  control.value = Number.isFinite(min) && Number.isFinite(max)
+    ? THREE.MathUtils.clamp(numericValue, min, max)
+    : numericValue;
+}
+
+function setValueInput(key, value) {
+  const input = outputUi[key];
+  if (!input) {
+    return;
+  }
+
+  input.value = formatControlValue(key, value);
+}
+
+function formatControlValue(key, value) {
+  if (key === 'particleCount' || key === 'emissionCount' || key === 'imageSplatCount') {
+    return String(Math.max(MIN_PARTICLE_COUNT, Math.round(Number(value) || 0)));
+  }
+
+  if (key === 'pointSize' || key === 'emissionSize' || key === 'imageSplatSize') {
+    return Number(value).toFixed(2);
+  }
+
+  if (key === 'glowRadius') {
+    return String(Math.round(Number(value) || 0));
+  }
+
+  if (key === 'worldRotation') {
+    return String(Math.round(Number(value) || 0));
+  }
+
+  return Number(value).toFixed(2);
+}
+
+function scheduleRebuild() {
+  clearTimeout(rebuildTimer);
+  setStatus('Resampling');
+  rebuildTimer = window.setTimeout(() => {
+    if (state.effectMode === 'image' && imageSplatSource) {
+      buildImageSplatObject(imageSplatSource, currentLabel);
+    } else {
+      buildParticles(currentSource, currentLabel);
+    }
+  }, 180);
+}
+
+function setEffectMode(mode) {
+  if (mode === 'image' && !imageSplatRoot && !realSplatRoot) {
+    setStatus('Import image first');
+    return;
+  }
+
+  state.effectMode = VALID_EFFECT_MODES.has(mode) ? mode : 'particles';
+  if (state.effectMode === 'morph' && !morphTargetSource) {
+    setStatus('Import target model 2');
+  }
+  if (state.effectMode === 'image' && imageSplatRoot && !exportSettings.hideUi) {
+    selectImageSplatObject();
+  } else if (selectedImageSplat) {
+    selectedImageSplat = false;
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  syncEffectVisibility();
+  syncUniforms();
+}
+
+function setPreset(name) {
+  Object.assign(state, presets[name]);
+  presetButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.preset === name);
+  });
+  syncUi();
+  syncUniforms();
+}
+
+function resetCamera() {
+  if (state.effectMode === 'image' && imageSplatSource?.isPanorama) {
+    frameImageSplatCamera(imageSplatSource);
+    return;
+  }
+
+  activeCameraQuaternion = null;
+  orbit.minDistance = 0.02;
+  orbit.maxDistance = 100;
+  camera.position.set(0, 0.7, 7.2);
+  orbit.target.set(0, 0.05, 0);
+  orbit.update();
+}
+
+function frameImageSplatCamera(source) {
+  activeCameraQuaternion = null;
+  if (source?.isPanorama) {
+    const scale = Math.max(0.01, state.imageSplatScale || 1);
+    const radius = (source.radius || 16) * scale;
+    orbit.minDistance = 0.001;
+    orbit.maxDistance = Math.max(1, radius * 0.92);
+    const center = new THREE.Vector3(
+      state.imageSplatPositionX,
+      state.imageSplatPositionY,
+      state.imageSplatPositionZ
+    );
+    camera.position.copy(center).add(new THREE.Vector3(0, 0, 0.05));
+    orbit.target.copy(center).add(new THREE.Vector3(0, -0.04, -1.2));
+    camera.fov = 54;
+    camera.updateProjectionMatrix();
+    orbit.update();
+    return;
+  }
+
+  orbit.minDistance = 0.02;
+  orbit.maxDistance = 100;
+  camera.position.set(0, 0.25, 5.2);
+  orbit.target.set(0, 0, 0);
+  camera.fov = 48;
+  camera.updateProjectionMatrix();
+  orbit.update();
+}
+
+function getExportResolution() {
+  const width = Math.max(1, Math.round(Number(controlsUi.exportWidth?.value) || 1920));
+  const height = Math.max(1, Math.round(Number(controlsUi.exportHeight?.value) || 1080));
+  return {
+    width,
+    height,
+    aspect: width / height
+  };
+}
+
+function updateCameraPreviewLayout() {
+  if (!cameraPreviewRenderer || !cameraPreviewUi.canvas || !cameraPreviewUi.root) {
+    return null;
+  }
+
+  const { width, height, aspect } = getExportResolution();
+  cameraPreviewUi.root.style.setProperty('--camera-preview-aspect', `${width} / ${height}`);
+  if (cameraPreviewUi.info) {
+    cameraPreviewUi.info.textContent = `${width} x ${height}`;
+  }
+
+  const rect = cameraPreviewUi.canvas.getBoundingClientRect();
+  const viewWidth = Math.max(2, Math.round(rect.width));
+  const viewHeight = Math.max(2, Math.round(rect.height || rect.width / aspect));
+  cameraPreviewRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  cameraPreviewRenderer.setSize(viewWidth, viewHeight, false);
+  return { width: viewWidth, height: viewHeight, aspect };
+}
+
+function copyCameraProjection(source, target, aspect) {
+  target.fov = source.fov;
+  target.zoom = source.zoom;
+  target.near = source.near;
+  target.far = source.far;
+  target.aspect = Math.max(0.01, aspect);
+  target.up.copy(source.up);
+  target.updateProjectionMatrix();
+}
+
+function getTimelineCameraPose(time = cameraAnimation.time) {
+  const keyframes = getSortedCameraKeyframes();
+  if (!keyframes.length) {
+    return null;
+  }
+
+  if (keyframes.length === 1) {
+    return {
+      position: new THREE.Vector3().fromArray(keyframes[0].position),
+      quaternion: getKeyframeQuaternion(keyframes[0]),
+      distance: getKeyframeDistance(keyframes[0])
+    };
+  }
+
+  return {
+    position: interpolateKeyframeVector(keyframes, time, 'position'),
+    quaternion: interpolateKeyframeQuaternion(keyframes, time),
+    distance: interpolateKeyframeDistance(keyframes, time)
+  };
+}
+
+function configureCameraPreviewCamera(aspect) {
+  copyCameraProjection(camera, cameraPreviewCamera, aspect);
+  const pose = getTimelineCameraPose(cameraAnimation.time);
+
+  if (pose) {
+    cameraPreviewCamera.position.copy(pose.position);
+    cameraPreviewCamera.quaternion.copy(pose.quaternion).normalize();
+  } else {
+    cameraPreviewCamera.position.copy(camera.position);
+    cameraPreviewCamera.quaternion.copy(camera.quaternion);
+  }
+
+  cameraPreviewCamera.updateMatrixWorld(true);
+  return cameraPreviewCamera;
+}
+
+function setEditorHelpersVisible(visible) {
+  const previous = {
+    path: cameraPathGroup.visible,
+    lights: lightHandleGroup.visible,
+    transform: transformControls.visible
+  };
+
+  cameraPathGroup.visible = visible && previous.path;
+  lightHandleGroup.visible = visible && previous.lights;
+  transformControls.visible = visible && previous.transform;
+
+  return () => {
+    cameraPathGroup.visible = previous.path;
+    lightHandleGroup.visible = previous.lights;
+    transformControls.visible = previous.transform;
+  };
+}
+
+function renderCameraPreview() {
+  if (!cameraPreviewRenderer) {
+    return;
+  }
+
+  const layout = updateCameraPreviewLayout();
+  if (!layout) {
+    return;
+  }
+
+  const restoreHelpers = setEditorHelpersVisible(false);
+  const previousTarget = renderer.getRenderTarget();
+  const previousAutoClear = cameraPreviewRenderer.autoClear;
+  const previousPreviewBackground = scene.background;
+  const previousPreviewBackgroundIntensity = scene.backgroundIntensity;
+  cameraPreviewRenderer.autoClear = true;
+  cameraPreviewRenderer.toneMapping = renderer.toneMapping;
+  cameraPreviewRenderer.toneMappingExposure = renderer.toneMappingExposure;
+
+  cameraPreviewRenderer.render(scene, configureCameraPreviewCamera(layout.aspect));
+
+  scene.background = previousPreviewBackground;
+  scene.backgroundIntensity = previousPreviewBackgroundIntensity;
+  cameraPreviewRenderer.autoClear = previousAutoClear;
+  renderer.setRenderTarget(previousTarget);
+  restoreHelpers();
+}
+
+function captureCameraSnapshot() {
+  const drawing = currentDrawingBufferSize();
+  const exportResolution = getExportResolution();
+  return {
+    position: camera.position.toArray(),
+    target: orbit.target.toArray(),
+    quaternion: camera.quaternion.toArray(),
+    fov: camera.fov,
+    zoom: camera.zoom,
+    near: camera.near,
+    far: camera.far,
+    aspect: camera.aspect,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    drawingWidth: drawing.width,
+    drawingHeight: drawing.height,
+    exportWidth: exportResolution.width,
+    exportHeight: exportResolution.height,
+    exportAspect: exportResolution.aspect,
+    cameraCurve: cameraAnimation.curve,
+    cameraCurveStrength: cameraAnimation.curveStrength,
+    time: cameraAnimation.time
+  };
+}
+
+function applyCameraSnapshot(snapshot = {}, options = {}) {
+  applyCameraProjectionSnapshot(snapshot);
+
+  if (options.pose === false) {
+    return;
+  }
+
+  if (!Array.isArray(snapshot.position) || snapshot.position.length < 3) {
+    return;
+  }
+
+  const position = new THREE.Vector3().fromArray(snapshot.position.map(Number).slice(0, 3));
+  const target = Array.isArray(snapshot.target) && snapshot.target.length >= 3
+    ? new THREE.Vector3().fromArray(snapshot.target.map(Number).slice(0, 3))
+    : orbit.target.clone();
+  const quaternion = Array.isArray(snapshot.quaternion) && snapshot.quaternion.length >= 4
+    ? new THREE.Quaternion().fromArray(snapshot.quaternion.map(Number).slice(0, 4))
+    : getLookQuaternion(position, target);
+
+  camera.position.copy(position);
+  orbit.target.copy(target);
+  orbit.update();
+
+  if (quaternion.lengthSq() > 0.000001) {
+    activeCameraQuaternion = quaternion.normalize();
+    restoreActiveCameraQuaternion();
+  } else {
+    activeCameraQuaternion = null;
+  }
+
+  updateCameraPathVisibility();
+}
+
+function applyCameraProjectionSnapshot(snapshot = {}) {
+  const sourceFov = Number(snapshot.fov);
+  const sourceZoom = Number(snapshot.zoom);
+  const sourceNear = Number(snapshot.near);
+  const sourceFar = Number(snapshot.far);
+  const outputAspect = window.innerWidth / Math.max(window.innerHeight, 1);
+
+  if (Number.isFinite(sourceFov) && sourceFov > 1 && sourceFov < 160) {
+    camera.fov = sourceFov;
+  }
+  if (Number.isFinite(sourceZoom) && sourceZoom > 0.001 && sourceZoom < 1000) {
+    camera.zoom = sourceZoom;
+  }
+  if (Number.isFinite(sourceNear) && sourceNear > 0 && sourceNear < camera.far) {
+    camera.near = sourceNear;
+  }
+  if (Number.isFinite(sourceFar) && sourceFar > camera.near) {
+    camera.far = sourceFar;
+  }
+
+  camera.aspect = outputAspect;
+  camera.updateProjectionMatrix();
+}
+
+function addCameraKeyframe() {
+  commitSelectedImageSplatTransform();
+  const keyframe = {
+    id: crypto.randomUUID(),
+    time: Number(cameraAnimation.time.toFixed(3)),
+    position: camera.position.toArray(),
+    target: orbit.target.toArray(),
+    quaternion: camera.quaternion.toArray(),
+    options: captureKeyframeOptions()
+  };
+  const existingIndex = cameraAnimation.keyframes.findIndex(
+    (item) => Math.abs(item.time - keyframe.time) < 0.035
+  );
+
+  if (existingIndex >= 0) {
+    cameraAnimation.keyframes[existingIndex] = keyframe;
+  } else {
+    cameraAnimation.keyframes.push(keyframe);
+  }
+
+  cameraAnimation.keyframes.sort((a, b) => a.time - b.time);
+  refreshCameraTimeline();
+  selectCameraKeyframeHandle(keyframe.id, { frameIfTooClose: true });
+}
+
+function captureKeyframeOptions() {
+  return {
+    particleCount: state.particleCount,
+    ...Object.fromEntries(NUMERIC_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
+    ...Object.fromEntries(COLOR_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
+    ...Object.fromEntries(BOOLEAN_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
+    ...Object.fromEntries(STRING_KEYFRAME_FIELDS.map((field) => [field, state[field]]))
+  };
+}
+
+async function applyOptionsSnapshot(options = {}, updateUi = false) {
+  if (options.glow !== undefined && options.glowExposure === undefined) {
+    options.glowExposure = Number(options.glow);
+  }
+
+  let shouldRebuild = false;
+  if (options.particleCount !== undefined) {
+    const particleCount = Math.max(MIN_PARTICLE_COUNT, Math.round(Number(options.particleCount) || state.particleCount));
+    shouldRebuild = particleCount !== state.particleCount;
+    state.particleCount = particleCount;
+  }
+
+  NUMERIC_KEYFRAME_FIELDS.forEach((field) => {
+    if (options[field] !== undefined) {
+      const value = Number(options[field]);
+      if (Number.isFinite(value)) {
+        const previousValue = state[field];
+        if (field === 'emissionCount' || field === 'imageSplatCount') {
+          const count = Math.max(MIN_PARTICLE_COUNT, Math.round(value));
+          shouldRebuild = shouldRebuild || count !== state[field];
+          state[field] = count;
+        } else {
+          state[field] = normalizeNumericStateValue(field, value);
+        }
+        if (REBUILD_NUMERIC_FIELDS.has(field) && state[field] !== previousValue) {
+          shouldRebuild = true;
+        }
+      }
+    }
+  });
+
+  COLOR_KEYFRAME_FIELDS.forEach((field) => {
+    if (typeof options[field] === 'string') {
+      state[field] = options[field];
+    }
+  });
+
+  BOOLEAN_KEYFRAME_FIELDS.forEach((field) => {
+    if (options[field] !== undefined) {
+      state[field] = Boolean(options[field]);
+    }
+  });
+
+  STRING_KEYFRAME_FIELDS.forEach((field) => {
+    if (typeof options[field] === 'string') {
+      state[field] = field === 'effectMode' && VALID_EFFECT_MODES.has(options[field]) ? options[field] : 'particles';
+    }
+  });
+
+  syncUniforms();
+  if (selectedImageSplat) {
+    syncTransformProxyFromImageSplat();
+  }
+  if (updateUi) {
+    syncUi();
+  }
+
+  if (shouldRebuild) {
+    if (state.effectMode === 'image' && imageSplatSource) {
+      await buildImageSplatObject(imageSplatSource, currentLabel);
+    } else if (state.effectMode !== 'image') {
+      await buildParticles(currentSource, currentLabel);
+    }
+  }
+}
+
+function clearCameraKeyframes() {
+  cameraAnimation.keyframes = [];
+  selectedKeyframeId = null;
+  selectedKeyframeObject = null;
+  if (selectedImageSplat) {
+    selectImageSplatObject();
+  } else {
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  cameraAnimation.playing = false;
+  activeCameraQuaternion = null;
+  updatePlayButton();
+  syncCameraCurveUi();
+  refreshCameraTimeline();
+}
+
+function setCameraTime(value, applyCamera = true) {
+  cameraAnimation.time = THREE.MathUtils.clamp(value, 0, cameraAnimation.duration);
+  controlsUi.timeline.value = cameraAnimation.time;
+  outputUi.timeline.value = `${cameraAnimation.time.toFixed(2)}s`;
+
+  if (applyCamera && cameraAnimation.keyframes.length) {
+    applyTimelineAtTime(cameraAnimation.time, { updateUi: true });
+  }
+}
+
+function setCameraDuration(value) {
+  cameraAnimation.duration = THREE.MathUtils.clamp(Number(value) || 5, 0.25, 120);
+  controlsUi.duration.value = cameraAnimation.duration;
+  controlsUi.timeline.max = cameraAnimation.duration;
+  cameraAnimation.keyframes.forEach((keyframe) => {
+    keyframe.time = THREE.MathUtils.clamp(keyframe.time, 0, cameraAnimation.duration);
+  });
+  setCameraTime(Math.min(cameraAnimation.time, cameraAnimation.duration), false);
+  refreshCameraTimeline();
+}
+
+function normalizeCameraCurve(value) {
+  return VALID_CAMERA_CURVES.has(value) ? value : 'easeInOut';
+}
+
+function normalizeCameraCurveStrength(value) {
+  const number = Number(value);
+  return THREE.MathUtils.clamp(Number.isFinite(number) ? number : 2, 0.25, 6);
+}
+
+function getSelectedCameraKeyframe() {
+  return selectedKeyframeId
+    ? cameraAnimation.keyframes.find((item) => item.id === selectedKeyframeId) || null
+    : null;
+}
+
+function syncCameraCurveUi() {
+  const selectedKeyframe = getSelectedCameraKeyframe();
+  const curve = normalizeCameraCurve(selectedKeyframe?.curve ?? cameraAnimation.curve);
+  const strength = normalizeCameraCurveStrength(selectedKeyframe?.curveStrength ?? cameraAnimation.curveStrength);
+  if (controlsUi.cameraCurve) {
+    controlsUi.cameraCurve.value = curve;
+  }
+  if (controlsUi.cameraCurveStrength) {
+    controlsUi.cameraCurveStrength.value = strength.toFixed(2);
+  }
+}
+
+function setCameraCurve(curveValue, strengthValue, options = {}) {
+  const curve = normalizeCameraCurve(curveValue);
+  const strength = normalizeCameraCurveStrength(strengthValue);
+  cameraAnimation.curve = curve;
+  cameraAnimation.curveStrength = strength;
+
+  const selectedKeyframe = getSelectedCameraKeyframe();
+  if (selectedKeyframe && options.applyToSelected !== false) {
+    selectedKeyframe.curve = curve;
+    selectedKeyframe.curveStrength = strength;
+  }
+
+  syncCameraCurveUi();
+  rebuildCameraPath();
+  if (cameraAnimation.keyframes.length) {
+    applyTimelineAtTime(cameraAnimation.time, { updateUi: false });
+  }
+}
+
+function toggleTimelinePlayback() {
+  cameraAnimation.playing = !cameraAnimation.playing;
+  updatePlayButton();
+}
+
+function updatePlayButton() {
+  controlsUi.playTimeline.querySelector('span').textContent = cameraAnimation.playing ? '暂停' : '播放';
+}
+
+function applyTimelineAtTime(time, options = {}) {
+  const { updateUi = false } = options;
+  applyCameraAtTime(time);
+  applyKeyframedOptionsAtTime(time, updateUi);
+}
+
+function applyCameraAtTime(time) {
+  const keyframes = getSortedCameraKeyframes();
+
+  if (!keyframes.length) {
+    return;
+  }
+
+  if (keyframes.length === 1) {
+    applyCameraPose(
+      new THREE.Vector3().fromArray(keyframes[0].position),
+      getKeyframeQuaternion(keyframes[0]),
+      getKeyframeDistance(keyframes[0])
+    );
+    return;
+  }
+
+  const position = interpolateKeyframeVector(keyframes, time, 'position');
+  const quaternion = interpolateKeyframeQuaternion(keyframes, time);
+  const distance = interpolateKeyframeDistance(keyframes, time);
+  applyCameraPose(position, quaternion, distance);
+}
+
+function applyCameraPose(position, quaternion, distance = 4) {
+  camera.position.copy(position);
+  activeCameraQuaternion = quaternion.clone().normalize();
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(activeCameraQuaternion).normalize();
+  orbit.target.copy(position.clone().addScaledVector(forward, Math.max(distance, 0.05)));
+  orbit.update();
+  restoreActiveCameraQuaternion();
+  updateCameraPathVisibility();
+}
+
+function restoreActiveCameraQuaternion() {
+  if (!activeCameraQuaternion) {
+    return;
+  }
+
+  camera.quaternion.copy(activeCameraQuaternion);
+  camera.updateMatrixWorld(true);
+}
+
+function applyKeyframedOptionsAtTime(time, updateUi = false) {
+  const keyframes = getSortedCameraKeyframes().filter((keyframe) => keyframe.options);
+
+  if (!keyframes.length) {
+    return;
+  }
+
+  NUMERIC_KEYFRAME_FIELDS.forEach((field) => {
+    state[field] = interpolateOptionNumber(keyframes, time, field);
+  });
+
+  COLOR_KEYFRAME_FIELDS.forEach((field) => {
+    state[field] = interpolateOptionColor(keyframes, time, field);
+  });
+
+  BOOLEAN_KEYFRAME_FIELDS.forEach((field) => {
+    state[field] = pickOptionValue(keyframes, time, field);
+  });
+
+  STRING_KEYFRAME_FIELDS.forEach((field) => {
+    const value = pickOptionValue(keyframes, time, field);
+    if (value !== undefined) {
+      state[field] = field === 'effectMode' && VALID_EFFECT_MODES.has(value) ? value : 'particles';
+    }
+  });
+
+  syncUniforms();
+  if (updateUi) {
+    syncUi();
+  }
+}
+
+function interpolateOptionNumber(keyframes, time, field) {
+  const firstValue = keyframes[0].options[field] ?? state[field] ?? 0;
+  if (time <= keyframes[0].time) {
+    return Number(firstValue);
+  }
+
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return Number(last.options[field] ?? firstValue);
+  }
+
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = THREE.MathUtils.smoothstep((time - start.time) / Math.max(end.time - start.time, 0.0001), 0, 1);
+  const startValue = Number(start.options[field] ?? firstValue);
+  const endValue = Number(end.options[field] ?? startValue);
+  return THREE.MathUtils.lerp(startValue, endValue, t);
+}
+
+function interpolateOptionColor(keyframes, time, field) {
+  const startColor = new THREE.Color(pickOptionValue(keyframes, time, field) || state[field] || '#ffffff');
+
+  if (time <= keyframes[0].time || time >= keyframes[keyframes.length - 1].time) {
+    return `#${startColor.getHexString()}`;
+  }
+
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = THREE.MathUtils.smoothstep((time - start.time) / Math.max(end.time - start.time, 0.0001), 0, 1);
+  const color = new THREE.Color(start.options[field] || state[field] || '#ffffff')
+    .lerp(new THREE.Color(end.options[field] || start.options[field] || state[field] || '#ffffff'), t);
+  return `#${color.getHexString()}`;
+}
+
+function pickOptionValue(keyframes, time, field) {
+  let value = keyframes[0].options[field] ?? state[field];
+  for (const keyframe of keyframes) {
+    if (time >= keyframe.time && keyframe.options[field] !== undefined) {
+      value = keyframe.options[field];
+    }
+  }
+  return value;
+}
+
+function getOptionSegment(keyframes, time) {
+  for (let index = 0; index < keyframes.length - 1; index += 1) {
+    if (time >= keyframes[index].time && time <= keyframes[index + 1].time) {
+      return [keyframes[index], keyframes[index + 1]];
+    }
+  }
+  return [keyframes[0], keyframes[keyframes.length - 1]];
+}
+
+function getCameraSegmentT(start, end, time) {
+  const rawT = (time - start.time) / Math.max(end.time - start.time, 0.0001);
+  return applyCameraCurve(rawT, start);
+}
+
+function applyCameraCurve(rawT, startKeyframe = null) {
+  const t = THREE.MathUtils.clamp(rawT, 0, 1);
+  const curve = normalizeCameraCurve(startKeyframe?.curve ?? cameraAnimation.curve);
+  const power = normalizeCameraCurveStrength(startKeyframe?.curveStrength ?? cameraAnimation.curveStrength);
+
+  if (curve === 'linear') {
+    return t;
+  }
+  if (curve === 'hold') {
+    return t >= 1 ? 1 : 0;
+  }
+  if (curve === 'easeIn') {
+    return Math.pow(t, power);
+  }
+  if (curve === 'easeOut') {
+    return 1 - Math.pow(1 - t, power);
+  }
+
+  if (t < 0.5) {
+    return 0.5 * Math.pow(t * 2, power);
+  }
+  return 1 - 0.5 * Math.pow((1 - t) * 2, power);
+}
+
+function interpolateKeyframeVector(keyframes, time, property) {
+  if (time <= keyframes[0].time) {
+    return new THREE.Vector3().fromArray(keyframes[0][property]);
+  }
+
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return new THREE.Vector3().fromArray(last[property]);
+  }
+
+  let segmentIndex = 0;
+  for (let index = 0; index < keyframes.length - 1; index += 1) {
+    if (time >= keyframes[index].time && time <= keyframes[index + 1].time) {
+      segmentIndex = index;
+      break;
+    }
+  }
+
+  const p0 = new THREE.Vector3().fromArray(keyframes[Math.max(0, segmentIndex - 1)][property]);
+  const p1 = new THREE.Vector3().fromArray(keyframes[segmentIndex][property]);
+  const p2 = new THREE.Vector3().fromArray(keyframes[segmentIndex + 1][property]);
+  const p3 = new THREE.Vector3().fromArray(keyframes[Math.min(keyframes.length - 1, segmentIndex + 2)][property]);
+  const startTime = keyframes[segmentIndex].time;
+  const endTime = keyframes[segmentIndex + 1].time;
+  const t = applyCameraCurve((time - startTime) / Math.max(endTime - startTime, 0.0001), keyframes[segmentIndex]);
+  return catmullRom(p0, p1, p2, p3, t);
+}
+
+function interpolateKeyframeQuaternion(keyframes, time) {
+  if (time <= keyframes[0].time) {
+    return getKeyframeQuaternion(keyframes[0]);
+  }
+
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return getKeyframeQuaternion(last);
+  }
+
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = getCameraSegmentT(start, end, time);
+  return getKeyframeQuaternion(start).slerp(getKeyframeQuaternion(end), t).normalize();
+}
+
+function interpolateKeyframeDistance(keyframes, time) {
+  if (time <= keyframes[0].time) {
+    return getKeyframeDistance(keyframes[0]);
+  }
+
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return getKeyframeDistance(last);
+  }
+
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = getCameraSegmentT(start, end, time);
+  return THREE.MathUtils.lerp(getKeyframeDistance(start), getKeyframeDistance(end), t);
+}
+
+function getKeyframeQuaternion(keyframe) {
+  if (Array.isArray(keyframe.quaternion) && keyframe.quaternion.length >= 4) {
+    const values = keyframe.quaternion.slice(0, 4).map(Number);
+    if (values.every(Number.isFinite)) {
+      const quaternion = new THREE.Quaternion().fromArray(values);
+      if (quaternion.lengthSq() > 0.000001) {
+        return quaternion.normalize();
+      }
+    }
+  }
+
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  const target = new THREE.Vector3().fromArray(keyframe.target);
+  return getLookQuaternion(position, target);
+}
+
+function getKeyframeDistance(keyframe) {
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  const target = new THREE.Vector3().fromArray(keyframe.target);
+  const distance = position.distanceTo(target);
+  return Number.isFinite(distance) && distance > 0.05 ? distance : 4;
+}
+
+function getKeyframeForward(keyframe) {
+  return new THREE.Vector3(0, 0, -1).applyQuaternion(getKeyframeQuaternion(keyframe)).normalize();
+}
+
+function catmullRom(p0, p1, p2, p3, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return new THREE.Vector3(
+    0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+    0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+    0.5 * (2 * p1.z + (-p0.z + p2.z) * t + (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 + (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3)
+  );
+}
+
+function refreshCameraTimeline() {
+  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length);
+  controlsUi.timelineMarkers.innerHTML = '';
+
+  getSortedCameraKeyframes().forEach((keyframe) => {
+    const marker = document.createElement('span');
+    marker.className = 'timeline-marker';
+    marker.style.left = `${(keyframe.time / cameraAnimation.duration) * 100}%`;
+    controlsUi.timelineMarkers.append(marker);
+  });
+
+  rebuildCameraPath();
+}
+
+function rebuildCameraPath() {
+  cameraPathGroup.clear();
+  const keyframes = getSortedCameraKeyframes();
+
+  if (!keyframes.length) {
+    transformControls.detach();
+    transformControls.visible = false;
+    updateCameraPathVisibility();
+    return;
+  }
+
+  if (keyframes.length >= 2) {
+    const samples = [];
+    const sampleCount = 96;
+    for (let index = 0; index <= sampleCount; index += 1) {
+      const time = (index / sampleCount) * cameraAnimation.duration;
+      samples.push(interpolateKeyframeVector(keyframes, time, 'position'));
+    }
+
+    const pathGeometry = new THREE.BufferGeometry().setFromPoints(samples);
+    const pathMaterial = new THREE.LineBasicMaterial({
+      color: 0xffbf36,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false
+    });
+    const pathLine = new THREE.Line(pathGeometry, pathMaterial);
+    pathLine.userData.cameraPathLine = true;
+    cameraPathGroup.add(pathLine);
+  }
+
+  keyframes.forEach((keyframe, index) => {
+    const position = new THREE.Vector3().fromArray(keyframe.position);
+    const target = new THREE.Vector3().fromArray(keyframe.target);
+    const marker = createCameraMarker(index, keyframe, position, target);
+    cameraPathGroup.add(marker);
+  });
+  if (selectedKeyframeId) {
+    selectCameraKeyframeHandle(selectedKeyframeId, { preserveTimeline: true });
+  }
+  updateCameraPathVisibility();
+}
+
+function updateCameraPathVisibility() {
+  if (exportSettings.hideUi) {
+    cameraPathGroup.visible = false;
+    return;
+  }
+
+  if (activeCameraQuaternion) {
+    cameraPathGroup.visible = false;
+    return;
+  }
+
+  const keyframes = getSortedCameraKeyframes();
+  if (!keyframes.length) {
+    cameraPathGroup.visible = false;
+    return;
+  }
+  cameraPathGroup.visible = true;
+}
+
+function createCameraMarker(index, keyframe, position, target) {
+  const group = new THREE.Group();
+  group.name = `Camera Keyframe ${index + 1}`;
+  group.position.copy(position);
+  group.quaternion.copy(getKeyframeQuaternion(keyframe));
+  group.userData.keyframeId = keyframe.id;
+  group.userData.keyframeHandle = true;
+
+  const color = selectedKeyframeId === keyframe.id ? 0xffffff : index === 0 ? 0x00f0ff : 0xffbf36;
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.96,
+    depthTest: false
+  });
+  const bodyMaterial = new THREE.MeshBasicMaterial({
+    color,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.9,
+    depthTest: false
+  });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.23, 0.26), bodyMaterial);
+  body.userData.keyframeId = keyframe.id;
+  body.userData.keyframeHandle = true;
+  group.add(body);
+
+  const lens = new THREE.Mesh(
+    new THREE.SphereGeometry(0.13, 16, 16),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.68,
+      depthTest: false
+    })
+  );
+  lens.userData.keyframeId = keyframe.id;
+  lens.userData.keyframeHandle = true;
+  group.add(lens);
+
+  const z = -0.78;
+  const halfW = 0.55;
+  const halfH = 0.36;
+  const corners = [
+    new THREE.Vector3(-halfW, -halfH, z),
+    new THREE.Vector3(halfW, -halfH, z),
+    new THREE.Vector3(halfW, halfH, z),
+    new THREE.Vector3(-halfW, halfH, z)
+  ];
+  const framePoints = [
+    corners[0],
+    corners[1],
+    corners[1],
+    corners[2],
+    corners[2],
+    corners[3],
+    corners[3],
+    corners[0],
+    new THREE.Vector3(0, 0, 0),
+    corners[0],
+    new THREE.Vector3(0, 0, 0),
+    corners[1],
+    new THREE.Vector3(0, 0, 0),
+    corners[2],
+    new THREE.Vector3(0, 0, 0),
+    corners[3]
+  ];
+  const frame = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(framePoints), lineMaterial);
+  frame.userData.keyframeId = keyframe.id;
+  frame.userData.keyframeHandle = true;
+  group.add(frame);
+
+  const viewLine = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.9)]),
+    new THREE.LineDashedMaterial({
+      color: 0x6ffcf6,
+      dashSize: 0.07,
+      gapSize: 0.06,
+      transparent: true,
+      opacity: 0.62,
+      depthTest: false
+    })
+  );
+  viewLine.computeLineDistances();
+  viewLine.userData.keyframeId = keyframe.id;
+  viewLine.userData.keyframeHandle = true;
+  group.add(viewLine);
+
+  const upShape = new THREE.Shape([
+    new THREE.Vector2(0, 0.14),
+    new THREE.Vector2(-0.11, -0.08),
+    new THREE.Vector2(0.11, -0.08)
+  ]);
+  const upArrow = new THREE.Mesh(
+    new THREE.ShapeGeometry(upShape),
+    new THREE.MeshBasicMaterial({
+      color: 0xffa629,
+      transparent: true,
+      opacity: 0.95,
+      side: THREE.DoubleSide,
+      depthTest: false
+    })
+  );
+  upArrow.position.set(0, halfH + 0.18, z + 0.28);
+  upArrow.userData.keyframeId = keyframe.id;
+  upArrow.userData.keyframeHandle = true;
+  group.add(upArrow);
+
+  return group;
+}
+
+function handlePathPointerDown(event) {
+  if (exportSettings.hideUi || event.button !== 0 || transformControls.dragging) {
+    return;
+  }
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const lightIntersects = lightHandleGroup.visible
+    ? raycaster.intersectObjects(lightHandleGroup.children, true)
+    : [];
+  const lightHit = lightIntersects.find((item) => item.object.userData.lightHandle);
+  if (lightHit) {
+    event.stopPropagation();
+    cameraAnimation.playing = false;
+    updatePlayButton();
+    selectLightHandle(lightHit.object.userData.lightId);
+    return;
+  }
+
+  if (state.effectMode === 'image' && imageSplatRoot?.visible) {
+    raycaster.params.Points.threshold = Math.max(0.08, state.imageSplatSize * 0.025);
+    const imageIntersects = raycaster.intersectObjects(imageSplatRoot.children, true);
+    if (imageIntersects.length) {
+      event.stopPropagation();
+      cameraAnimation.playing = false;
+      updatePlayButton();
+      selectImageSplatObject();
+      return;
+    }
+  }
+
+  const intersects = raycaster.intersectObjects(cameraPathGroup.children, true);
+  const hit = intersects.find((item) => item.object.userData.keyframeHandle);
+
+  if (!hit) {
+    return;
+  }
+
+  const keyframeId = hit.object.userData.keyframeId;
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === keyframeId);
+  if (!keyframe) {
+    return;
+  }
+
+  event.stopPropagation();
+  cameraAnimation.playing = false;
+  activeCameraQuaternion = null;
+  updatePlayButton();
+  setCameraTime(keyframe.time, false);
+  selectCameraKeyframeHandle(keyframeId, { frameIfTooClose: true });
+}
+
+function selectCameraKeyframeHandle(keyframeId, options = {}) {
+  const { frameIfTooClose = false } = options;
+  selectedImageSplat = false;
+  selectedLightId = null;
+  renderLightList();
+  syncLightUi();
+  selectedKeyframeId = keyframeId;
+  selectedKeyframeObject = findCameraMarkerObject(keyframeId);
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === keyframeId);
+
+  if (!selectedKeyframeObject || !keyframe) {
+    transformControls.detach();
+    transformControls.visible = false;
+    return;
+  }
+
+  syncTransformProxyFromKeyframe(keyframe);
+  transformControls.setMode(selectedKeyframeMode);
+  transformControls.setSpace(selectedKeyframeMode === 'rotate' ? 'local' : 'world');
+  transformControls.attach(selectedTransformProxy);
+  transformControls.visible = true;
+  transformControls.enabled = true;
+  updateKeyframeModeButtons();
+  syncCameraCurveUi();
+
+  if (frameIfTooClose) {
+    frameKeyframeForEditing(keyframe);
+  }
+}
+
+function findCameraMarkerObject(keyframeId) {
+  return cameraPathGroup.children.find((child) => child.userData.keyframeId === keyframeId) || null;
+}
+
+function commitSelectedKeyframeTransform() {
+  if (!selectedKeyframeId) {
+    return null;
+  }
+
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === selectedKeyframeId);
+  if (!keyframe) {
+    return null;
+  }
+
+  const previousPosition = new THREE.Vector3().fromArray(keyframe.position);
+  const previousTarget = new THREE.Vector3().fromArray(keyframe.target);
+  const previousDistance = Math.max(previousPosition.distanceTo(previousTarget), 0.05);
+  const direction = getProxyLookDirection();
+
+  keyframe.position = selectedTransformProxy.position.toArray();
+  keyframe.quaternion = selectedTransformProxy.quaternion.toArray();
+  keyframe.target = selectedTransformProxy.position.clone().addScaledVector(direction, previousDistance).toArray();
+  if (selectedKeyframeObject) {
+    selectedKeyframeObject.position.copy(selectedTransformProxy.position);
+    selectedKeyframeObject.quaternion.copy(selectedTransformProxy.quaternion);
+  }
+  return keyframe;
+}
+
+function updateSelectedCameraMarkerFromKeyframe(keyframe) {
+  if (!selectedKeyframeObject) {
+    return;
+  }
+
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  selectedKeyframeObject.position.copy(position);
+  selectedKeyframeObject.quaternion.copy(getKeyframeQuaternion(keyframe));
+}
+
+function syncTransformProxyFromKeyframe(keyframe) {
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  selectedTransformProxy.position.copy(position);
+  selectedTransformProxy.quaternion.copy(getKeyframeQuaternion(keyframe));
+  selectedTransformProxy.updateMatrixWorld(true);
+}
+
+function getLookQuaternion(position, target) {
+  const matrix = new THREE.Matrix4().lookAt(position, target, camera.up);
+  return new THREE.Quaternion().setFromRotationMatrix(matrix);
+}
+
+function getProxyLookDirection() {
+  return new THREE.Vector3(0, 0, -1).applyQuaternion(selectedTransformProxy.quaternion).normalize();
+}
+
+function frameKeyframeForEditing(keyframe) {
+  activeCameraQuaternion = null;
+  const keyPosition = new THREE.Vector3().fromArray(keyframe.position);
+  if (camera.position.distanceTo(keyPosition) > 0.9) {
+    return;
+  }
+
+  const forward = getKeyframeForward(keyframe);
+  if (forward.lengthSq() < 0.0001) {
+    forward.set(0, 0, -1);
+  }
+
+  const side = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  if (side.lengthSq() < 0.0001) {
+    side.set(1, 0, 0);
+  }
+
+  const editorPosition = keyPosition
+    .clone()
+    .addScaledVector(side, 1.75)
+    .addScaledVector(camera.up, 0.85)
+    .addScaledVector(forward, -1.25);
+
+  camera.position.copy(editorPosition);
+  orbit.target.copy(keyPosition);
+  orbit.update();
+}
+
+function setSelectedKeyframeMode(mode) {
+  selectedKeyframeMode = mode;
+  transformControls.setMode(mode);
+  transformControls.setSpace(mode === 'rotate' ? 'local' : 'world');
+  updateKeyframeModeButtons();
+
+  if (selectedKeyframeId) {
+    selectCameraKeyframeHandle(selectedKeyframeId, { frameIfTooClose: true });
+  }
+}
+
+function updateKeyframeModeButtons() {
+  controlsUi.moveKeyframe.classList.toggle('active', selectedKeyframeMode === 'translate');
+  controlsUi.rotateKeyframe.classList.toggle('active', selectedKeyframeMode === 'rotate');
+}
+
+function updateCameraPathCurve() {
+  const keyframes = getSortedCameraKeyframes();
+  if (keyframes.length < 2) {
+    return;
+  }
+
+  const pathLine = cameraPathGroup.children.find((child) => child.userData.cameraPathLine);
+  if (!pathLine) {
+    return;
+  }
+
+  const samples = [];
+  const sampleCount = 96;
+  for (let index = 0; index <= sampleCount; index += 1) {
+    const time = (index / sampleCount) * cameraAnimation.duration;
+    samples.push(interpolateKeyframeVector(keyframes, time, 'position'));
+  }
+
+  pathLine.geometry.dispose();
+  pathLine.geometry = new THREE.BufferGeometry().setFromPoints(samples);
+}
+
+function getSortedCameraKeyframes() {
+  return [...cameraAnimation.keyframes].sort((a, b) => a.time - b.time);
+}
+
+function importCameraKeyframes(keyframes) {
+  cameraAnimation.keyframes = keyframes
+    .filter((keyframe) => Array.isArray(keyframe.position) && Array.isArray(keyframe.target))
+    .map((keyframe, index) => {
+      const position = keyframe.position.map(Number).slice(0, 3);
+      const target = keyframe.target.map(Number).slice(0, 3);
+      const imported = {
+        id: keyframe.id || `imported-${index}`,
+        time: THREE.MathUtils.clamp(Number(keyframe.time) || 0, 0, cameraAnimation.duration),
+        position,
+        target,
+        options: { ...captureKeyframeOptions(), ...(keyframe.options || {}) }
+      };
+      if (keyframe.curve !== undefined) {
+        imported.curve = normalizeCameraCurve(keyframe.curve);
+      }
+      if (keyframe.curveStrength !== undefined) {
+        imported.curveStrength = normalizeCameraCurveStrength(keyframe.curveStrength);
+      }
+      imported.quaternion = getKeyframeQuaternion({
+        ...imported,
+        quaternion: Array.isArray(keyframe.quaternion) ? keyframe.quaternion : undefined
+      }).toArray();
+      return imported;
+    })
+    .sort((a, b) => a.time - b.time);
+  refreshCameraTimeline();
+}
+
+async function exportMovFromUi() {
+  commitSelectedImageSplatTransform();
+  const updatedKeyframe = commitSelectedKeyframeTransform();
+  if (updatedKeyframe) {
+    updateSelectedCameraMarkerFromKeyframe(updatedKeyframe);
+    rebuildCameraPath();
+  }
+
+  controlsUi.exportMov.disabled = true;
+  controlsUi.exportStatus.value = 'Exporting...';
+
+  try {
+    const payload = {
+      name: `particle-camera-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`,
+      duration: cameraAnimation.duration,
+      fps: Number(controlsUi.exportFps.value),
+      width: Number(controlsUi.exportWidth.value),
+      height: Number(controlsUi.exportHeight.value),
+      pixelRatio: renderer.getPixelRatio(),
+      startTime: cameraAnimation.time,
+      cameraStartTime: cameraAnimation.time,
+      effectStartTime: clock.elapsedTime,
+      cameraCurve: {
+        curve: cameraAnimation.curve,
+        strength: cameraAnimation.curveStrength
+      },
+      options: captureKeyframeOptions(),
+      cameraKeyframes: getSortedCameraKeyframes(),
+      cameraSnapshot: captureCameraSnapshot(),
+      lights: serializeSceneLights(),
+      world: serializeWorldEnvironment(),
+      imageSplat: serializeImageSplatObject(),
+      morphTarget: serializeMorphTargetModel(),
+      model: currentModelPayload
+    };
+    const result = window.electronAPI?.exportMov
+      ? await window.electronAPI.exportMov(payload)
+      : await exportMovFromDevServer(payload);
+
+    if (!result.ok) {
+      throw new Error(result.error || 'Export failed');
+    }
+
+    controlsUi.exportStatus.value = result.relativePath || result.path;
+    if (window.electronAPI?.showItemInFolder && result.path) {
+      window.electronAPI.showItemInFolder(result.path);
+    }
+  } catch (error) {
+    console.error(error);
+    controlsUi.exportStatus.value = 'Export failed';
+  } finally {
+    controlsUi.exportMov.disabled = false;
+  }
+}
+
+async function exportMovFromDevServer(payload) {
+  const response = await fetch('/api/export-mov', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  const result = await response.json();
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: result.error || 'Export failed'
+    };
+  }
+
+  return result;
+}
+
+function setStatus(value) {
+  statusText.textContent = value;
+}
+
+function formatCount(value) {
+  const numericValue = Math.max(0, Math.round(Number(value) || 0));
+  if (numericValue < 1000) {
+    return String(numericValue);
+  }
+  if (numericValue < 10000) {
+    return `${(numericValue / 1000).toFixed(1)}K`;
+  }
+  return `${Math.round(numericValue / 1000)}K`;
+}
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function glowEnabled() {
+  if (state.effectMode === 'image') {
+    return Boolean(imageSplatGlowParticles) && state.imageSplatGlow > 0 && state.imageSplatOpacity > 0;
+  }
+
+  if (state.effectMode === 'emission') {
+    return Boolean(emissionGlowParticles) &&
+      state.emissionEnabled &&
+      state.emissionGlow > 0 &&
+      state.emissionOpacity > 0 &&
+      (state.emissionIntensity > 0 || state.breakAmount * state.breakProgress > 0);
+  }
+
+  return Boolean(glowParticles) && state.glowRadius > 0 && state.glowExposure > 0;
+}
+
+function glowBlurRadius() {
+  if (state.effectMode === 'image') {
+    return THREE.MathUtils.clamp(0.8 + state.imageSplatGlow * 1.7 + state.imageSplatScatter * 0.35, 0.7, 10);
+  }
+
+  if (state.effectMode === 'emission') {
+    return THREE.MathUtils.clamp(0.9 + state.emissionGlow * 2.2 + state.emissionDistance * 0.35, 0.75, 9);
+  }
+
+  return THREE.MathUtils.clamp(Math.sqrt(Math.max(state.glowRadius, 0)) * 0.38, 0.35, 20);
+}
+
+function renderFullscreen(material, target = null) {
+  postQuad.material = material;
+  renderer.setRenderTarget(target);
+  renderer.render(postScene, postCamera);
+}
+
+function blurGlowTexture() {
+  const radius = glowBlurRadius();
+  blurMaterial.uniforms.uTexelSize.value.set(1 / glowTarget.width, 1 / glowTarget.height);
+
+  const passes = [
+    radius,
+    radius * 0.56,
+    Math.max(0.75, radius * 0.24)
+  ];
+
+  let input = glowTarget;
+  let output = blurTargetA;
+
+  passes.forEach((passRadius) => {
+    blurMaterial.uniforms.uTexture.value = input.texture;
+    blurMaterial.uniforms.uDirection.value.set(1, 0);
+    blurMaterial.uniforms.uRadius.value = passRadius;
+    renderFullscreen(blurMaterial, output);
+
+    input = output;
+    output = output === blurTargetA ? blurTargetB : blurTargetA;
+
+    blurMaterial.uniforms.uTexture.value = input.texture;
+    blurMaterial.uniforms.uDirection.value.set(0, 1);
+    blurMaterial.uniforms.uRadius.value = passRadius;
+    renderFullscreen(blurMaterial, output);
+
+    input = output;
+    output = output === blurTargetA ? blurTargetB : blurTargetA;
+  });
+
+  return input;
+}
+
+function setVisibleModelColorWrite(enabled) {
+  if (!visibleModelRoot) {
+    return () => {};
+  }
+
+  const previous = [];
+  visibleModelRoot.traverse((node) => {
+    if (!node.isMesh) {
+      return;
+    }
+
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    materials.forEach((material) => {
+      if (!material) {
+        return;
+      }
+      previous.push([material, material.colorWrite]);
+      material.colorWrite = enabled;
+    });
+  });
+
+  return () => {
+    previous.forEach(([material, colorWrite]) => {
+      material.colorWrite = colorWrite;
+    });
+  };
+}
+
+function renderSceneWithGlow() {
+  const previousTarget = renderer.getRenderTarget();
+  renderer.getClearColor(postClearColor);
+  const previousAlpha = renderer.getClearAlpha();
+
+  const previousGlowVisible = glowParticles?.visible ?? false;
+  const previousEmissionGlowVisible = emissionGlowParticles?.visible ?? false;
+  const previousImageGlowVisible = imageSplatGlowParticles?.visible ?? false;
+  if (glowParticles) {
+    glowParticles.visible = false;
+  }
+  if (emissionGlowParticles) {
+    emissionGlowParticles.visible = false;
+  }
+  if (imageSplatGlowParticles) {
+    imageSplatGlowParticles.visible = false;
+  }
+
+  if (!glowEnabled()) {
+    renderer.setRenderTarget(previousTarget);
+    renderer.setClearColor(0x090a0c, exportSettings.transparent ? 0 : 1);
+    renderer.render(scene, camera);
+    if (glowParticles) {
+      glowParticles.visible = previousGlowVisible;
+    }
+    if (emissionGlowParticles) {
+      emissionGlowParticles.visible = previousEmissionGlowVisible;
+    }
+    if (imageSplatGlowParticles) {
+      imageSplatGlowParticles.visible = previousImageGlowVisible;
+    }
+    renderer.setClearColor(postClearColor, previousAlpha);
+    return;
+  }
+
+  renderer.setRenderTarget(sceneTarget);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear(true, true, true);
+  renderer.render(scene, camera);
+
+  const previousParticlesVisible = particles?.visible ?? false;
+  const previousEmissionParticlesVisible = emissionParticles?.visible ?? false;
+  const previousImageParticlesVisible = imageSplatParticles?.visible ?? false;
+  const previousImageMistVisible = imageSplatMistParticles?.visible ?? false;
+  const previousVisibleModelVisible = visibleModelRoot?.visible ?? false;
+  const previousPathVisible = cameraPathGroup.visible;
+  const previousLightHandlesVisible = lightHandleGroup.visible;
+  const previousTransformVisible = transformControls.visible;
+  const previousBackground = scene.background;
+  const previousBackgroundIntensity = scene.backgroundIntensity;
+  const depthMaskVisibleModel = state.effectMode === 'emission' && previousVisibleModelVisible;
+  const restoreVisibleModelColorWrite = depthMaskVisibleModel ? setVisibleModelColorWrite(false) : null;
+
+  if (particles) {
+    particles.visible = false;
+  }
+  if (emissionParticles) {
+    emissionParticles.visible = false;
+  }
+  if (imageSplatParticles) {
+    imageSplatParticles.visible = false;
+  }
+  if (imageSplatMistParticles) {
+    imageSplatMistParticles.visible = state.effectMode === 'image';
+  }
+  if (visibleModelRoot) {
+    visibleModelRoot.visible = depthMaskVisibleModel;
+  }
+  if (glowParticles) {
+    glowParticles.visible = state.effectMode === 'particles' || state.effectMode === 'morph';
+  }
+  if (emissionGlowParticles) {
+    emissionGlowParticles.visible = state.effectMode === 'emission' && state.emissionEnabled;
+  }
+  if (imageSplatGlowParticles) {
+    imageSplatGlowParticles.visible = state.effectMode === 'image';
+  }
+  cameraPathGroup.visible = false;
+  lightHandleGroup.visible = false;
+  transformControls.visible = false;
+
+  renderer.setRenderTarget(glowTarget);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear(true, true, true);
+  scene.background = null;
+  scene.backgroundIntensity = 0;
+  renderer.render(scene, camera);
+  scene.background = previousBackground;
+  scene.backgroundIntensity = previousBackgroundIntensity;
+  restoreVisibleModelColorWrite?.();
+
+  if (particles) {
+    particles.visible = previousParticlesVisible;
+  }
+  if (emissionParticles) {
+    emissionParticles.visible = previousEmissionParticlesVisible;
+  }
+  if (imageSplatParticles) {
+    imageSplatParticles.visible = previousImageParticlesVisible;
+  }
+  if (imageSplatMistParticles) {
+    imageSplatMistParticles.visible = previousImageMistVisible;
+  }
+  if (visibleModelRoot) {
+    visibleModelRoot.visible = previousVisibleModelVisible;
+  }
+  if (glowParticles) {
+    glowParticles.visible = previousGlowVisible;
+  }
+  if (emissionGlowParticles) {
+    emissionGlowParticles.visible = previousEmissionGlowVisible;
+  }
+  if (imageSplatGlowParticles) {
+    imageSplatGlowParticles.visible = previousImageGlowVisible;
+  }
+  cameraPathGroup.visible = previousPathVisible;
+  lightHandleGroup.visible = previousLightHandlesVisible;
+  transformControls.visible = previousTransformVisible;
+
+  const blurredTarget = blurGlowTexture();
+  const bloomDriver = state.effectMode === 'emission'
+    ? state.emissionGlow
+    : state.effectMode === 'image'
+      ? state.imageSplatGlow
+      : state.glowExposure;
+  const bloomStrength = state.effectMode === 'emission'
+    ? THREE.MathUtils.clamp(0.95 + bloomDriver * 0.34, 0.95, 2.15)
+    : state.effectMode === 'image'
+      ? THREE.MathUtils.clamp(1.05 + bloomDriver * 0.28, 1.05, 2.25)
+    : THREE.MathUtils.clamp(1.65 + bloomDriver * 0.42, 1.65, 3.3);
+  compositeMaterial.uniforms.uBaseTexture.value = sceneTarget.texture;
+  compositeMaterial.uniforms.uBloomTexture.value = blurredTarget.texture;
+  compositeMaterial.uniforms.uBloomStrength.value = bloomStrength;
+  compositeMaterial.uniforms.uToneExposure.value = renderer.toneMappingExposure;
+  compositeMaterial.uniforms.uBloomAlpha.value = state.effectMode === 'emission'
+    ? THREE.MathUtils.clamp(0.05 + bloomDriver * 0.045, 0.05, 0.24)
+    : state.effectMode === 'image'
+      ? THREE.MathUtils.clamp(0.05 + bloomDriver * 0.05, 0.05, 0.26)
+    : THREE.MathUtils.clamp(0.08 + bloomDriver * 0.06, 0.08, 0.38);
+
+  renderer.setRenderTarget(previousTarget);
+  renderer.setClearColor(0x090a0c, exportSettings.transparent ? 0 : 1);
+  renderer.clear(true, true, true);
+  renderFullscreen(compositeMaterial, previousTarget);
+  renderer.setClearColor(postClearColor, previousAlpha);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = Math.min(clock.getDelta(), 0.05);
+  uniforms.uTime.value += delta * (state.effectMode === 'morph' ? Math.max(state.morphFlow, 0.05) : state.speed);
+  emissionUniforms.uTime.value += delta;
+  imageSplatUniforms.uTime.value += delta;
+
+  if (exportSettings.autoDissolve) {
+    updateDissolve(THREE.MathUtils.clamp(clock.elapsedTime / exportSettings.duration, 0, 1), false);
+  }
+
+  if (cameraAnimation.playing) {
+    const nextTime = cameraAnimation.time + delta;
+    setCameraTime(nextTime > cameraAnimation.duration ? 0 : nextTime, true);
+  }
+
+  if (particles && state.autoRotate && (state.effectMode === 'particles' || state.effectMode === 'morph')) {
+    particles.rotation.y += delta * 0.16;
+    particles.rotation.x = Math.sin(uniforms.uTime.value * 0.16) * 0.055;
+    if (glowParticles) {
+      glowParticles.rotation.copy(particles.rotation);
+    }
+  }
+
+  if (state.autoRotate && state.effectMode === 'emission') {
+    const rotationY = (visibleModelRoot?.rotation.y || 0) + delta * 0.16;
+    const rotationX = Math.sin(emissionUniforms.uTime.value * 0.16) * 0.035;
+    [visibleModelRoot, emissionParticles, emissionGlowParticles].forEach((item) => {
+      if (item) {
+        item.rotation.set(rotationX, rotationY, 0);
+      }
+    });
+  }
+
+  updateCameraPathVisibility();
+  orbit.update();
+  restoreActiveCameraQuaternion();
+  renderSceneWithGlow();
+  renderCameraPreview();
+}
+
+function updateDissolve(value, updateControl = true) {
+  state.dissolve = THREE.MathUtils.clamp(value, 0, 1);
+  uniforms.uDissolve.value = state.dissolve;
+  if (updateControl) {
+    setRangeValue('dissolve', state.dissolve);
+    setValueInput('dissolve', state.dissolve);
+  }
+}
+
+function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSeconds) {
+  if (cameraAnimation.keyframes.length) {
+    applyTimelineAtTime(THREE.MathUtils.clamp(cameraTimeSeconds, 0, cameraAnimation.duration), { updateUi: false });
+  } else if (Number.isFinite(Number(dissolve))) {
+    updateDissolve(dissolve, false);
+  }
+  uniforms.uTime.value = timeSeconds * (state.effectMode === 'morph' ? Math.max(state.morphFlow, 0.05) : state.speed);
+  emissionUniforms.uTime.value = timeSeconds;
+  imageSplatUniforms.uTime.value = timeSeconds;
+
+  if (particles && state.autoRotate && (state.effectMode === 'particles' || state.effectMode === 'morph')) {
+    particles.rotation.y = timeSeconds * 0.16;
+    particles.rotation.x = Math.sin(uniforms.uTime.value * 0.16) * 0.055;
+    if (glowParticles) {
+      glowParticles.rotation.copy(particles.rotation);
+    }
+  }
+
+  if (state.autoRotate && state.effectMode === 'emission') {
+    const rotationY = timeSeconds * 0.16;
+    const rotationX = Math.sin(emissionUniforms.uTime.value * 0.16) * 0.035;
+    [visibleModelRoot, emissionParticles, emissionGlowParticles].forEach((item) => {
+      if (item) {
+        item.rotation.set(rotationX, rotationY, 0);
+      }
+    });
+  }
+
+  orbit.update();
+  restoreActiveCameraQuaternion();
+  renderSceneWithGlow();
+  return canvas.toDataURL('image/png');
+}
+
+function isStudioReady() {
+  const hasRenderable =
+    Boolean(particles) ||
+    Boolean(emissionParticles) ||
+    Boolean(imageSplatRoot) ||
+    Boolean(realSplatRoot);
+  return initialModelReady && statusText.textContent === 'Ready' && hasRenderable;
+}
+
+window.particleStudio = {
+  isReady: isStudioReady,
+  renderFrame: renderStudioFrame,
+  setOptions: (options, updateUi = false) => applyOptionsSnapshot(options, updateUi),
+  setMorphTargetModel: async (target = {}) => {
+    if (!target?.url && !target?.dataUrl) {
+      clearMorphTarget({ rebuild: true });
+      return false;
+    }
+    await loadMorphTargetUrl(target.url || target.dataUrl, {
+      name: target.name,
+      extension: target.extension,
+      dataUrl: target.dataUrl
+    });
+    return true;
+  },
+  setDissolve: (value) => updateDissolve(value),
+  setCameraCurve: (curve, strength, options = {}) => setCameraCurve(curve, strength, options),
+  getCameraCurve: () => ({
+    curve: cameraAnimation.curve,
+    strength: cameraAnimation.curveStrength,
+    selectedKeyframeId
+  }),
+  setCameraKeyframes: (keyframes) => importCameraKeyframes(keyframes),
+  clearCameraKeyframes: () => clearCameraKeyframes(),
+  setCameraTime: (time, applyCamera = true) => setCameraTime(Number(time), applyCamera),
+  getCameraKeyframes: () => getSortedCameraKeyframes(),
+  setCameraSnapshot: (snapshot, options = {}) => applyCameraSnapshot(snapshot, options),
+  setLights: (lights) => importSceneLights(lights, false),
+  getLights: () => serializeSceneLights(),
+  setWorldEnvironment: async (world = {}) => {
+    if (!world?.url) {
+      disposeWorldEnvironment();
+      if (world.enabled !== undefined) {
+        state.worldEnabled = Boolean(world.enabled);
+      }
+      syncWorldEnvironment();
+      return false;
+    }
+
+    state.worldEnabled = world.enabled !== undefined ? Boolean(world.enabled) : true;
+    state.worldVisible = Boolean(world.visible);
+    state.worldIntensity = normalizeNumericStateValue('worldIntensity', Number(world.intensity ?? state.worldIntensity));
+    state.worldBlur = normalizeNumericStateValue('worldBlur', Number(world.blur ?? state.worldBlur));
+    state.worldRotation = normalizeNumericStateValue('worldRotation', Number(world.rotation ?? state.worldRotation));
+    await loadWorldEnvironmentUrl(world.url, {
+      name: world.name || world.url.split('/').pop()?.split('?')[0] || 'HDR Environment',
+      extension: world.extension,
+      enabled: state.worldEnabled
+    });
+    syncUi();
+    return true;
+  },
+  getWorldEnvironment: () => ({
+    hasTexture: Boolean(worldPmremTarget?.texture),
+    enabled: state.worldEnabled,
+    visible: state.worldVisible,
+    export: state.worldExport,
+    intensity: state.worldIntensity,
+    backgroundIntensity: state.worldIntensity,
+    blur: state.worldBlur,
+    rotation: state.worldRotation
+  }),
+  setImageSplatObject: async (imageSplat = {}) => {
+    if (!imageSplat?.url && !imageSplat?.dataUrl) {
+      removeImageSplatObject();
+      await removeRealSplatObject();
+      currentImageSplatPayload = null;
+      currentGaussianSplatPayload = null;
+      if (state.effectMode === 'image') {
+        setEffectMode('particles');
+      }
+      return false;
+    }
+
+    if (imageSplat.params) {
+      await applyOptionsSnapshot({ ...imageSplat.params, effectMode: 'image' }, false);
+    } else {
+      state.effectMode = 'image';
+    }
+    const url = imageSplat.url || imageSplat.dataUrl;
+    const extension = (imageSplat.extension || '').toLowerCase();
+    if (imageSplat.kind === 'gaussian' || GAUSSIAN_SPLAT_EXTENSIONS.has(extension)) {
+      await loadGaussianSplatUrl(url, {
+        name: imageSplat.name,
+        extension,
+        dataUrl: imageSplat.dataUrl,
+        params: imageSplat.params,
+        transform: imageSplat.transform,
+        resetView: false
+      });
+    } else {
+      await loadImageSplatUrl(url, {
+        name: imageSplat.name,
+        extension,
+        dataUrl: imageSplat.dataUrl,
+        transform: imageSplat.transform,
+        resetView: false
+      });
+    }
+    syncUi();
+    return true;
+  },
+  getImageSplatObject: () => ({
+    loaded: Boolean(imageSplatRoot || realSplatRoot),
+    kind: realSplatRoot ? 'gaussian' : imageSplatRoot ? 'image-preview' : 'none',
+    name: currentGaussianSplatPayload?.name || currentImageSplatPayload?.name || currentLabel,
+    params: captureKeyframeOptions(),
+    transform: captureImageSplatTransform()
+  }),
+  getMorphTargetModel: () => ({
+    loaded: Boolean(morphTargetSource),
+    name: morphTargetLabel,
+    payload: currentMorphTargetPayload
+      ? {
+          name: currentMorphTargetPayload.name,
+          extension: currentMorphTargetPayload.extension,
+          hasPath: Boolean(currentMorphTargetPayload.path),
+          hasDataUrl: Boolean(currentMorphTargetPayload.dataUrl),
+          size: currentMorphTargetPayload.size || 0
+        }
+      : null
+  }),
+  getCurrentAsset: () => ({
+    label: currentLabel,
+    model: currentModelPayload
+      ? {
+          name: currentModelPayload.name,
+          extension: currentModelPayload.extension,
+          hasPath: Boolean(currentModelPayload.path),
+          hasDataUrl: Boolean(currentModelPayload.dataUrl),
+          size: currentModelPayload.size || 0
+        }
+      : null,
+    morphTarget: currentMorphTargetPayload
+      ? {
+          name: currentMorphTargetPayload.name,
+          extension: currentMorphTargetPayload.extension,
+          hasPath: Boolean(currentMorphTargetPayload.path),
+          hasDataUrl: Boolean(currentMorphTargetPayload.dataUrl),
+          size: currentMorphTargetPayload.size || 0
+        }
+      : null,
+    imageSplat: currentImageSplatPayload
+      ? {
+          name: currentImageSplatPayload.name,
+          extension: currentImageSplatPayload.extension,
+          hasDataUrl: Boolean(currentImageSplatPayload.dataUrl)
+        }
+      : null,
+    gaussianSplat: currentGaussianSplatPayload
+      ? {
+          name: currentGaussianSplatPayload.name,
+          extension: currentGaussianSplatPayload.extension,
+          hasDataUrl: Boolean(currentGaussianSplatPayload.dataUrl)
+        }
+      : null
+  }),
+  hasTransformHandle: () => transformControls.visible,
+  captureViewCamera: () => captureCameraSnapshot(),
+  captureCameraPreview: () => {
+    renderCameraPreview();
+    return cameraPreviewUi.canvas?.toDataURL('image/png') || '';
+  },
+  getCameraPreviewPose: () => {
+    const previewCamera = configureCameraPreviewCamera(getExportResolution().aspect);
+    return {
+      position: previewCamera.position.toArray(),
+      quaternion: previewCamera.quaternion.toArray(),
+      hasTimelineCamera: Boolean(getTimelineCameraPose(cameraAnimation.time))
+    };
+  },
+  testMoveKeyframe: (index, delta) => {
+    const keyframe = getSortedCameraKeyframes()[index];
+    if (!keyframe) {
+      return;
+    }
+    const offset = delta.map((value) => Number(value || 0));
+    keyframe.position = keyframe.position.map((value, axis) => value + offset[axis]);
+    keyframe.target = keyframe.target.map((value, axis) => value + offset[axis]);
+    selectedKeyframeId = keyframe.id;
+    rebuildCameraPath();
+  },
+  testRotateKeyframe: (index, euler) => {
+    const keyframe = getSortedCameraKeyframes()[index];
+    if (!keyframe) {
+      return;
+    }
+    selectedKeyframeId = keyframe.id;
+    syncTransformProxyFromKeyframe(keyframe);
+    selectedTransformProxy.rotation.x += Number(euler[0] || 0);
+    selectedTransformProxy.rotation.y += Number(euler[1] || 0);
+    selectedTransformProxy.rotation.z += Number(euler[2] || 0);
+    commitSelectedKeyframeTransform();
+    rebuildCameraPath();
+  },
+  capturePng: () => canvas.toDataURL('image/png')
+};
+
+controlsUi.particleCount.addEventListener('input', () => {
+  updateParticleCount(Number(controlsUi.particleCount.value));
+});
+
+outputUi.particleCount.addEventListener('change', () => {
+  updateParticleCount(Number(outputUi.particleCount.value));
+});
+
+NUMERIC_KEYFRAME_FIELDS.forEach((key) => {
+  controlsUi[key]?.addEventListener('input', () => {
+    updateNumericControl(key, Number(controlsUi[key].value));
+  });
+
+  outputUi[key]?.addEventListener('change', () => {
+    updateNumericControl(key, Number(outputUi[key].value));
+  });
+});
+
+function updateParticleCount(value) {
+  const nextValue = Math.max(MIN_PARTICLE_COUNT, Math.round(Number.isFinite(value) ? value : state.particleCount));
+  state.particleCount = nextValue;
+  setRangeValue('particleCount', state.particleCount);
+  setValueInput('particleCount', state.particleCount);
+  updateStats();
+  scheduleRebuild();
+}
+
+function updateNumericControl(key, value) {
+  if (!Number.isFinite(value)) {
+    setValueInput(key, state[key]);
+    return;
+  }
+
+  state[key] = normalizeNumericStateValue(key, value);
+  if (REBUILD_NUMERIC_FIELDS.has(key)) {
+    if (key === 'emissionCount' || key === 'imageSplatCount') {
+      state[key] = Math.max(MIN_PARTICLE_COUNT, Math.round(state[key]));
+    }
+    updateStats();
+    scheduleRebuild();
+  }
+  setRangeValue(key, state[key]);
+  setValueInput(key, state[key]);
+  syncUniforms();
+}
+
+function normalizeNumericStateValue(key, value) {
+  if (key === 'pointSize' || key === 'emissionSize' || key === 'breakSize' || key === 'imageSplatSize') {
+    return Math.max(0.01, value);
+  }
+
+  if (key === 'emissionCount' || key === 'imageSplatCount') {
+    return Math.max(MIN_PARTICLE_COUNT, Math.round(value));
+  }
+
+  if (key === 'imageSplatScale') {
+    return Math.max(0.01, value);
+  }
+
+  if (CLAMP_01_FIELDS.has(key)) {
+    return THREE.MathUtils.clamp(value, 0, 1);
+  }
+
+  if (SIGNED_NUMERIC_FIELDS.has(key)) {
+    return value;
+  }
+
+  return Math.max(0, value);
+}
+
+['colorA', 'colorB'].forEach((key) => {
+  controlsUi[key].addEventListener('input', () => {
+    state[key] = controlsUi[key].value;
+    syncUniforms();
+  });
+});
+
+controlsUi.useTexture.addEventListener('change', () => {
+  state.useTexture = controlsUi.useTexture.checked;
+  syncUniforms();
+});
+
+controlsUi.emissionEnabled.addEventListener('change', () => {
+  state.emissionEnabled = controlsUi.emissionEnabled.checked;
+  syncUniforms();
+});
+
+controlsUi.imageSplatPlaneVisible?.addEventListener('change', () => {
+  state.imageSplatPlaneVisible = controlsUi.imageSplatPlaneVisible.checked;
+  syncImageSplatUniforms();
+  syncEffectVisibility();
+});
+
+controlsUi.autoRotate.addEventListener('change', () => {
+  state.autoRotate = controlsUi.autoRotate.checked;
+});
+
+controlsUi.worldEnabled.addEventListener('change', () => {
+  state.worldEnabled = controlsUi.worldEnabled.checked;
+  syncWorldEnvironment();
+});
+
+controlsUi.worldVisible.addEventListener('change', () => {
+  state.worldVisible = controlsUi.worldVisible.checked;
+  syncWorldEnvironment();
+});
+
+controlsUi.worldExport.addEventListener('change', () => {
+  state.worldExport = controlsUi.worldExport.checked;
+});
+
+['input', 'change'].forEach((eventName) => {
+  controlsUi.exportWidth?.addEventListener(eventName, updateCameraPreviewLayout);
+  controlsUi.exportHeight?.addEventListener(eventName, updateCameraPreviewLayout);
+});
+
+controlsUi.timeline.addEventListener('input', () => {
+  cameraAnimation.playing = false;
+  updatePlayButton();
+  setCameraTime(Number(controlsUi.timeline.value), true);
+});
+
+controlsUi.duration.addEventListener('change', () => {
+  setCameraDuration(Number(controlsUi.duration.value));
+});
+
+controlsUi.cameraCurve?.addEventListener('change', () => {
+  setCameraCurve(controlsUi.cameraCurve.value, controlsUi.cameraCurveStrength?.value);
+});
+
+controlsUi.cameraCurveStrength?.addEventListener('change', () => {
+  setCameraCurve(controlsUi.cameraCurve?.value, controlsUi.cameraCurveStrength.value);
+});
+
+controlsUi.playTimeline.addEventListener('click', () => {
+  toggleTimelinePlayback();
+});
+
+controlsUi.addKeyframe.addEventListener('click', () => {
+  addCameraKeyframe();
+});
+
+controlsUi.clearKeyframes.addEventListener('click', () => {
+  clearCameraKeyframes();
+});
+
+controlsUi.moveKeyframe.addEventListener('click', () => {
+  setSelectedKeyframeMode('translate');
+});
+
+controlsUi.rotateKeyframe.addEventListener('click', () => {
+  setSelectedKeyframeMode('rotate');
+});
+
+controlsUi.moveImageSplat?.addEventListener('click', () => {
+  selectImageSplatObject();
+  setSelectedImageSplatMode('translate');
+});
+
+controlsUi.rotateImageSplat?.addEventListener('click', () => {
+  selectImageSplatObject();
+  setSelectedImageSplatMode('rotate');
+});
+
+controlsUi.scaleImageSplat?.addEventListener('click', () => {
+  selectImageSplatObject();
+  setSelectedImageSplatMode('scale');
+});
+
+lightsUi.addPoint?.addEventListener('click', () => createSceneLight('point'));
+lightsUi.addSun?.addEventListener('click', () => createSceneLight('sun'));
+lightsUi.addSpot?.addEventListener('click', () => createSceneLight('spot'));
+lightsUi.addArea?.addEventListener('click', () => createSceneLight('area'));
+lightsUi.delete?.addEventListener('click', deleteSelectedLight);
+lightsUi.type?.addEventListener('change', () => updateSelectedLightProperty('type', lightsUi.type.value));
+lightsUi.color?.addEventListener('input', () => updateSelectedLightProperty('color', lightsUi.color.value));
+lightsUi.intensity?.addEventListener('input', () => updateSelectedLightProperty('intensity', Number(lightsUi.intensity.value)));
+lightsUi.intensityValue?.addEventListener('change', () => updateSelectedLightProperty('intensity', Number(lightsUi.intensityValue.value)));
+lightsUi.size?.addEventListener('input', () => updateSelectedLightProperty('size', Number(lightsUi.size.value)));
+lightsUi.sizeValue?.addEventListener('change', () => updateSelectedLightProperty('size', Number(lightsUi.sizeValue.value)));
+lightsUi.move?.addEventListener('click', () => setSelectedLightMode('translate'));
+lightsUi.rotate?.addEventListener('click', () => setSelectedLightMode('rotate'));
+
+window.addEventListener('keydown', (event) => {
+  const tagName = document.activeElement?.tagName?.toLowerCase();
+  if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
+    return;
+  }
+
+  if (!selectedKeyframeId && !selectedLightId && !selectedImageSplat) {
+    return;
+  }
+
+  if (event.key.toLowerCase() === 'w') {
+    if (selectedImageSplat) {
+      setSelectedImageSplatMode('translate');
+    } else if (selectedLightId) {
+      setSelectedLightMode('translate');
+    } else {
+      setSelectedKeyframeMode('translate');
+    }
+  }
+
+  if (event.key.toLowerCase() === 'e') {
+    if (selectedImageSplat) {
+      setSelectedImageSplatMode('rotate');
+    } else if (selectedLightId) {
+      setSelectedLightMode('rotate');
+    } else {
+      setSelectedKeyframeMode('rotate');
+    }
+  }
+
+  if (event.key.toLowerCase() === 'r' && selectedImageSplat) {
+    setSelectedImageSplatMode('scale');
+  }
+});
+
+controlsUi.exportMov.addEventListener('click', () => {
+  exportMovFromUi();
+});
+
+presetButtons.forEach((button) => {
+  button.addEventListener('click', () => setPreset(button.dataset.preset));
+});
+
+effectModeButtons.forEach((button) => {
+  button.addEventListener('click', () => setEffectMode(button.dataset.effectMode));
+});
+
+resetCameraButton.addEventListener('click', resetCamera);
+renderer.domElement.addEventListener('pointerdown', handlePathPointerDown);
+
+modelInput.addEventListener('change', () => {
+  const [file] = modelInput.files;
+  if (file) {
+    loadAssetFile(file);
+  }
+});
+
+worldUi.input?.addEventListener('change', () => {
+  const [file] = worldUi.input.files;
+  if (file) {
+    loadWorldFile(file);
+  }
+});
+
+morphUi.input?.addEventListener('change', () => {
+  const [file] = morphUi.input.files;
+  if (file) {
+    loadMorphTargetFile(file);
+  }
+});
+
+['dragenter', 'dragover'].forEach((eventName) => {
+  dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropZone.classList.add('dragging');
+  });
+
+  worldUi.dropZone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    worldUi.dropZone.classList.add('dragging');
+  });
+
+  morphUi.dropZone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    morphUi.dropZone.classList.add('dragging');
+  });
+});
+
+['dragleave', 'drop'].forEach((eventName) => {
+  dropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    dropZone.classList.remove('dragging');
+  });
+
+  worldUi.dropZone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    worldUi.dropZone.classList.remove('dragging');
+  });
+
+  morphUi.dropZone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    morphUi.dropZone.classList.remove('dragging');
+  });
+});
+
+dropZone.addEventListener('drop', (event) => {
+  const [file] = event.dataTransfer.files;
+  if (file) {
+    loadAssetFile(file);
+  }
+});
+
+worldUi.dropZone?.addEventListener('drop', (event) => {
+  const [file] = event.dataTransfer.files;
+  if (file) {
+    loadWorldFile(file);
+  }
+});
+
+morphUi.dropZone?.addEventListener('drop', (event) => {
+  const [file] = event.dataTransfer.files;
+  if (file) {
+    loadMorphTargetFile(file);
+  }
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(renderPixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  resizePostTargets();
+  uniforms.uPixelRatio.value = studioPixelRatio;
+  imageSplatUniforms.uPixelRatio.value = studioPixelRatio;
+  updateCameraPreviewLayout();
+});

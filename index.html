@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Particle Model Studio</title>
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene" aria-label="Particle model preview"></canvas>
+
+      <section class="panel" aria-label="Particle controls">
+        <div class="brand">
+          <div>
+            <p class="eyebrow">Particle Model Studio</p>
+            <h1>模型粒子化</h1>
+          </div>
+          <button class="icon-button" id="resetCamera" title="重置视角" aria-label="重置视角">
+            <i data-lucide="rotate-ccw"></i>
+          </button>
+        </div>
+
+        <label class="drop-zone" id="dropZone" for="modelInput">
+          <input id="modelInput" type="file" accept=".glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz" />
+          <span class="drop-title">导入模型 / 图片 / 360 HDR / Gaussian Splat</span>
+          <span class="drop-name" id="modelName">当前：正在加载模型</span>
+        </label>
+
+        <div class="toolbar" aria-label="Actions">
+          <button class="tool-button active" data-preset="shape" title="保持模型轮廓">
+            <i data-lucide="box"></i>
+            <span>Form</span>
+          </button>
+          <button class="tool-button" data-preset="calm" title="柔和流动">
+            <i data-lucide="waves"></i>
+            <span>Flow</span>
+          </button>
+          <button class="tool-button" data-preset="burst" title="扩散爆发">
+            <i data-lucide="sparkles"></i>
+            <span>Burst</span>
+          </button>
+          <button class="tool-button" data-preset="vortex" title="涡旋场">
+            <i data-lucide="orbit"></i>
+            <span>Vortex</span>
+          </button>
+          <button class="tool-button" data-preset="bloom" title="花瓣流体生长与消散">
+            <i data-lucide="sparkles"></i>
+            <span>Bloom</span>
+          </button>
+        </div>
+
+        <div class="mode-switch" aria-label="Effect mode">
+          <button class="mode-button active" data-effect-mode="particles" type="button">模型粒子化</button>
+          <button class="mode-button" data-effect-mode="emission" type="button">模型逸散</button>
+          <button class="mode-button" data-effect-mode="morph" type="button">粒子转换</button>
+          <button class="mode-button" data-effect-mode="image" type="button">高斯场景</button>
+        </div>
+
+        <details class="modifier-section particle-mode-only" open>
+          <summary>粒子外观</summary>
+          <div class="control-grid">
+            <label>
+              <span>粒子数量</span>
+              <input id="particleCount" type="range" min="1" max="500000" step="1" value="90000" />
+              <input id="particleCountValue" class="value-input" type="number" min="1" step="1" value="90000" />
+            </label>
+            <label>
+              <span>粒子尺寸</span>
+              <input id="pointSize" type="range" min="0.2" max="14" step="0.1" value="2.4" />
+              <input id="pointSizeValue" class="value-input" type="number" min="0.05" step="0.1" value="2.4" />
+            </label>
+            <label>
+              <span>边缘羽化</span>
+              <input id="edgeFeather" type="range" min="0" max="1" step="0.01" value="0.18" />
+              <input id="edgeFeatherValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.18" />
+            </label>
+            <label>
+              <span>采样清理</span>
+              <input id="sampleCleanup" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="sampleCleanupValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>尺寸随机</span>
+              <input id="sizeRandom" type="range" min="0" max="1" step="0.01" value="0.28" />
+              <input id="sizeRandomValue" class="value-input" type="number" min="0" step="0.01" value="0.28" />
+            </label>
+            <label>
+              <span>发光半径</span>
+              <input id="glowRadius" type="range" min="0" max="500" step="1" value="80" />
+              <input id="glowRadiusValue" class="value-input" type="number" min="0" step="1" value="80" />
+            </label>
+            <label>
+              <span>发光曝光</span>
+              <input id="glowExposure" type="range" min="0" max="4" step="0.01" value="0.85" />
+              <input id="glowExposureValue" class="value-input" type="number" min="0" step="0.01" value="0.85" />
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section particle-mode-only" open>
+          <summary>噪波 / 运动</summary>
+          <div class="control-grid">
+            <label>
+              <span>扩散</span>
+              <input id="spread" type="range" min="0" max="4" step="0.01" value="0" />
+              <input id="spreadValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>噪波强度</span>
+              <input id="noise" type="range" min="0" max="3" step="0.01" value="0" />
+              <input id="noiseValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>噪波大小</span>
+              <input id="noiseScale" type="range" min="0.15" max="8" step="0.01" value="1.8" />
+              <input id="noiseScaleValue" class="value-input" type="number" min="0.01" step="0.01" value="1.8" />
+            </label>
+            <label>
+              <span>涡旋</span>
+              <input id="swirl" type="range" min="-3" max="3" step="0.01" value="0" />
+              <input id="swirlValue" class="value-input" type="number" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>速度</span>
+              <input id="speed" type="range" min="0" max="3" step="0.01" value="0" />
+              <input id="speedValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>消散</span>
+              <input id="dissolve" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="dissolveValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section particle-mode-only" open>
+          <summary>生长</summary>
+          <div class="control-grid">
+            <label>
+              <span>生长进度</span>
+              <input id="growth" type="range" min="0" max="1" step="0.01" value="1" />
+              <input id="growthValue" class="value-input" type="number" min="0" step="0.01" value="1.00" />
+            </label>
+            <label>
+              <span>流动感</span>
+              <input id="growthFlow" type="range" min="0" max="2" step="0.01" value="0.65" />
+              <input id="growthFlowValue" class="value-input" type="number" min="0" step="0.01" value="0.65" />
+            </label>
+            <label>
+              <span>生长宽度</span>
+              <input id="growthWidth" type="range" min="0.06" max="0.7" step="0.01" value="0.24" />
+              <input id="growthWidthValue" class="value-input" type="number" min="0.01" step="0.01" value="0.24" />
+            </label>
+            <label>
+              <span>生长湍流</span>
+              <input id="growthTurbulence" type="range" min="0" max="2" step="0.01" value="0.45" />
+              <input id="growthTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.45" />
+            </label>
+            <label>
+              <span>花瓣流体</span>
+              <input id="organicFlow" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="organicFlowValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>边缘撕裂</span>
+              <input id="edgeBreak" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="edgeBreakValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>流丝长度</span>
+              <input id="filamentLength" type="range" min="0" max="4" step="0.01" value="0" />
+              <input id="filamentLengthValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>卷曲强度</span>
+              <input id="filamentCurl" type="range" min="0" max="3" step="0.01" value="0" />
+              <input id="filamentCurlValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section compact" open>
+          <summary>材质</summary>
+          <div class="color-row" aria-label="Color controls">
+            <label>
+              <span>颜色 A</span>
+              <input id="colorA" type="color" value="#00f0ff" />
+            </label>
+            <label>
+              <span>颜色 B</span>
+              <input id="colorB" type="color" value="#ffbf36" />
+            </label>
+            <label class="toggle-row">
+              <input id="useTexture" type="checkbox" checked />
+              <span>原贴图</span>
+            </label>
+            <label class="toggle-row">
+              <input id="autoRotate" type="checkbox" checked />
+              <span>自动旋转</span>
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section morph-mode-only" id="morphPanel" open>
+          <summary>粒子转换</summary>
+          <div class="modifier-body">
+            <label class="drop-zone compact-file-zone" id="morphTargetDropZone" for="morphTargetInput">
+              <input id="morphTargetInput" type="file" accept=".glb,.gltf,.obj,.stl,.fbx" />
+              <span class="drop-title">导入目标模型 2</span>
+              <span class="drop-name" id="morphTargetName">当前：未导入目标模型</span>
+            </label>
+
+            <details class="modifier-subsection" open>
+              <summary>转换形态</summary>
+              <div class="control-grid">
+                <label>
+                  <span>转换进度</span>
+                  <input id="morphProgress" type="range" min="0" max="1" step="0.01" value="0" />
+                  <input id="morphProgressValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>流动感</span>
+                  <input id="morphFlow" type="range" min="0" max="3" step="0.01" value="0.85" />
+                  <input id="morphFlowValue" class="value-input" type="number" min="0" step="0.01" value="0.85" />
+                </label>
+                <label>
+                  <span>空间散开</span>
+                  <input id="morphScatter" type="range" min="0" max="5" step="0.01" value="0.72" />
+                  <input id="morphScatterValue" class="value-input" type="number" min="0" step="0.01" value="0.72" />
+                </label>
+                <label>
+                  <span>湍流</span>
+                  <input id="morphTurbulence" type="range" min="0" max="4" step="0.01" value="0.48" />
+                  <input id="morphTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.48" />
+                </label>
+                <label>
+                  <span>拖尾宽度</span>
+                  <input id="morphTrail" type="range" min="0.05" max="1" step="0.01" value="0.28" />
+                  <input id="morphTrailValue" class="value-input" type="number" min="0.01" step="0.01" value="0.28" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection">
+              <summary>流向</summary>
+              <div class="control-grid">
+                <label>
+                  <span>方向 X</span>
+                  <input id="morphDirX" type="range" min="-2" max="2" step="0.01" value="0.25" />
+                  <input id="morphDirXValue" class="value-input" type="number" step="0.01" value="0.25" />
+                </label>
+                <label>
+                  <span>方向 Y</span>
+                  <input id="morphDirY" type="range" min="-2" max="2" step="0.01" value="0.35" />
+                  <input id="morphDirYValue" class="value-input" type="number" step="0.01" value="0.35" />
+                </label>
+                <label>
+                  <span>方向 Z</span>
+                  <input id="morphDirZ" type="range" min="-2" max="2" step="0.01" value="-0.12" />
+                  <input id="morphDirZValue" class="value-input" type="number" step="0.01" value="-0.12" />
+                </label>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <details class="modifier-section image-mode-only" id="imageSplatPanel" open>
+          <summary>高斯场景对象</summary>
+          <div class="modifier-body">
+            <div class="camera-mode-actions image-splat-actions">
+              <button class="small-button active" id="moveImageSplat" type="button" title="移动图片对象">
+                <i data-lucide="move-3d"></i>
+                <span>位置</span>
+              </button>
+              <button class="small-button" id="rotateImageSplat" type="button" title="旋转图片对象">
+                <i data-lucide="rotate-3d"></i>
+                <span>旋转</span>
+              </button>
+              <button class="small-button" id="scaleImageSplat" type="button" title="缩放图片对象">
+                <i data-lucide="box"></i>
+                <span>缩放</span>
+              </button>
+            </div>
+
+            <details class="modifier-subsection" open>
+              <summary>图片预览形态</summary>
+              <div class="control-grid">
+                <label>
+                  <span>粒子数量</span>
+                  <input id="imageSplatCount" type="range" min="1" max="500000" step="1" value="150000" />
+                  <input id="imageSplatCountValue" class="value-input" type="number" min="1" step="1" value="150000" />
+                </label>
+                <label>
+                  <span>空间厚度</span>
+                  <input id="imageSplatDepth" type="range" min="0" max="4" step="0.01" value="1.2" />
+                  <input id="imageSplatDepthValue" class="value-input" type="number" min="0" step="0.01" value="1.20" />
+                </label>
+                <label>
+                  <span>扩散强度</span>
+                  <input id="imageSplatScatter" type="range" min="0" max="5" step="0.01" value="1.35" />
+                  <input id="imageSplatScatterValue" class="value-input" type="number" min="0" step="0.01" value="1.35" />
+                </label>
+                <label>
+                  <span>流动速度</span>
+                  <input id="imageSplatSpeed" type="range" min="0" max="4" step="0.01" value="0.55" />
+                  <input id="imageSplatSpeedValue" class="value-input" type="number" min="0" step="0.01" value="0.55" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection">
+              <summary>扩散方向</summary>
+              <div class="control-grid">
+                <label>
+                  <span>方向 X</span>
+                  <input id="imageSplatDirX" type="range" min="-2" max="2" step="0.01" value="0.35" />
+                  <input id="imageSplatDirXValue" class="value-input" type="number" step="0.01" value="0.35" />
+                </label>
+                <label>
+                  <span>方向 Y</span>
+                  <input id="imageSplatDirY" type="range" min="-2" max="2" step="0.01" value="0.12" />
+                  <input id="imageSplatDirYValue" class="value-input" type="number" step="0.01" value="0.12" />
+                </label>
+                <label>
+                  <span>方向 Z</span>
+                  <input id="imageSplatDirZ" type="range" min="-2" max="2" step="0.01" value="0.55" />
+                  <input id="imageSplatDirZValue" class="value-input" type="number" step="0.01" value="0.55" />
+                </label>
+                <label>
+                  <span>湍流</span>
+                  <input id="imageSplatTurbulence" type="range" min="0" max="4" step="0.01" value="1.05" />
+                  <input id="imageSplatTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="1.05" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection" open>
+              <summary>粒子外观</summary>
+              <div class="control-grid">
+                <label>
+                  <span>点直径</span>
+                  <input id="imageSplatSize" type="range" min="0.1" max="12" step="0.01" value="1.25" />
+                  <input id="imageSplatSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="1.25" />
+                </label>
+                <label>
+                  <span>边缘羽化</span>
+                  <input id="imageSplatFeather" type="range" min="0" max="1" step="0.01" value="0.58" />
+                  <input id="imageSplatFeatherValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.58" />
+                </label>
+                <label>
+                  <span>图片色彩</span>
+                  <input id="imageSplatColorKeep" type="range" min="0" max="1" step="0.01" value="1" />
+                  <input id="imageSplatColorKeepValue" class="value-input" type="number" min="0" max="1" step="0.01" value="1.00" />
+                </label>
+                <label>
+                  <span>粒子透明</span>
+                  <input id="imageSplatOpacity" type="range" min="0" max="1" step="0.01" value="0.72" />
+                  <input id="imageSplatOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.72" />
+                </label>
+                <label>
+                  <span>发光曝光</span>
+                  <input id="imageSplatGlow" type="range" min="0" max="4" step="0.01" value="0.65" />
+                  <input id="imageSplatGlowValue" class="value-input" type="number" min="0" step="0.01" value="0.65" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection">
+              <summary>原图薄片</summary>
+              <div class="control-grid">
+                <label class="toggle-row wide-toggle">
+                  <input id="imageSplatPlaneVisible" type="checkbox" checked />
+                  <span>显示原图薄片</span>
+                </label>
+                <label>
+                  <span>薄片透明度</span>
+                  <input id="imageSplatPlaneOpacity" type="range" min="0" max="1" step="0.01" value="0.18" />
+                  <input id="imageSplatPlaneOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.18" />
+                </label>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="worldPanel" open>
+          <summary>世界环境</summary>
+          <div class="modifier-body">
+            <label class="drop-zone compact-file-zone" id="worldDropZone" for="worldInput">
+              <input id="worldInput" type="file" accept=".hdr,.exr" />
+              <span class="drop-title">导入 HDR / EXR</span>
+              <span class="drop-name" id="worldName">当前：无 HDR 环境</span>
+            </label>
+
+            <div class="world-toggle-row">
+              <label class="toggle-row compact-toggle">
+                <input id="worldEnabled" type="checkbox" />
+                <span>启用环境</span>
+              </label>
+              <label class="toggle-row compact-toggle">
+                <input id="worldVisible" type="checkbox" />
+                <span>显示背景</span>
+              </label>
+              <label class="toggle-row compact-toggle">
+                <input id="worldExport" type="checkbox" checked />
+                <span>导出包含 HDR</span>
+              </label>
+            </div>
+
+            <div class="control-grid">
+              <label>
+                <span>HDR 强度</span>
+                <input id="worldIntensity" type="range" min="0" max="5" step="0.01" value="1" />
+                <input id="worldIntensityValue" class="value-input" type="number" min="0" step="0.01" value="1.00" />
+              </label>
+              <label>
+                <span>背景模糊</span>
+                <input id="worldBlur" type="range" min="0" max="1" step="0.01" value="0" />
+                <input id="worldBlurValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+              </label>
+              <label>
+                <span>水平旋转</span>
+                <input id="worldRotation" type="range" min="-180" max="180" step="1" value="0" />
+                <input id="worldRotationValue" class="value-input" type="number" step="1" value="0" />
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="lightsPanel" open>
+          <summary>场景灯光</summary>
+          <div class="modifier-body">
+            <div class="light-toolbar" aria-label="Add lights">
+              <button class="small-button" id="addPointLight" type="button" title="添加点光">
+                <i data-lucide="lightbulb"></i>
+                <span>点光</span>
+              </button>
+              <button class="small-button" id="addSunLight" type="button" title="添加日光">
+                <i data-lucide="sun"></i>
+                <span>日光</span>
+              </button>
+              <button class="small-button" id="addSpotLight" type="button" title="添加聚光">
+                <i data-lucide="sparkles"></i>
+                <span>聚光</span>
+              </button>
+              <button class="small-button" id="addAreaLight" type="button" title="添加面光">
+                <i data-lucide="box"></i>
+                <span>面光</span>
+              </button>
+            </div>
+
+            <div class="light-list" id="lightList" aria-label="Lights"></div>
+
+            <details class="modifier-subsection" open>
+              <summary>灯光参数</summary>
+              <div class="control-grid">
+                <label class="select-row">
+                  <span>类型</span>
+                  <select id="lightType">
+                    <option value="point">点光</option>
+                    <option value="sun">日光</option>
+                    <option value="spot">聚光</option>
+                    <option value="area">面光</option>
+                  </select>
+                  <button class="mini-icon-button" id="deleteLight" type="button" title="删除选中灯光" aria-label="删除选中灯光">
+                    <i data-lucide="trash-2"></i>
+                  </button>
+                </label>
+                <label>
+                  <span>颜色</span>
+                  <input id="lightColor" type="color" value="#ffffff" />
+                  <output id="lightColorValue">#ffffff</output>
+                </label>
+                <label>
+                  <span>强度</span>
+                  <input id="lightIntensity" type="range" min="0" max="20" step="0.01" value="1" />
+                  <input id="lightIntensityValue" class="value-input" type="number" min="0" step="0.01" value="1.00" />
+                </label>
+                <label>
+                  <span id="lightSizeLabel">大小</span>
+                  <input id="lightSize" type="range" min="0.01" max="10" step="0.01" value="1" />
+                  <input id="lightSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="1.00" />
+                </label>
+              </div>
+            </details>
+
+            <div class="camera-mode-actions light-mode-actions">
+              <button class="small-button active" id="moveLight" type="button" title="移动选中的灯光">
+                <i data-lucide="move-3d"></i>
+                <span>位置</span>
+              </button>
+              <button class="small-button" id="rotateLight" type="button" title="旋转选中的灯光">
+                <i data-lucide="rotate-3d"></i>
+                <span>旋转</span>
+              </button>
+            </div>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="emissionPanel" open>
+          <summary>模型逸散</summary>
+          <div class="modifier-body">
+            <label class="toggle-row compact-toggle">
+              <input id="emissionEnabled" type="checkbox" checked />
+              <span>逸散开关</span>
+            </label>
+
+            <details class="modifier-subsection" open>
+              <summary>模型本体</summary>
+              <div class="control-grid">
+                <label>
+                  <span>白化程度</span>
+                  <input id="modelWhite" type="range" min="0" max="1" step="0.01" value="0.72" />
+                  <input id="modelWhiteValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.72" />
+                </label>
+                <label>
+                  <span>模型粗糙</span>
+                  <input id="modelRoughness" type="range" min="0" max="1" step="0.01" value="0.82" />
+                  <input id="modelRoughnessValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.82" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection" open>
+              <summary>逸散形态</summary>
+              <div class="control-grid">
+                <label>
+                  <span>逸散数量</span>
+                  <input id="emissionCount" type="range" min="1" max="500000" step="1" value="120000" />
+                  <input id="emissionCountValue" class="value-input" type="number" min="1" step="1" value="120000" />
+                </label>
+                <label>
+                  <span>逸散强度</span>
+                  <input id="emissionIntensity" type="range" min="0" max="2" step="0.01" value="0.9" />
+                  <input id="emissionIntensityValue" class="value-input" type="number" min="0" step="0.01" value="0.90" />
+                </label>
+                <label>
+                  <span>逸散距离</span>
+                  <input id="emissionDistance" type="range" min="0" max="4" step="0.01" value="1.25" />
+                  <input id="emissionDistanceValue" class="value-input" type="number" min="0" step="0.01" value="1.25" />
+                </label>
+                <label>
+                  <span>流动速度</span>
+                  <input id="emissionSpeed" type="range" min="0" max="3" step="0.01" value="0.65" />
+                  <input id="emissionSpeedValue" class="value-input" type="number" min="0" step="0.01" value="0.65" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection">
+              <summary>风 / 湍流</summary>
+              <div class="control-grid">
+                <label>
+                  <span>风向 X</span>
+                  <input id="emissionWindX" type="range" min="-2" max="2" step="0.01" value="0.25" />
+                  <input id="emissionWindXValue" class="value-input" type="number" step="0.01" value="0.25" />
+                </label>
+                <label>
+                  <span>风向 Y</span>
+                  <input id="emissionWindY" type="range" min="-2" max="2" step="0.01" value="0.18" />
+                  <input id="emissionWindYValue" class="value-input" type="number" step="0.01" value="0.18" />
+                </label>
+                <label>
+                  <span>风向 Z</span>
+                  <input id="emissionWindZ" type="range" min="-2" max="2" step="0.01" value="0" />
+                  <input id="emissionWindZValue" class="value-input" type="number" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>湍流</span>
+                  <input id="emissionTurbulence" type="range" min="0" max="3" step="0.01" value="0.72" />
+                  <input id="emissionTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.72" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection" open>
+              <summary>逸散粒子</summary>
+              <div class="control-grid">
+                <label>
+                  <span>粒子尺寸</span>
+                  <input id="emissionSize" type="range" min="0.1" max="8" step="0.01" value="1.15" />
+                  <input id="emissionSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="1.15" />
+                </label>
+                <label>
+                  <span>粒子透明</span>
+                  <input id="emissionOpacity" type="range" min="0" max="1" step="0.01" value="0.42" />
+                  <input id="emissionOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.42" />
+                </label>
+                <label>
+                  <span>粒子发光</span>
+                  <input id="emissionGlow" type="range" min="0" max="3" step="0.01" value="0.35" />
+                  <input id="emissionGlowValue" class="value-input" type="number" min="0" step="0.01" value="0.35" />
+                </label>
+              </div>
+            </details>
+
+            <details class="modifier-subsection">
+              <summary>局部破碎</summary>
+              <div class="control-grid">
+                <label>
+                  <span>破碎强度</span>
+                  <input id="breakAmount" type="range" min="0" max="1" step="0.01" value="0" />
+                  <input id="breakAmountValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>破碎进度</span>
+                  <input id="breakProgress" type="range" min="0" max="1" step="0.01" value="0" />
+                  <input id="breakProgressValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>破碎范围</span>
+                  <input id="breakRadius" type="range" min="0.05" max="4" step="0.01" value="0.75" />
+                  <input id="breakRadiusValue" class="value-input" type="number" min="0.01" step="0.01" value="0.75" />
+                </label>
+                <label>
+                  <span>破碎羽化</span>
+                  <input id="breakFeather" type="range" min="0.01" max="2" step="0.01" value="0.35" />
+                  <input id="breakFeatherValue" class="value-input" type="number" min="0.01" step="0.01" value="0.35" />
+                </label>
+                <label>
+                  <span>中心 X</span>
+                  <input id="breakCenterX" type="range" min="-2.5" max="2.5" step="0.01" value="0" />
+                  <input id="breakCenterXValue" class="value-input" type="number" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>中心 Y</span>
+                  <input id="breakCenterY" type="range" min="-2.5" max="2.5" step="0.01" value="0.5" />
+                  <input id="breakCenterYValue" class="value-input" type="number" step="0.01" value="0.50" />
+                </label>
+                <label>
+                  <span>中心 Z</span>
+                  <input id="breakCenterZ" type="range" min="-2.5" max="2.5" step="0.01" value="0" />
+                  <input id="breakCenterZValue" class="value-input" type="number" step="0.01" value="0.00" />
+                </label>
+                <label>
+                  <span>碎片速度</span>
+                  <input id="breakSpeed" type="range" min="0" max="3" step="0.01" value="0.8" />
+                  <input id="breakSpeedValue" class="value-input" type="number" min="0" step="0.01" value="0.80" />
+                </label>
+                <label>
+                  <span>碎片大小</span>
+                  <input id="breakSize" type="range" min="0.2" max="6" step="0.01" value="1.4" />
+                  <input id="breakSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="1.40" />
+                </label>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <div class="camera-row" aria-label="Camera animation controls">
+          <div class="section-head">
+            <span>摄像机</span>
+            <output id="timelineValue">0.00s</output>
+          </div>
+          <div class="timeline-wrap">
+            <input id="timeline" type="range" min="0" max="5" step="0.01" value="0" />
+            <div id="timelineMarkers" class="timeline-markers" aria-hidden="true"></div>
+          </div>
+          <div class="camera-actions">
+            <button class="small-button" id="playTimeline" title="播放相机动画">
+              <i data-lucide="play"></i>
+              <span>播放</span>
+            </button>
+            <button class="small-button" id="addKeyframe" title="记录当前摄像机关键帧">
+              <i data-lucide="key-round"></i>
+              <span>K帧</span>
+            </button>
+            <button class="small-button" id="clearKeyframes" title="清空相机路径">
+              <i data-lucide="trash-2"></i>
+              <span>清空</span>
+            </button>
+          </div>
+          <div class="camera-mode-actions">
+            <button class="small-button active" id="moveKeyframe" title="移动选中的摄像机关键帧">
+              <i data-lucide="move-3d"></i>
+              <span>位置</span>
+            </button>
+            <button class="small-button" id="rotateKeyframe" title="旋转选中的摄像机关键帧">
+              <i data-lucide="rotate-3d"></i>
+              <span>旋转</span>
+            </button>
+          </div>
+          <div class="camera-curve-row">
+            <label>
+              <span>速度曲线</span>
+              <select id="cameraCurve">
+                <option value="easeInOut">缓入缓出</option>
+                <option value="linear">匀速</option>
+                <option value="easeIn">缓入</option>
+                <option value="easeOut">缓出</option>
+                <option value="hold">保持</option>
+              </select>
+            </label>
+            <label>
+              <span>曲线强度</span>
+              <input id="cameraCurveStrength" type="number" min="0.25" max="6" step="0.05" value="2.00" />
+            </label>
+          </div>
+          <div class="number-row">
+            <label>
+              <span>时长</span>
+              <input id="duration" type="number" min="0.25" max="120" step="0.25" value="5" />
+            </label>
+            <label>
+              <span>关键帧</span>
+              <output id="keyframeCount">0</output>
+            </label>
+          </div>
+        </div>
+
+        <div class="export-row" aria-label="Export controls">
+          <div class="number-row">
+            <label>
+              <span>宽</span>
+              <input id="exportWidth" type="number" min="128" max="7680" step="16" value="1920" />
+            </label>
+            <label>
+              <span>高</span>
+              <input id="exportHeight" type="number" min="128" max="4320" step="16" value="1080" />
+            </label>
+            <label>
+              <span>FPS</span>
+              <input id="exportFps" type="number" min="1" max="60" step="1" value="30" />
+            </label>
+          </div>
+          <button class="export-button" id="exportMov" title="导出透明底 MOV">
+            <i data-lucide="download"></i>
+            <span>导出透明 MOV</span>
+          </button>
+          <output id="exportStatus">Ready</output>
+        </div>
+      </section>
+
+      <div class="hud" aria-live="polite">
+        <span id="status">Ready</span>
+        <span id="stats">90K particles</span>
+      </div>
+
+      <div class="camera-preview" id="cameraPreview" aria-label="Camera preview">
+        <div class="camera-preview-head">
+          <span>相机预览</span>
+          <span id="cameraPreviewInfo">1920 x 1080</span>
+        </div>
+        <canvas id="cameraPreviewCanvas" aria-label="Export camera preview"></canvas>
+      </div>
+    </main>
+  </body>
+</html>

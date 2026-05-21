@@ -1,0 +1,26 @@
+node_modules/
+dist/
+verification/
+github-upload/
+exports/
+release/
+vite.log
+vite.err.log
+.DS_Store
+lizi.rar
+/cs.glb
+*.glb
+!/public/cs.glb
+*.gltf
+*.fbx
+*.obj
+*.stl
+*.zip
+*.7z
+*.rar
+*.mov
+*.mp4
+
+# Local test asset libraries. Keep app-ready assets in public/.
+glb/
+hdr/
