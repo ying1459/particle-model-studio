@@ -10,7 +10,12 @@
     <main id="app">
       <canvas id="scene" aria-label="Particle model preview"></canvas>
 
-      <section class="panel" aria-label="Particle controls">
+      <button class="panel-toggle" id="panelToggle" type="button" aria-controls="controlsPanel" aria-expanded="true" title="隐藏左侧面板" aria-label="隐藏或显示左侧面板">
+        <i class="panel-toggle-open" data-lucide="panel-left-close"></i>
+        <i class="panel-toggle-closed" data-lucide="panel-left-open"></i>
+      </button>
+
+      <section class="panel" id="controlsPanel" aria-label="Particle controls">
         <div class="brand">
           <div>
             <p class="eyebrow">Particle Model Studio</p>
@@ -22,8 +27,8 @@
         </div>
 
         <label class="drop-zone" id="dropZone" for="modelInput">
-          <input id="modelInput" type="file" accept=".glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz" />
-          <span class="drop-title">导入模型 / 图片 / 360 HDR / Gaussian Splat</span>
+          <input id="modelInput" type="file" accept=".blend,.glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz" />
+          <span class="drop-title">导入模型 / Blender / 图片 / 360 HDR / Gaussian Splat</span>
           <span class="drop-name" id="modelName">当前：正在加载模型</span>
         </label>
 
@@ -48,6 +53,10 @@
             <i data-lucide="sparkles"></i>
             <span>Bloom</span>
           </button>
+          <button class="tool-button" data-preset="whale" title="鲸鱼水雾消散">
+            <i data-lucide="waves"></i>
+            <span>Whale</span>
+          </button>
         </div>
 
         <div class="mode-switch" aria-label="Effect mode">
@@ -56,6 +65,88 @@
           <button class="mode-button" data-effect-mode="morph" type="button">粒子转换</button>
           <button class="mode-button" data-effect-mode="image" type="button">高斯场景</button>
         </div>
+
+        <details class="modifier-section" id="sceneModelsPanel" open>
+          <summary>场景模型</summary>
+          <div class="modifier-body">
+            <div class="scene-model-actions" aria-label="Scene model actions">
+              <button class="small-button" id="addSceneModel" type="button" title="导入并添加一个新模型">
+                <i data-lucide="plus"></i>
+                <span>添加模型</span>
+              </button>
+              <button class="small-button" id="duplicateSceneModel" type="button" title="复制当前模型对象">
+                <i data-lucide="box"></i>
+                <span>复制</span>
+              </button>
+              <button class="small-button" id="deleteSceneModel" type="button" title="删除当前模型对象">
+                <i data-lucide="trash-2"></i>
+                <span>删除</span>
+              </button>
+            </div>
+            <div class="scene-model-list" id="sceneModelList" aria-label="Scene models"></div>
+            <div class="camera-mode-actions scene-model-transform-actions">
+              <button class="small-button active" id="moveSceneModel" type="button" title="移动选中的模型">
+                <i data-lucide="move-3d"></i>
+                <span>位置</span>
+              </button>
+              <button class="small-button" id="rotateSceneModel" type="button" title="旋转选中的模型">
+                <i data-lucide="rotate-3d"></i>
+                <span>旋转</span>
+              </button>
+              <button class="small-button" id="scaleSceneModel" type="button" title="缩放选中的模型">
+                <i data-lucide="box"></i>
+                <span>缩放</span>
+              </button>
+            </div>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="handControlPanel">
+          <summary>手势控制</summary>
+          <div class="modifier-body">
+            <label class="emission-toggle-row">
+              <input id="handControlEnabled" type="checkbox" />
+              <span>启用摄像头手势</span>
+            </label>
+            <div class="hand-preview" aria-label="Hand tracking preview">
+              <video id="handVideo" playsinline muted></video>
+              <canvas id="handOverlay" width="280" height="160"></canvas>
+              <output id="handStatus">未启用</output>
+            </div>
+            <div class="control-grid">
+              <label class="select-row">
+                <span>映射模式</span>
+                <select id="handControlMode">
+                  <option value="fluid">流体粒子</option>
+                  <option value="growth">生长</option>
+                  <option value="dissolve">消散</option>
+                  <option value="morph">粒子转换</option>
+                </select>
+                <span></span>
+              </label>
+              <label>
+                <span>控制强度</span>
+                <input id="handControlInfluence" type="range" min="0" max="1.5" step="0.01" value="0.85" />
+                <input id="handControlInfluenceValue" class="value-input" type="number" min="0" step="0.01" value="0.85" />
+              </label>
+              <label>
+                <span>平滑</span>
+                <input id="handControlSmoothing" type="range" min="0" max="0.95" step="0.01" value="0.72" />
+                <input id="handControlSmoothingValue" class="value-input" type="number" min="0" max="0.95" step="0.01" value="0.72" />
+              </label>
+              <label>
+                <span>识别帧率</span>
+                <input id="handControlFps" type="range" min="6" max="30" step="1" value="18" />
+                <input id="handControlFpsValue" class="value-input" type="number" min="1" step="1" value="18" />
+              </label>
+              <label class="wide-toggle">
+                <input id="handControlMirror" type="checkbox" checked />
+                <span>镜像预览</span>
+              </label>
+            </div>
+            <button class="small-button" id="handControlRebase" type="button">设为当前基准</button>
+          </div>
+        </details>
 
         <details class="modifier-section particle-mode-only" open>
           <summary>粒子外观</summary>
@@ -99,6 +190,22 @@
         </details>
 
         <details class="modifier-section particle-mode-only" open>
+          <summary>模型转粒子</summary>
+          <div class="control-grid">
+            <label>
+              <span>粒子化进度</span>
+              <input id="particleizeProgress" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="particleizeProgressValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>模型显隐</span>
+              <input id="modelVisibility" type="range" min="0" max="1" step="0.01" value="1" />
+              <input id="modelVisibilityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="1.00" />
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section particle-mode-only" open>
           <summary>噪波 / 运动</summary>
           <div class="control-grid">
             <label>
@@ -125,11 +232,6 @@
               <span>速度</span>
               <input id="speed" type="range" min="0" max="3" step="0.01" value="0" />
               <input id="speedValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
-            </label>
-            <label>
-              <span>消散</span>
-              <input id="dissolve" type="range" min="0" max="1" step="0.01" value="0" />
-              <input id="dissolveValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
             </label>
           </div>
         </details>
@@ -180,6 +282,62 @@
           </div>
         </details>
 
+        <details class="modifier-section particle-mode-only" open>
+          <summary>粒子消散</summary>
+          <div class="control-grid">
+            <label>
+              <span>消散进度</span>
+              <input id="dissolve" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="dissolveValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+            </label>
+            <label>
+              <span>扩散距离</span>
+              <input id="dissolveSpread" type="range" min="0" max="6" step="0.01" value="1.55" />
+              <input id="dissolveSpreadValue" class="value-input" type="number" min="0" step="0.01" value="1.55" />
+            </label>
+            <label>
+              <span>边缘宽度</span>
+              <input id="dissolveEdgeWidth" type="range" min="0.02" max="0.6" step="0.01" value="0.22" />
+              <input id="dissolveEdgeWidthValue" class="value-input" type="number" min="0.01" max="1" step="0.01" value="0.22" />
+            </label>
+            <label>
+              <span>消散湍流</span>
+              <input id="dissolveTurbulence" type="range" min="0" max="4" step="0.01" value="0.9" />
+              <input id="dissolveTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.90" />
+            </label>
+            <label>
+              <span>流丝卷曲</span>
+              <input id="dissolveCurl" type="range" min="0" max="4" step="0.01" value="1.1" />
+              <input id="dissolveCurlValue" class="value-input" type="number" min="0" step="0.01" value="1.10" />
+            </label>
+            <label>
+              <span>雾化碎散</span>
+              <input id="dissolveMist" type="range" min="0" max="1" step="0.01" value="0.62" />
+              <input id="dissolveMistValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.62" />
+            </label>
+            <label>
+              <span>消散方向 X</span>
+              <input id="dissolveDirectionX" type="range" min="-2" max="2" step="0.01" value="0.82" />
+              <input id="dissolveDirectionXValue" class="value-input" type="number" step="0.01" value="0.82" />
+            </label>
+            <label>
+              <span>消散方向 Y</span>
+              <input id="dissolveDirectionY" type="range" min="-2" max="2" step="0.01" value="0.18" />
+              <input id="dissolveDirectionYValue" class="value-input" type="number" step="0.01" value="0.18" />
+            </label>
+            <label>
+              <span>消散方向 Z</span>
+              <input id="dissolveDirectionZ" type="range" min="-2" max="2" step="0.01" value="-0.22" />
+              <input id="dissolveDirectionZValue" class="value-input" type="number" step="0.01" value="-0.22" />
+            </label>
+            <label>
+              <span>上扬 / 下坠</span>
+              <input id="dissolveLift" type="range" min="-2" max="2" step="0.01" value="0.24" />
+              <input id="dissolveLiftValue" class="value-input" type="number" step="0.01" value="0.24" />
+            </label>
+          </div>
+        </details>
+
         <details class="modifier-section compact" open>
           <summary>材质</summary>
           <div class="color-row" aria-label="Color controls">
@@ -196,8 +354,36 @@
               <span>原贴图</span>
             </label>
             <label class="toggle-row">
-              <input id="autoRotate" type="checkbox" checked />
+              <input id="autoRotate" type="checkbox" />
               <span>自动旋转</span>
+            </label>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="modelAnimationPanel" open>
+          <summary>模型动画</summary>
+          <div class="control-grid">
+            <label>
+              <span>动作片段</span>
+              <select id="modelAnimClip"></select>
+            </label>
+            <label class="toggle-row">
+              <input id="modelAnimEnabled" type="checkbox" />
+              <span>启用动画</span>
+            </label>
+            <label class="toggle-row">
+              <input id="modelAnimPlaying" type="checkbox" />
+              <span>自动播放</span>
+            </label>
+            <label>
+              <span>动画进度</span>
+              <input id="modelAnimProgress" type="range" min="0" max="1" step="0.001" value="0" />
+              <input id="modelAnimProgressValue" class="value-input" type="number" min="0" max="1" step="0.001" value="0.000" />
+            </label>
+            <label>
+              <span>播放速度</span>
+              <input id="modelAnimSpeed" type="range" min="0" max="3" step="0.01" value="1" />
+              <input id="modelAnimSpeedValue" class="value-input" type="number" min="0" step="0.01" value="1.00" />
             </label>
           </div>
         </details>
@@ -206,7 +392,7 @@
           <summary>粒子转换</summary>
           <div class="modifier-body">
             <label class="drop-zone compact-file-zone" id="morphTargetDropZone" for="morphTargetInput">
-              <input id="morphTargetInput" type="file" accept=".glb,.gltf,.obj,.stl,.fbx" />
+              <input id="morphTargetInput" type="file" accept=".blend,.glb,.gltf,.obj,.stl,.fbx" />
               <span class="drop-title">导入目标模型 2</span>
               <span class="drop-name" id="morphTargetName">当前：未导入目标模型</span>
             </label>
@@ -282,6 +468,33 @@
                 <span>缩放</span>
               </button>
             </div>
+
+            <details class="modifier-subsection local-sharp-section" open>
+              <summary>本地 SHARP 重建</summary>
+              <div class="sharp-job-panel">
+                <div class="sharp-action-row">
+                  <button class="small-button" id="checkLocalSharp" type="button">
+                    <i data-lucide="box"></i>
+                    <span>检测环境</span>
+                  </button>
+                  <button class="small-button" id="installLocalSharp" type="button">
+                    <i data-lucide="download"></i>
+                    <span>安装/修复环境</span>
+                  </button>
+                </div>
+                <label class="toggle-row sharp-license-row">
+                  <input id="sharpAcceptLicense" type="checkbox" />
+                  <span>确认仅按 apple/ml-sharp 模型许可在本机使用</span>
+                </label>
+                <button class="export-button compact-action" id="runLocalSharp" type="button">
+                  <i data-lucide="sparkles"></i>
+                  <span>生成真实 Gaussian Splat</span>
+                </button>
+                <output id="sharpStatus">内置图片点云可直接用；真实 Gaussian Splat 可用本地 SHARP 生成 .ply</output>
+                <output id="sharpOutputName"></output>
+                <pre id="sharpLog" aria-label="SHARP log"></pre>
+              </div>
+            </details>
 
             <details class="modifier-subsection" open>
               <summary>图片预览形态</summary>
@@ -664,6 +877,10 @@
             <button class="small-button" id="addKeyframe" title="记录当前摄像机关键帧">
               <i data-lucide="key-round"></i>
               <span>K帧</span>
+            </button>
+            <button class="small-button" id="toggleCameraView" title="按导出画幅预览最终摄像机画面">
+              <i data-lucide="camera"></i>
+              <span>相机视图</span>
             </button>
             <button class="small-button" id="clearKeyframes" title="清空相机路径">
               <i data-lucide="trash-2"></i>

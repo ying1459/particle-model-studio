@@ -4,8 +4,14 @@ verification/
 github-upload/
 exports/
 release/
+.tmp/
+.npm-cache/
+PROJECT_HANDOFF.md
+/main.js
 vite.log
 vite.err.log
+vite-*.log
+vite-*.err.log
 .DS_Store
 lizi.rar
 /cs.glb
@@ -24,3 +30,10 @@ lizi.rar
 # Local test asset libraries. Keep app-ready assets in public/.
 glb/
 hdr/
+
+# Bundled locally for packaging; do not upload Python runtimes or model weights.
+tools/ml-sharp/.venv/
+tools/ml-sharp/source/
+tools/ml-sharp/uv/
+tools/ml-sharp/checkpoints/
+tools/ml-sharp/python/

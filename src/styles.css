@@ -42,6 +42,7 @@ body {
 }
 
 .export-mode .panel,
+.export-mode .panel-toggle,
 .export-mode .hud,
 .export-mode .camera-preview {
   display: none;
@@ -63,7 +64,28 @@ button {
   display: block;
   width: 100vw;
   height: 100vh;
+  background: #090a0c;
   touch-action: none;
+}
+
+body.webgl-context-lost #scene,
+body.webgl-context-lost #cameraPreviewCanvas {
+  visibility: hidden;
+}
+
+body.webgl-context-lost::after {
+  content: "WebGL 渲染正在恢复，请稍等";
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  background: #090a0c;
+  font-size: 14px;
+  font-weight: 720;
+  pointer-events: none;
 }
 
 .panel {
@@ -80,6 +102,67 @@ button {
   background: var(--panel);
   backdrop-filter: blur(18px);
   box-shadow: 0 22px 80px rgba(0, 0, 0, 0.34);
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease;
+  will-change: transform;
+}
+
+.panel-toggle {
+  position: fixed;
+  top: 30px;
+  left: calc(24px + min(380px, calc(100vw - 48px)) + 10px);
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 42px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(24, 26, 30, 0.88);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(14px);
+  transition:
+    left 180ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    transform 160ms ease;
+}
+
+.panel-toggle:hover {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.13);
+  transform: translateY(-1px);
+}
+
+.panel-toggle svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.9;
+}
+
+.panel-toggle .panel-toggle-closed {
+  display: none;
+}
+
+body.panel-collapsed .panel {
+  transform: translateX(calc(-100% - 36px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.panel-collapsed .panel-toggle {
+  left: 14px;
+}
+
+body.panel-collapsed .panel-toggle .panel-toggle-open {
+  display: none;
+}
+
+body.panel-collapsed .panel-toggle .panel-toggle-closed {
+  display: block;
 }
 
 .brand {
@@ -295,6 +378,48 @@ h1 {
   gap: 10px;
 }
 
+.hand-preview {
+  position: relative;
+  overflow: hidden;
+  min-height: 154px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.26);
+}
+
+.hand-preview video,
+.hand-preview canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hand-preview video {
+  transform: scaleX(-1);
+  opacity: 0.78;
+}
+
+.hand-preview.no-mirror video {
+  transform: none;
+}
+
+.hand-preview output {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  padding: 4px 8px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.58);
+  font-size: 11px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
 .compact-file-zone {
   min-height: 64px;
   padding: 12px;
@@ -336,6 +461,68 @@ h1 {
   padding: 0 10px 10px;
 }
 
+.sharp-job-panel {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.sharp-job-panel .compact-action {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.sharp-action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.sharp-license-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.sharp-license-row input {
+  inline-size: 17px;
+  block-size: 17px;
+  accent-color: var(--amber);
+}
+
+.sharp-job-panel output {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+#sharpOutputName {
+  color: var(--text);
+  font-weight: 720;
+}
+
+#sharpLog {
+  max-height: 126px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
 .modifier-section.compact {
   margin-top: 12px;
 }
@@ -370,8 +557,53 @@ h1 {
   font-size: 13px;
 }
 
+.control-grid label.keyable-control {
+  grid-template-columns: minmax(82px, 0.9fr) minmax(112px, 1.2fr) 76px 22px;
+}
+
 .control-grid label.wide-toggle {
   grid-template-columns: auto 1fr;
+}
+
+.keyframe-dot {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.keyframe-dot::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 0 rgba(255, 191, 54, 0);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.keyframe-dot:hover::before {
+  border-color: var(--amber);
+  transform: scale(1.18);
+}
+
+.keyframe-dot.has-keyframe::before {
+  border-color: var(--amber);
+  background: var(--amber);
+}
+
+.keyframe-dot.at-keyframe::before {
+  box-shadow: 0 0 0 4px rgba(255, 191, 54, 0.18);
 }
 
 .control-grid output,
@@ -441,6 +673,18 @@ select {
   background: rgba(255, 255, 255, 0.075);
   font-size: 12px;
   font-weight: 680;
+  color-scheme: dark;
+}
+
+select option,
+select optgroup {
+  color: #f4f6f8;
+  background: #202226;
+}
+
+select option:checked {
+  color: #ffffff;
+  background: #276fd8;
 }
 
 .select-row {
@@ -480,12 +724,14 @@ select {
   padding: 0 8px;
 }
 
-.light-list {
+.light-list,
+.scene-model-list {
   display: grid;
   gap: 7px;
 }
 
-.light-item {
+.light-item,
+.scene-model-item {
   display: grid;
   grid-template-columns: 14px 1fr auto;
   align-items: center;
@@ -501,10 +747,44 @@ select {
   text-align: left;
 }
 
-.light-item.active {
+.light-item.active,
+.scene-model-item.active {
   color: var(--ink);
   border-color: transparent;
   background: linear-gradient(135deg, var(--cyan), var(--amber));
+}
+
+.scene-model-actions {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr 0.8fr;
+  gap: 8px;
+}
+
+.scene-model-item {
+  grid-template-columns: auto 1fr auto;
+}
+
+.scene-model-index,
+.scene-model-effect {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 11px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .light-swatch {
@@ -543,6 +823,26 @@ select {
 
 .emission-toggle-row {
   display: grid;
+}
+
+.modifier-body > .emission-toggle-row {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  min-height: 50px;
+  padding: 0 12px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 760;
+}
+
+.modifier-body > .emission-toggle-row input,
+.wide-toggle input {
+  inline-size: 18px;
+  block-size: 18px;
+  accent-color: var(--amber);
 }
 
 .compact-toggle {
@@ -606,11 +906,24 @@ select {
   transform: translateX(-3px);
 }
 
+.timeline-marker.parameter-marker {
+  top: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.9;
+}
+
 .camera-actions,
 .camera-mode-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.camera-actions {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .camera-mode-actions {
@@ -773,6 +1086,17 @@ select {
     padding: 14px;
   }
 
+  .panel-toggle {
+    top: auto;
+    bottom: calc(min(58vh, 520px) + 24px);
+    left: 14px;
+  }
+
+  body.panel-collapsed .panel-toggle {
+    bottom: 14px;
+    left: 14px;
+  }
+
   h1 {
     font-size: 23px;
   }
@@ -780,6 +1104,10 @@ select {
   .control-grid label {
     grid-template-columns: minmax(70px, 0.75fr) minmax(110px, 1.2fr) 42px;
     gap: 8px;
+  }
+
+  .control-grid label.keyable-control {
+    grid-template-columns: minmax(70px, 0.75fr) minmax(96px, 1.2fr) 58px 20px;
   }
 
   .toolbar {

@@ -28,6 +28,7 @@ const morphTargetUrl = readOption(
 );
 const worldUrl = readOption('world', readOption('worldUrl', readOption('world-url', config.worldUrl ?? '')));
 const options = readJsonOption('options', config.options ?? null);
+const sceneModels = await normalizeSceneModelsForBrowser(config.sceneModels ?? null);
 const frameCount = Math.max(2, Math.round(fps * duration));
 const outputPath = path.resolve(rootDir, readOption('out', config.out ?? 'exports/particle-dissolve.mov'));
 const keepFrames = readBoolean('keep-frames');
@@ -74,6 +75,9 @@ if (readBoolean('dry-run')) {
         morphTargetUrl,
         worldUrl,
         cameraCurve: config.cameraCurve || null,
+        sceneModels: sceneModels
+          ? { activeId: sceneModels.activeId, count: sceneModels.models.length }
+          : null,
         options
       },
       null,
@@ -113,6 +117,10 @@ if (options) {
   await page.evaluate((renderOptions) => window.particleStudio.setOptions(renderOptions), options);
 }
 
+if (sceneModels?.models?.length) {
+  await page.evaluate((models) => window.particleStudio.setSceneModels(models), sceneModels);
+}
+
 if (Array.isArray(config.lights)) {
   await page.evaluate((lights) => window.particleStudio.setLights(lights), config.lights);
 }
@@ -148,6 +156,10 @@ if (config.cameraCurve) {
 
 if (Array.isArray(config.cameraKeyframes)) {
   await page.evaluate((keyframes) => window.particleStudio.setCameraKeyframes(keyframes), config.cameraKeyframes);
+}
+
+if (Array.isArray(config.parameterKeyframes)) {
+  await page.evaluate((keyframes) => window.particleStudio.setParameterKeyframes(keyframes), config.parameterKeyframes);
 }
 
 if (config.cameraSnapshot) {
@@ -186,9 +198,54 @@ for (let frame = 0; frame < frameCount; frame += 1) {
     process.stdout.write(`Frames kept at: ${framesDir}\n`);
   }
 
-  if (server) {
+if (server) {
     server.kill();
   }
+}
+
+async function normalizeSceneModelsForBrowser(sceneModels) {
+  const models = Array.isArray(sceneModels?.models) ? sceneModels.models : [];
+  if (!models.length) {
+    return null;
+  }
+
+  const normalized = [];
+  for (const model of models) {
+    if (!model?.extension) {
+      continue;
+    }
+
+    if (model.dataUrl || model.url) {
+      normalized.push(model);
+      continue;
+    }
+
+    if (!model.path) {
+      continue;
+    }
+
+    const filePath = path.resolve(rootDir, String(model.path));
+    const buffer = await readFile(filePath);
+    normalized.push({
+      ...model,
+      path: undefined,
+      dataUrl: `data:${mimeForModelExtension(model.extension)};base64,${buffer.toString('base64')}`,
+      size: model.size || buffer.byteLength
+    });
+  }
+
+  return normalized.length
+    ? {
+        activeId: sceneModels.activeId,
+        models: normalized
+      }
+    : null;
+}
+
+function mimeForModelExtension(extension = '') {
+  return extension.toLowerCase() === 'glb'
+    ? 'model/gltf-binary'
+    : 'application/octet-stream';
 }
 
 function parseArgs(rawArgs) {

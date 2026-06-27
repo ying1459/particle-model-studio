@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, net, protocol, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ffmpegStaticPath from 'ffmpeg-static';
@@ -13,6 +13,9 @@ const appRoot = path.resolve(__dirname, '..');
 const distDir = path.join(appRoot, 'dist');
 const preloadPath = path.join(__dirname, 'preload.cjs');
 let exportModelDir = '';
+const runtimeAssetDirs = new Set();
+const runtimeAssetMap = new Map();
+const MIN_SHARP_CHECKPOINT_BYTES = 1024 * 1024 * 1024;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -27,6 +30,9 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'media' || permission === 'camera');
+  });
   registerAppProtocol();
   registerIpc();
   createMainWindow();
@@ -42,6 +48,14 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('will-quit', () => {
+  for (const dir of runtimeAssetDirs) {
+    rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+  runtimeAssetDirs.clear();
+  runtimeAssetMap.clear();
 });
 
 function createMainWindow() {
@@ -68,14 +82,24 @@ function registerAppProtocol() {
     const url = new URL(request.url);
     const pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
     let filePath;
+    let rootDir;
 
     if (pathname.startsWith('/__export-model/')) {
       filePath = path.join(exportModelDir, path.basename(pathname));
+      rootDir = exportModelDir;
+    } else if (pathname.startsWith('/__runtime-asset/')) {
+      const [, , token] = pathname.split('/');
+      const runtimePath = runtimeAssetMap.get(token);
+      filePath = runtimePath && path.basename(runtimePath) === path.basename(pathname)
+        ? runtimePath
+        : '';
+      rootDir = filePath ? path.dirname(filePath) : '';
     } else {
       filePath = path.join(distDir, pathname);
+      rootDir = distDir;
     }
 
-    if (!isInside(pathname.startsWith('/__export-model/') ? exportModelDir : distDir, filePath)) {
+    if (!filePath || !isInside(rootDir, filePath)) {
       return new Response('Forbidden', { status: 403 });
     }
 
@@ -90,6 +114,22 @@ function registerAppProtocol() {
 function registerIpc() {
   ipcMain.handle('export-mov', async (_event, payload) => {
     return exportMov(payload || {});
+  });
+
+  ipcMain.handle('convert-blend-to-glb', async (_event, payload) => {
+    return convertBlendToGlb(payload || {});
+  });
+
+  ipcMain.handle('check-local-sharp', async () => {
+    return checkLocalSharp();
+  });
+
+  ipcMain.handle('install-local-sharp', async (_event, payload) => {
+    return installLocalSharp(payload || {});
+  });
+
+  ipcMain.handle('run-local-sharp', async (_event, payload) => {
+    return runLocalSharp(payload || {});
   });
 
   ipcMain.handle('show-item-in-folder', async (_event, filePath) => {
@@ -118,6 +158,7 @@ async function exportMov(payload) {
   let morphTargetUrl = '';
   let worldUrl = '';
   let imageSplatUrl = '';
+  let sceneModelsForRenderer = null;
   let hiddenWindow;
 
   try {
@@ -136,8 +177,44 @@ async function exportMov(payload) {
       const base64 = String(payload.model.dataUrl).replace(/^data:[^;]+;base64,/, '');
       await writeFile(modelPath, Buffer.from(base64, 'base64'));
       modelUrl = `/__export-model/${modelName}`;
-    } else if ((payload.options?.effectMode || 'particles') !== 'image') {
+    } else if ((payload.options?.effectMode || 'particles') !== 'image' && !payload.sceneModels?.models?.length) {
       throw new Error('当前模型没有可用于导出的文件数据，请重新导入模型后再导出。');
+    }
+
+    if (Array.isArray(payload.sceneModels?.models) && payload.sceneModels.models.length) {
+      sceneModelsForRenderer = {
+        activeId: payload.sceneModels.activeId,
+        models: []
+      };
+
+      for (let index = 0; index < payload.sceneModels.models.length; index += 1) {
+        const sceneModel = payload.sceneModels.models[index];
+        if (!sceneModel?.extension) {
+          continue;
+        }
+        const extension = sanitizeExtension(sceneModel.extension);
+        const modelName = `scene-model-${index}.${extension}`;
+        const modelPath = path.join(exportModelDir, modelName);
+        if (sceneModel.path) {
+          await copyFile(String(sceneModel.path), modelPath);
+        } else if (sceneModel.dataUrl) {
+          const base64 = String(sceneModel.dataUrl).replace(/^data:[^;]+;base64,/, '');
+          await writeFile(modelPath, Buffer.from(base64, 'base64'));
+        } else {
+          continue;
+        }
+
+        const url = `/__export-model/${modelName}`;
+        sceneModelsForRenderer.models.push({
+          ...sceneModel,
+          path: undefined,
+          dataUrl: undefined,
+          url
+        });
+        if (!modelUrl) {
+          modelUrl = url;
+        }
+      }
     }
 
     if (payload.morphTarget?.path && payload.morphTarget?.extension) {
@@ -164,7 +241,13 @@ async function exportMov(payload) {
       worldUrl = `/__export-model/${worldName}`;
     }
 
-    if (payload.imageSplat?.dataUrl && payload.imageSplat?.extension) {
+    if (payload.imageSplat?.path && payload.imageSplat?.extension) {
+      const extension = sanitizeImageExtension(payload.imageSplat.extension);
+      const imageSplatName = `current-image-splat.${extension}`;
+      const imageSplatPath = path.join(exportModelDir, imageSplatName);
+      await copyFile(String(payload.imageSplat.path), imageSplatPath);
+      imageSplatUrl = `/__export-model/${imageSplatName}`;
+    } else if (payload.imageSplat?.dataUrl && payload.imageSplat?.extension) {
       const extension = sanitizeImageExtension(payload.imageSplat.extension);
       const imageSplatName = `current-image-splat.${extension}`;
       const imageSplatPath = path.join(exportModelDir, imageSplatName);
@@ -210,6 +293,12 @@ async function exportMov(payload) {
     if (payload.options) {
       await hiddenWindow.webContents.executeJavaScript(
         `window.particleStudio.setOptions(${JSON.stringify(payload.options)})`
+      );
+    }
+
+    if (sceneModelsForRenderer?.models?.length) {
+      await hiddenWindow.webContents.executeJavaScript(
+        `window.particleStudio.setSceneModels(${JSON.stringify(sceneModelsForRenderer)})`
       );
     }
 
@@ -265,6 +354,12 @@ async function exportMov(payload) {
       );
     }
 
+    if (Array.isArray(payload.parameterKeyframes)) {
+      await hiddenWindow.webContents.executeJavaScript(
+        `window.particleStudio.setParameterKeyframes(${JSON.stringify(payload.parameterKeyframes)})`
+      );
+    }
+
     if (payload.cameraSnapshot) {
       await hiddenWindow.webContents.executeJavaScript(
         `window.particleStudio.setCameraSnapshot(${JSON.stringify(payload.cameraSnapshot)}, ${JSON.stringify({
@@ -299,6 +394,438 @@ async function exportMov(payload) {
     await rm(exportModelDir, { recursive: true, force: true });
     exportModelDir = '';
   }
+}
+
+async function convertBlendToGlb(payload) {
+  const blendPath = path.resolve(String(payload.path || ''));
+  if (!blendPath.toLowerCase().endsWith('.blend') || !existsSync(blendPath)) {
+    return {
+      ok: false,
+      error: 'Blend 文件路径无效。'
+    };
+  }
+
+  const blenderPath = await findBlenderExecutable();
+  if (!blenderPath) {
+    return {
+      ok: false,
+      error: '未找到 Blender。请安装 Blender，或把 BLENDER_PATH 指向 blender.exe。'
+    };
+  }
+
+  const nextRuntimeDir = await mkdtemp(path.join(tmpdir(), 'particle-blend-runtime-'));
+  const outputName = `${sanitizeFilename(path.basename(blendPath, '.blend') || 'blend-model')}.glb`;
+  const outputPath = path.join(nextRuntimeDir, outputName);
+  const scriptPath = path.join(nextRuntimeDir, 'particle_blend_export.py');
+
+  const exporterScript = await readFile(path.join(__dirname, 'blend-exporter.py'), 'utf8');
+  await writeFile(scriptPath, exporterScript, 'utf8');
+
+  try {
+    const log = await runProcess(
+      blenderPath,
+      ['--factory-startup', '--background', blendPath, '--python', scriptPath, '--', outputPath],
+      {
+        cwd: path.dirname(blenderPath),
+        timeoutMs: 20 * 60 * 1000
+      }
+    );
+
+    if (!existsSync(outputPath) || statSync(outputPath).size <= 0) {
+      throw new Error('Blender 没有生成可读取的 GLB 文件。');
+    }
+
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    runtimeAssetDirs.add(nextRuntimeDir);
+    runtimeAssetMap.set(token, outputPath);
+
+    return {
+      ok: true,
+      path: outputPath,
+      url: `/__runtime-asset/${token}/${encodeURIComponent(outputName)}`,
+      name: outputName,
+      extension: 'glb',
+      size: statSync(outputPath).size,
+      blenderPath,
+      log: log.slice(-5000)
+    };
+  } catch (error) {
+    await rm(nextRuntimeDir, { recursive: true, force: true });
+    return {
+      ok: false,
+      error: error.message || String(error)
+    };
+  }
+}
+
+async function runLocalSharp(payload) {
+  const source = payload.source || {};
+  const extension = sanitizeImageExtension(source.extension || path.extname(source.name || '').slice(1) || 'png');
+  if (!['jpg', 'jpeg', 'png', 'webp', 'hdr', 'exr'].includes(extension)) {
+    return {
+      ok: false,
+      error: 'SHARP input must be an image or panorama file.'
+    };
+  }
+
+  const runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-sharp-runtime-'));
+  const inputDir = path.join(runtimeDir, 'input');
+  const outputDir = path.join(runtimeDir, 'output');
+  const inputName = `${sanitizeFilename(path.basename(source.name || `sharp-source.${extension}`, path.extname(source.name || '')) || 'sharp-source')}.${extension}`;
+  const inputPath = path.join(inputDir, inputName);
+
+  try {
+    await mkdir(inputDir, { recursive: true });
+    await mkdir(outputDir, { recursive: true });
+
+    if (source.path && existsSync(String(source.path))) {
+      await copyFile(String(source.path), inputPath);
+    } else if (source.dataUrl) {
+      const base64 = String(source.dataUrl).replace(/^data:[^;]+;base64,/, '');
+      await writeFile(inputPath, Buffer.from(base64, 'base64'));
+    } else {
+      throw new Error('No readable source image was provided.');
+    }
+
+    const sharpCommand = findSharpCommand();
+    const args = [
+      ...(sharpCommand.argsPrefix || []),
+      ...buildSharpPredictArgs(inputDir, outputDir, payload)
+    ];
+    const log = await runProcess(sharpCommand.command, args, {
+      cwd: sharpCommand.cwd,
+      timeoutMs: clampNumber(payload.timeoutMs, 60000, 90 * 60 * 1000, 30 * 60 * 1000),
+      env: sharpCommand.env
+    });
+
+    const outputPath = findNewestFile(outputDir, new Set(['ply', 'splat', 'ksplat', 'spz']));
+    if (!outputPath) {
+      throw new Error(`SHARP finished but no readable splat file was found.\n${log}`.trim());
+    }
+
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const outputName = path.basename(outputPath);
+    runtimeAssetDirs.add(runtimeDir);
+    runtimeAssetMap.set(token, outputPath);
+
+    return {
+      ok: true,
+      path: outputPath,
+      url: `/__runtime-asset/${token}/${encodeURIComponent(outputName)}`,
+      name: outputName,
+      extension: path.extname(outputPath).slice(1).toLowerCase() || 'ply',
+      log: log.slice(-10000),
+      command: `${sharpCommand.label} ${args.join(' ')}`
+    };
+  } catch (error) {
+    await rm(runtimeDir, { recursive: true, force: true });
+    return {
+      ok: false,
+      error: formatSharpError(error),
+      log: error?.message || String(error)
+    };
+  }
+}
+
+async function checkLocalSharp() {
+  const installDir = getSharpInstallRoot();
+  const commandInfo = findSharpCommand();
+
+  try {
+    const log = await runProcess(commandInfo.command, [
+      ...(commandInfo.argsPrefix || []),
+      '--help'
+    ], {
+      cwd: commandInfo.cwd,
+      timeoutMs: 20000,
+      allowNonZero: true,
+      env: commandInfo.env
+    });
+    const checkpointPath = findSharpCheckpoint();
+    const checkpointProblem = describeSharpCheckpointProblem();
+    return {
+      ok: true,
+      available: Boolean(checkpointPath),
+      command: commandInfo.command,
+      label: commandInfo.label,
+      installDir,
+      checkpointPath,
+      hasCheckpoint: Boolean(checkpointPath),
+      checkpointProblem,
+      error: checkpointPath ? '' : checkpointProblem,
+      log: log.slice(-4000)
+    };
+  } catch (error) {
+    const checkpointPath = findSharpCheckpoint();
+    return {
+      ok: true,
+      available: false,
+      command: commandInfo.command,
+      installDir,
+      checkpointPath,
+      hasCheckpoint: Boolean(checkpointPath),
+      error: formatSharpError(error)
+    };
+  }
+}
+
+async function installLocalSharp(payload) {
+  if (!payload.acceptResearchLicense) {
+    return {
+      ok: false,
+      error: '请先确认 apple/ml-sharp 模型许可。'
+    };
+  }
+
+  const installDir = path.resolve(String(payload.installDir || getSharpInstallRoot()));
+  const runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-sharp-installer-'));
+  const scriptPath = path.join(runtimeDir, 'setup-ml-sharp.ps1');
+
+  try {
+    const script = await readFile(path.join(__dirname, 'setup-ml-sharp.ps1'), 'utf8');
+    await writeFile(scriptPath, script, 'utf8');
+    const args = [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptPath,
+      '-InstallDir',
+      installDir,
+      '-AcceptResearchLicense'
+    ];
+    if (payload.downloadCheckpoint !== false) {
+      args.push('-DownloadCheckpoint');
+    }
+
+    const log = await runProcess('powershell.exe', args, {
+      cwd: getProcessCwd(),
+      timeoutMs: 3 * 60 * 60 * 1000
+    });
+    const check = await checkLocalSharp();
+    return {
+      ok: check.available,
+      ...check,
+      installDir,
+      log: `${log}\n${check.log || ''}`.trim().slice(-12000),
+      error: check.available ? '' : (check.error || 'SHARP 安装完成但未能通过检测。')
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      available: false,
+      installDir,
+      error: error.message || String(error),
+      log: error.message || String(error)
+    };
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+function getSharpInstallRoot() {
+  return path.resolve(
+    process.env.PARTICLE_SHARP_HOME ||
+    process.env.ML_SHARP_HOME ||
+    path.join(app.getPath('userData'), 'ml-sharp')
+  );
+}
+
+function getSharpRuntimeRoots() {
+  const installRoot = getSharpInstallRoot();
+  const portableRoot = process.execPath ? path.dirname(process.execPath) : '';
+  const resourceRoot = process.resourcesPath || '';
+  return [
+    path.join(resourceRoot, 'tools', 'ml-sharp'),
+    path.join(portableRoot, 'tools', 'ml-sharp'),
+    path.join(appRoot, 'tools', 'ml-sharp'),
+    path.join(appRoot, 'ml-sharp'),
+    installRoot
+  ].filter((value, index, list) => value && list.indexOf(value) === index);
+}
+
+function findSharpCommand() {
+  const explicit =
+    process.env.PARTICLE_SHARP_EXE ||
+    process.env.ML_SHARP_EXE ||
+    process.env.SHARP_EXE ||
+    '';
+  const cwd = process.env.PARTICLE_SHARP_DIR || process.env.ML_SHARP_DIR || getProcessCwd();
+  const env = { ...process.env };
+
+  if (process.env.PARTICLE_SHARP_PYTHON || process.env.ML_SHARP_PYTHON) {
+    env.PYTHON = process.env.PARTICLE_SHARP_PYTHON || process.env.ML_SHARP_PYTHON;
+  }
+
+  if (explicit) {
+    return {
+      command: explicit,
+      cwd,
+      env,
+      label: path.basename(explicit)
+    };
+  }
+
+  const sharpRoots = getSharpRuntimeRoots();
+  const bundledPython = sharpRoots
+    .map((root) => {
+      const pythonExe = path.join(root, 'python', 'python.exe');
+      const runner = path.join(root, 'run-sharp.py');
+      const sitePackages = path.join(root, '.venv', 'Lib', 'site-packages');
+      const sourcePath = path.join(root, 'source', 'src');
+      if (!existsSync(pythonExe) || !existsSync(runner) || !existsSync(sitePackages) || !existsSync(sourcePath)) {
+        return null;
+      }
+      const portableEnv = { ...env };
+      portableEnv.PYTHONPATH = [
+        sitePackages,
+        sourcePath,
+        portableEnv.PYTHONPATH || ''
+      ].filter(Boolean).join(path.delimiter);
+      portableEnv.PATH = [
+        path.dirname(pythonExe),
+        path.join(root, '.venv', 'Scripts'),
+        sitePackages,
+        portableEnv.PATH || ''
+      ].filter(Boolean).join(path.delimiter);
+      return {
+        command: pythonExe,
+        argsPrefix: [runner],
+        cwd: root,
+        env: portableEnv,
+        label: 'bundled-python sharp'
+      };
+    })
+    .find(Boolean);
+  if (bundledPython) {
+    return bundledPython;
+  }
+
+  const localCandidates = sharpRoots.flatMap((root) => [
+    path.join(root, '.venv', 'Scripts', 'sharp.exe'),
+    path.join(root, '.venv', 'Scripts', 'sharp.cmd'),
+    path.join(root, '.venv', 'Scripts', 'sharp.bat'),
+    path.join(root, 'venv', 'Scripts', 'sharp.exe'),
+    path.join(root, 'venv', 'Scripts', 'sharp.cmd'),
+    path.join(root, 'venv', 'Scripts', 'sharp.bat'),
+    path.join(root, 'Scripts', 'sharp.exe'),
+    path.join(root, 'Scripts', 'sharp.cmd'),
+    path.join(root, 'Scripts', 'sharp.bat')
+  ]);
+  const local = localCandidates.find((candidate) => existsSync(candidate));
+  if (local) {
+    return {
+      command: local,
+      cwd: path.dirname(path.dirname(local)),
+      env,
+      label: path.basename(local)
+    };
+  }
+
+  return {
+    command: 'sharp',
+    cwd,
+    env,
+    label: 'sharp'
+  };
+}
+
+function buildSharpPredictArgs(inputDir, outputDir, payload = {}) {
+  const args = ['predict', '-i', inputDir, '-o', outputDir];
+  const checkpoint = payload.checkpoint ||
+    process.env.PARTICLE_SHARP_CHECKPOINT ||
+    process.env.ML_SHARP_CHECKPOINT ||
+    findSharpCheckpoint();
+  if (!isValidSharpCheckpoint(checkpoint)) {
+    throw new Error(describeSharpCheckpointProblem());
+  }
+  args.push('-c', String(checkpoint));
+  return args;
+}
+
+function getSharpCheckpointCandidates() {
+  const runtimeCandidates = getSharpRuntimeRoots().flatMap((root) => [
+    path.join(root, 'checkpoints', 'sharp_2572gikvuh.pt'),
+    path.join(root, 'source', 'checkpoints', 'sharp_2572gikvuh.pt')
+  ]);
+  return [
+    process.env.PARTICLE_SHARP_CHECKPOINT,
+    process.env.ML_SHARP_CHECKPOINT,
+    ...runtimeCandidates,
+    path.join(homedir(), '.cache', 'torch', 'hub', 'checkpoints', 'sharp_2572gikvuh.pt')
+  ].filter(Boolean);
+}
+
+function findSharpCheckpoint() {
+  return getSharpCheckpointCandidates().find((candidate) => isValidSharpCheckpoint(candidate)) || '';
+}
+
+function isValidSharpCheckpoint(candidate) {
+  if (!candidate || !existsSync(candidate)) {
+    return false;
+  }
+  return statSync(candidate).size >= MIN_SHARP_CHECKPOINT_BYTES;
+}
+
+function describeSharpCheckpointProblem() {
+  const existing = getSharpCheckpointCandidates()
+    .filter((candidate) => candidate && existsSync(candidate))
+    .map((candidate) => ({ path: candidate, size: statSync(candidate).size }))
+    .sort((a, b) => b.size - a.size)[0];
+
+  if (existing) {
+    const sizeMb = Math.round(existing.size / (1024 * 1024));
+    return `SHARP checkpoint 不完整：${path.basename(existing.path)} 只有 ${sizeMb}MB。请在软件内安装/修复 SHARP，或重新打包完整 tools/ml-sharp/checkpoints/sharp_2572gikvuh.pt。`;
+  }
+
+  return '未找到完整 SHARP checkpoint。请在软件内安装/修复 SHARP，或把完整 tools/ml-sharp 运行时一起打包进 exe。';
+}
+
+function findNewestFile(root, extensions, newest = null) {
+  if (!existsSync(root)) {
+    return newest?.path || '';
+  }
+
+  const entries = readdirSync(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const nextPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      const nestedPath = findNewestFile(nextPath, extensions, newest);
+      if (nestedPath) {
+        const nestedStat = statSync(nestedPath);
+        if (!newest || nestedStat.mtimeMs > newest.mtimeMs) {
+          newest = { path: nestedPath, mtimeMs: nestedStat.mtimeMs };
+        }
+      }
+      continue;
+    }
+
+    const extension = path.extname(entry.name).slice(1).toLowerCase();
+    if (!extensions.has(extension)) {
+      continue;
+    }
+    const fileStat = statSync(nextPath);
+    if (fileStat.size <= 0) {
+      continue;
+    }
+    if (!newest || fileStat.mtimeMs > newest.mtimeMs) {
+      newest = { path: nextPath, mtimeMs: fileStat.mtimeMs };
+    }
+  }
+
+  return newest?.path || '';
+}
+
+function formatSharpError(error) {
+  const message = error?.message || String(error);
+  if (/ENOENT|not found|not recognized|spawn sharp/i.test(message)) {
+    return [
+      '未找到本地 SHARP 命令。',
+      '可把完整运行时放到 exe 资源目录的 tools/ml-sharp，或在软件内安装到用户数据目录。',
+      '也可以设置 PARTICLE_SHARP_EXE / ML_SHARP_EXE 指向 sharp.exe；未安装时内置图片点云仍可直接使用。'
+    ].join('\n');
+  }
+  return message;
 }
 
 async function waitForRendererReady(window) {
@@ -371,6 +898,190 @@ function getFfmpegPath() {
   }
 
   return ffmpegStaticPath;
+}
+
+async function findBlenderExecutable() {
+  const directCandidates = [
+    process.env.BLENDER_PATH,
+    process.env.BLENDER_EXE,
+    path.join(appRoot, 'blender', 'blender.exe'),
+    path.join(process.resourcesPath || '', 'blender', 'blender.exe')
+  ].filter(Boolean);
+
+  for (const candidate of directCandidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  const fromPath = await findExecutableInPath('blender.exe');
+  if (fromPath) {
+    return fromPath;
+  }
+
+  const fromRegistry = await findBlenderFromRegistry();
+  if (fromRegistry) {
+    return fromRegistry;
+  }
+
+  const roots = [
+    process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, 'Blender Foundation'),
+    process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'], 'Blender Foundation'),
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Blender Foundation'),
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Blender')
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    const found = findFileByName(root, 'blender.exe', 4);
+    if (found) {
+      return found;
+    }
+  }
+
+  return '';
+}
+
+async function findBlenderFromRegistry() {
+  if (process.platform !== 'win32') {
+    return '';
+  }
+
+  const command = [
+    "$roots = @(",
+    "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',",
+    "'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',",
+    "'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
+    ");",
+    "foreach ($root in $roots) {",
+    "  Get-ItemProperty $root -ErrorAction SilentlyContinue |",
+    "    Where-Object { $_.DisplayName -like '*Blender*' } |",
+    "    ForEach-Object {",
+    "      if ($_.InstallLocation) { Join-Path $_.InstallLocation 'blender.exe' }",
+    "      if ($_.DisplayIcon) { ($_.DisplayIcon -replace ',\\d+$','') }",
+    "    }",
+    "}"
+  ].join(' ');
+
+  try {
+    const output = await runProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      cwd: getProcessCwd(),
+      timeoutMs: 12000,
+      allowNonZero: true
+    });
+    return output
+      .split(/\r?\n/)
+      .map((line) => line.trim().replace(/^"|"$/g, ''))
+      .find((line) => line.toLowerCase().endsWith('blender.exe') && existsSync(line)) || '';
+  } catch {
+    return '';
+  }
+}
+
+async function findExecutableInPath(executableName) {
+  if (process.platform !== 'win32') {
+    return '';
+  }
+
+  try {
+    const output = await runProcess('where.exe', [executableName], {
+      cwd: getProcessCwd(),
+      timeoutMs: 8000,
+      allowNonZero: true
+    });
+    return output.split(/\r?\n/).map((line) => line.trim()).find((line) => line && existsSync(line)) || '';
+  } catch {
+    return '';
+  }
+}
+
+function findFileByName(root, filename, maxDepth) {
+  if (!root || maxDepth < 0 || !existsSync(root)) {
+    return '';
+  }
+
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return '';
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase() === filename.toLowerCase()) {
+      return fullPath;
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const lowerName = entry.name.toLowerCase();
+    if (
+      maxDepth <= 1 &&
+      !lowerName.includes('blender') &&
+      !lowerName.includes('foundation')
+    ) {
+      continue;
+    }
+    const found = findFileByName(path.join(root, entry.name), filename, maxDepth - 1);
+    if (found) {
+      return found;
+    }
+  }
+
+  return '';
+}
+
+async function runProcess(command, args, options = {}) {
+  const {
+    cwd = getProcessCwd(),
+    timeoutMs = 120000,
+    allowNonZero = false,
+    env = process.env
+  } = options;
+
+  const child = spawn(command, args, {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  const timeout = setTimeout(() => {
+    child.kill();
+  }, timeoutMs);
+
+  try {
+    const [code] = await Promise.race([
+      once(child, 'exit'),
+      once(child, 'error').then(([error]) => {
+        throw error;
+      })
+    ]);
+    const output = `${stdout}\n${stderr}`.trim();
+    if (code !== 0 && !allowNonZero) {
+      throw new Error(output || `${path.basename(command)} exited with code ${code}`);
+    }
+    return output;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getProcessCwd() {
+  return app.isPackaged ? path.dirname(process.execPath) : appRoot;
 }
 
 function isInside(root, target) {

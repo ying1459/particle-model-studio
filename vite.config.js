@@ -8,6 +8,7 @@ import { defineConfig } from 'vite';
 const rootDir = process.cwd();
 
 export default defineConfig({
+  root: rootDir,
   base: './',
   plugins: [
     {
@@ -191,17 +192,21 @@ async function writeExportWorld(world, stamp) {
 }
 
 async function writeExportImageSplat(imageSplat, stamp) {
-  if (!imageSplat?.dataUrl || !imageSplat?.extension) {
+  if ((!imageSplat?.dataUrl && !imageSplat?.path) || !imageSplat?.extension) {
     return '';
   }
 
   const extension = sanitizeImageExtension(imageSplat.extension);
   const relativePath = path.join('exports', `__export-image-splat-${stamp}.${extension}`);
   const absolutePath = path.resolve(rootDir, relativePath);
-  const base64 = String(imageSplat.dataUrl).replace(/^data:[^;]+;base64,/, '');
 
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, Buffer.from(base64, 'base64'));
+  if (imageSplat.path) {
+    await copyFile(String(imageSplat.path), absolutePath);
+  } else {
+    const base64 = String(imageSplat.dataUrl).replace(/^data:[^;]+;base64,/, '');
+    await writeFile(absolutePath, Buffer.from(base64, 'base64'));
+  }
   return `/${relativePath.replace(/\\/g, '/')}`;
 }
 
