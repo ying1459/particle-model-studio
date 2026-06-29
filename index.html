@@ -723,13 +723,13 @@
               <div class="control-grid">
                 <label>
                   <span>白化程度</span>
-                  <input id="modelWhite" type="range" min="0" max="1" step="0.01" value="0.72" />
-                  <input id="modelWhiteValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.72" />
+                  <input id="modelWhite" type="range" min="0" max="1" step="0.01" value="0" />
+                  <input id="modelWhiteValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
                 </label>
                 <label>
                   <span>模型粗糙</span>
-                  <input id="modelRoughness" type="range" min="0" max="1" step="0.01" value="0.82" />
-                  <input id="modelRoughnessValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.82" />
+                  <input id="modelRoughness" type="range" min="0" max="1" step="0.01" value="0.72" />
+                  <input id="modelRoughnessValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.72" />
                 </label>
               </div>
             </details>
@@ -739,23 +739,23 @@
               <div class="control-grid">
                 <label>
                   <span>逸散数量</span>
-                  <input id="emissionCount" type="range" min="1" max="500000" step="1" value="120000" />
-                  <input id="emissionCountValue" class="value-input" type="number" min="1" step="1" value="120000" />
+                  <input id="emissionCount" type="range" min="1" max="500000" step="1" value="220000" />
+                  <input id="emissionCountValue" class="value-input" type="number" min="1" step="1" value="220000" />
                 </label>
                 <label>
                   <span>逸散强度</span>
-                  <input id="emissionIntensity" type="range" min="0" max="2" step="0.01" value="0.9" />
-                  <input id="emissionIntensityValue" class="value-input" type="number" min="0" step="0.01" value="0.90" />
+                  <input id="emissionIntensity" type="range" min="0" max="2" step="0.01" value="1.35" />
+                  <input id="emissionIntensityValue" class="value-input" type="number" min="0" step="0.01" value="1.35" />
                 </label>
                 <label>
                   <span>逸散距离</span>
-                  <input id="emissionDistance" type="range" min="0" max="4" step="0.01" value="1.25" />
-                  <input id="emissionDistanceValue" class="value-input" type="number" min="0" step="0.01" value="1.25" />
+                  <input id="emissionDistance" type="range" min="0" max="4" step="0.01" value="2.2" />
+                  <input id="emissionDistanceValue" class="value-input" type="number" min="0" step="0.01" value="2.20" />
                 </label>
                 <label>
                   <span>流动速度</span>
-                  <input id="emissionSpeed" type="range" min="0" max="3" step="0.01" value="0.65" />
-                  <input id="emissionSpeedValue" class="value-input" type="number" min="0" step="0.01" value="0.65" />
+                  <input id="emissionSpeed" type="range" min="0" max="3" step="0.01" value="0.9" />
+                  <input id="emissionSpeedValue" class="value-input" type="number" min="0" step="0.01" value="0.90" />
                 </label>
               </div>
             </details>
@@ -765,23 +765,23 @@
               <div class="control-grid">
                 <label>
                   <span>风向 X</span>
-                  <input id="emissionWindX" type="range" min="-2" max="2" step="0.01" value="0.25" />
-                  <input id="emissionWindXValue" class="value-input" type="number" step="0.01" value="0.25" />
+                  <input id="emissionWindX" type="range" min="-2" max="2" step="0.01" value="0.45" />
+                  <input id="emissionWindXValue" class="value-input" type="number" step="0.01" value="0.45" />
                 </label>
                 <label>
                   <span>风向 Y</span>
-                  <input id="emissionWindY" type="range" min="-2" max="2" step="0.01" value="0.18" />
-                  <input id="emissionWindYValue" class="value-input" type="number" step="0.01" value="0.18" />
+                  <input id="emissionWindY" type="range" min="-2" max="2" step="0.01" value="0.28" />
+                  <input id="emissionWindYValue" class="value-input" type="number" step="0.01" value="0.28" />
                 </label>
                 <label>
                   <span>风向 Z</span>
-                  <input id="emissionWindZ" type="range" min="-2" max="2" step="0.01" value="0" />
-                  <input id="emissionWindZValue" class="value-input" type="number" step="0.01" value="0.00" />
+                  <input id="emissionWindZ" type="range" min="-2" max="2" step="0.01" value="-0.06" />
+                  <input id="emissionWindZValue" class="value-input" type="number" step="0.01" value="-0.06" />
                 </label>
                 <label>
                   <span>湍流</span>
-                  <input id="emissionTurbulence" type="range" min="0" max="3" step="0.01" value="0.72" />
-                  <input id="emissionTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.72" />
+                  <input id="emissionTurbulence" type="range" min="0" max="3" step="0.01" value="1.05" />
+                  <input id="emissionTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="1.05" />
                 </label>
               </div>
             </details>
@@ -791,18 +791,18 @@
               <div class="control-grid">
                 <label>
                   <span>粒子尺寸</span>
-                  <input id="emissionSize" type="range" min="0.1" max="8" step="0.01" value="1.15" />
-                  <input id="emissionSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="1.15" />
+                  <input id="emissionSize" type="range" min="0.1" max="8" step="0.01" value="2.1" />
+                  <input id="emissionSizeValue" class="value-input" type="number" min="0.01" step="0.01" value="2.10" />
                 </label>
                 <label>
                   <span>粒子透明</span>
-                  <input id="emissionOpacity" type="range" min="0" max="1" step="0.01" value="0.42" />
-                  <input id="emissionOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.42" />
+                  <input id="emissionOpacity" type="range" min="0" max="1" step="0.01" value="0.78" />
+                  <input id="emissionOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.78" />
                 </label>
                 <label>
                   <span>粒子发光</span>
-                  <input id="emissionGlow" type="range" min="0" max="3" step="0.01" value="0.35" />
-                  <input id="emissionGlowValue" class="value-input" type="number" min="0" step="0.01" value="0.35" />
+                  <input id="emissionGlow" type="range" min="0" max="3" step="0.01" value="0.75" />
+                  <input id="emissionGlowValue" class="value-input" type="number" min="0" step="0.01" value="0.75" />
                 </label>
               </div>
             </details>

@@ -11,6 +11,12 @@ Particle Model Studio is a real-time 3D particle editor for visual creators. Imp
 
 ![Particle Model Studio 粒子消散编辑界面](docs/images/particle-dissolve.png)
 
+## 宣传视频 / Promo Video
+
+[![观看 Particle Model Studio 1080p 宣传片](docs/images/promo-poster.jpg)](https://github.com/ying1459/particle-model-studio/releases/download/v1.0.0/Particle-Model-Studio-Promo-1080p.mp4)
+
+点击上图观看 1080p 宣传片：模型逸散、完整消散、双模型 Morph、图片转 3D 点云，以及 HDR 灯光与相机制作都收录其中。
+
 > 想直接体验？前往 [Latest Release](https://github.com/ying1459/particle-model-studio/releases/latest) 下载 Windows x64 版本。项目对你有帮助的话，欢迎点一个 ⭐ Star。
 
 ## 它能做什么
@@ -62,6 +68,8 @@ Particle Model Studio is a real-time 3D particle editor for visual creators. Imp
 “模型逸散”模拟实体表面持续剥离成粒子的过程。它与普通粒子化不同：原模型仍可保持可见，同时在表面生成流动碎屑。
 
 可以调节白化程度、模型粗糙度、逸散数量、强度、距离、速度、风向、湍流、粒子尺寸、透明度和发光。局部破碎还提供破碎中心、范围、羽化和碎片大小，用来指定从模型哪个区域开始瓦解。
+
+默认展示参数使用原始贴图（白化程度 `0`），并提高到 `220,000` 个逸散粒子、`1.35` 强度和 `2.20` 距离，让模型表面剥离与飞散轨迹在默认画面中就清楚可见。
 
 ![模型逸散效果](docs/images/model-emission.png)
 
