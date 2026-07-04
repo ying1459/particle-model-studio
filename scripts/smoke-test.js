@@ -5,6 +5,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import ffmpegPath from 'ffmpeg-static';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.SMOKE_PORT || 5174);
@@ -277,6 +278,101 @@ try {
     window.particleStudio.setLights([]);
     window.particleStudio.setCameraSnapshot({ position: [0, 1.2, 6], target: [0, 0, 0], fov: 48 });
   });
+
+  const cameraFeatureCheck = await page.evaluate(async () => {
+    window.particleStudio.setCameraSettings({
+      type: 'perspective',
+      sensorWidth: 24,
+      focalLength: 85,
+      dofEnabled: true,
+      aperture: 2,
+      focusDistance: 3.2
+    });
+    const perspective = window.particleStudio.getCameraSettings();
+
+    await window.particleStudio.setOptions({ dissolve: 0.33 }, true);
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setCameraKeyframes([
+      { id: 'independent-a', time: 0, position: [-1, 1, 5], target: [0, 0, 0], options: { dissolve: 0 } },
+      { id: 'independent-b', time: 2, position: [1, 1, 5], target: [0, 0, 0], options: { dissolve: 1 } }
+    ]);
+    window.particleStudio.setCameraTime(1, true);
+    const cameraOnlyDissolve = window.particleStudio.getOptions().dissolve;
+
+    window.particleStudio.setParameterKeyframes([
+      { id: 'dissolve-a', field: 'dissolve', time: 0, value: 0.1 },
+      { id: 'dissolve-b', field: 'dissolve', time: 2, value: 0.9 }
+    ]);
+    window.particleStudio.setCameraTime(1, true);
+    const independentlyKeyedDissolve = window.particleStudio.getOptions().dissolve;
+
+    window.particleStudio.setParameterKeyframes([]);
+    await window.particleStudio.setOptions({ dissolve: 0.2 }, true);
+    window.particleStudio.checkpointUndo('smoke undo');
+    await window.particleStudio.setOptions({ dissolve: 0.8 }, true);
+    await window.particleStudio.undo();
+    const undoDissolve = window.particleStudio.getOptions().dissolve;
+
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setCameraKeyframes([]);
+    window.particleStudio.setExportResolution(512, 288, 12);
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: true, aperture: 1.4, focusDistance: 0.5 });
+    const dofFrameBytes = window.particleStudio.renderFrame(0, undefined, 0).length;
+    window.particleStudio.setExportResolution(512, 256, 12);
+    window.particleStudio.setCameraSettings({ type: 'panorama', dofEnabled: true });
+    const panoramaSettings = window.particleStudio.getCameraSettings();
+    const panoramaFrame = window.particleStudio.renderFrame(0, undefined, 0);
+    const panoramaSize = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve([image.naturalWidth, image.naturalHeight]);
+      image.onerror = reject;
+      image.src = panoramaFrame;
+    });
+
+    window.particleStudio.setExportResolution(1920, 1080, 30);
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false, sensorWidth: 36 });
+    window.particleStudio.setCameraSnapshot({ position: [0, 1.2, 6], target: [0, 0, 0], fov: 48 });
+    return {
+      perspective,
+      cameraOnlyDissolve,
+      independentlyKeyedDissolve,
+      undoDissolve,
+      dofFrameBytes,
+      panoramaSettings,
+      panoramaSize,
+      panoramaBytes: panoramaFrame.length
+    };
+  });
+  if (
+    cameraFeatureCheck.perspective.type !== 'perspective' ||
+    Math.abs(cameraFeatureCheck.perspective.sensorWidth - 24) > 0.01 ||
+    Math.abs(cameraFeatureCheck.perspective.focalLength - 85) > 0.01 ||
+    !cameraFeatureCheck.perspective.dofEnabled ||
+    Math.abs(cameraFeatureCheck.perspective.aperture - 2) > 0.01
+  ) {
+    throw new Error(`Perspective camera settings failed: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (Math.abs(cameraFeatureCheck.cameraOnlyDissolve - 0.33) > 0.01) {
+    throw new Error(`Camera keyframes still mutate effect parameters: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (Math.abs(cameraFeatureCheck.independentlyKeyedDissolve - 0.5) > 0.04) {
+    throw new Error(`Independent parameter keyframes failed: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (Math.abs(cameraFeatureCheck.undoDissolve - 0.2) > 0.01) {
+    throw new Error(`Undo failed to restore the previous parameter value: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (cameraFeatureCheck.dofFrameBytes < 1000) {
+    throw new Error(`Depth-of-field rendering failed: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (
+    cameraFeatureCheck.panoramaSettings.type !== 'panorama' ||
+    cameraFeatureCheck.panoramaSettings.dofEnabled ||
+    cameraFeatureCheck.panoramaSize[0] !== 512 ||
+    cameraFeatureCheck.panoramaSize[1] !== 256 ||
+    cameraFeatureCheck.panoramaBytes < 1000
+  ) {
+    throw new Error(`Panorama rendering failed: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
 
   const restoredModelPath = path.join(rootDir, 'glb', decodeURIComponent(modelUrl.split('/').pop() || ''));
   if (existsSync(restoredModelPath)) {
@@ -557,6 +653,57 @@ try {
   if (!cameraMatch.ok) {
     throw new Error(`Export camera frame differs from preview: ${JSON.stringify(cameraMatch)}`);
   }
+
+  const panoramaConfigPath = path.join(outDir, 'panorama-export-config.json');
+  const panoramaExportRelative = 'verification/smoke/smoke-panorama-export.mp4';
+  await writeFile(
+    panoramaConfigPath,
+    JSON.stringify({
+      format: 'mp4-360',
+      port,
+      duration: 0.5,
+      fps: 2,
+      width: 320,
+      height: 160,
+      pixelRatio: 1,
+      startTime: 0,
+      cameraStartTime: 0,
+      effectStartTime: 0,
+      out: panoramaExportRelative,
+      modelUrl,
+      cameraKeyframes: [],
+      parameterKeyframes: [],
+      options: {
+        effectMode: 'particles',
+        useTexture: true,
+        particleCount: 100,
+        pointSize: 3,
+        sampleCleanup: 0,
+        dissolve: 0,
+        growth: 1,
+        glowRadius: 0,
+        glowExposure: 0,
+        autoRotate: false
+      },
+      cameraSnapshot: {
+        ...cameraSnapshot,
+        cameraType: 'panorama',
+        dofEnabled: false
+      }
+    }, null, 2)
+  );
+  const panoramaExportLog = await runNode(['scripts/export-mov.js', '--config', panoramaConfigPath]);
+  await writeFile(path.join(outDir, 'panorama-export.log'), panoramaExportLog);
+  const panoramaMp4Path = path.resolve(rootDir, panoramaExportRelative);
+  assertFileLooksReal(panoramaMp4Path, 1000);
+  const panoramaProbe = await probeMedia(panoramaMp4Path);
+  if (!panoramaProbe.includes('spherical: equirectangular')) {
+    throw new Error(`360 MP4 is missing equirectangular spherical metadata:\n${panoramaProbe}`);
+  }
+  if (!panoramaProbe.includes('320x160')) {
+    throw new Error(`360 MP4 does not have the expected 2:1 dimensions:\n${panoramaProbe}`);
+  }
+
   const imageSplatCheck = await verifyImageSplatControls(page);
   if (!imageSplatCheck.ok) {
     throw new Error(`Image splat controls are not visibly interactive: ${JSON.stringify(imageSplatCheck)}`);
@@ -576,9 +723,11 @@ try {
         cameraPreview: path.join(outDir, 'camera-preview.png'),
         exportPreview: path.join(outDir, 'export-preview.png'),
         importMode: importModeCheck,
+        cameraFeatures: cameraFeatureCheck,
         imageSplat: imageSplatCheck,
         animation: animationCheck,
-        mov: movPath
+        mov: movPath,
+        panoramaMp4: panoramaMp4Path
       },
       null,
       2
@@ -602,6 +751,23 @@ function assertRotationsClose(a, b, message) {
   if (!Number.isFinite(maxDelta) || maxDelta > 0.0005) {
     throw new Error(message);
   }
+}
+
+async function probeMedia(filePath) {
+  if (!ffmpegPath) {
+    throw new Error('ffmpeg-static did not provide an FFmpeg binary.');
+  }
+  const child = spawn(ffmpegPath, ['-hide_banner', '-i', filePath], {
+    cwd: rootDir,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  await once(child, 'exit');
+  return stderr;
 }
 
 async function verifyImportReplaceAndAppend(page) {

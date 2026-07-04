@@ -8,14 +8,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegPath from 'ffmpeg-static';
 import { chromium } from 'playwright';
+import { injectSphericalMetadata } from '../electron/spatial-metadata.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = parseArgs(process.argv.slice(2));
 const config = await readConfig(readOption('config', null));
+const exportFormat = normalizeExportFormat(readOption('format', config.format ?? 'mov'));
 const fps = Number(readOption('fps', config.fps ?? 30));
 const duration = Number(readOption('duration', config.duration ?? 5));
-const width = Number(readOption('width', config.width ?? 1920));
-const height = Number(readOption('height', config.height ?? 1080));
+let width = Math.round(Number(readOption('width', config.width ?? 1920)));
+let height = Math.round(Number(readOption('height', config.height ?? 1080)));
+if (exportFormat !== 'mov') {
+  width -= width % 2;
+  height -= height % 2;
+}
+if (exportFormat === 'mp4-360') {
+  height = Math.max(128, Math.round(width / 2));
+}
 const pixelRatio = clampNumber(readOption('pixelRatio', config.pixelRatio ?? 1), 0.5, 2, 1);
 const startTime = Number(readOption('startTime', readOption('start-time', config.startTime ?? 0)));
 const cameraStartTime = Number(readOption('cameraStartTime', readOption('camera-start-time', config.cameraStartTime ?? startTime)));
@@ -30,12 +39,13 @@ const worldUrl = readOption('world', readOption('worldUrl', readOption('world-ur
 const options = readJsonOption('options', config.options ?? null);
 const sceneModels = await normalizeSceneModelsForBrowser(config.sceneModels ?? null);
 const frameCount = Math.max(2, Math.round(fps * duration));
-const outputPath = path.resolve(rootDir, readOption('out', config.out ?? 'exports/particle-dissolve.mov'));
+const outputExtension = exportFormat === 'mov' ? 'mov' : 'mp4';
+const outputPath = path.resolve(rootDir, readOption('out', config.out ?? `exports/particle-dissolve.${outputExtension}`));
 const keepFrames = readBoolean('keep-frames');
 const baseUrl = `http://127.0.0.1:${port}/`;
 const pageParams = new URLSearchParams({
   export: '1',
-  transparent: '1',
+  transparent: exportFormat === 'mov' ? '1' : '0',
   duration: String(duration),
   pixelRatio: String(pixelRatio),
   t: String(Date.now())
@@ -60,6 +70,7 @@ if (readBoolean('dry-run')) {
     JSON.stringify(
       {
         fps,
+        exportFormat,
         duration,
         width,
         height,
@@ -112,6 +123,10 @@ try {
 
   await page.goto(pageUrl, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 60000 });
+  await page.evaluate(
+    ({ renderWidth, renderHeight, renderFps }) => window.particleStudio.setExportResolution(renderWidth, renderHeight, renderFps),
+    { renderWidth: width, renderHeight: height, renderFps: fps }
+  );
 
 if (options) {
   await page.evaluate((renderOptions) => window.particleStudio.setOptions(renderOptions), options);
@@ -162,12 +177,21 @@ if (Array.isArray(config.parameterKeyframes)) {
   await page.evaluate((keyframes) => window.particleStudio.setParameterKeyframes(keyframes), config.parameterKeyframes);
 }
 
-if (config.cameraSnapshot) {
+const cameraSnapshot = exportFormat === 'mp4-360'
+  ? { ...(config.cameraSnapshot || {}), cameraType: 'panorama', dofEnabled: false, cameraDofEnabled: false }
+  : config.cameraSnapshot;
+if (cameraSnapshot) {
   await page.evaluate(
     ({ snapshot, pose }) => window.particleStudio.setCameraSnapshot(snapshot, { pose }),
-    { snapshot: config.cameraSnapshot, pose: !hasCameraKeyframes }
+    { snapshot: cameraSnapshot, pose: !hasCameraKeyframes }
   );
 }
+
+await page.evaluate(
+  ({ effectTime: warmupEffectTime, cameraTime: warmupCameraTime }) =>
+    window.particleStudio.prepareExportFrame(warmupEffectTime, warmupCameraTime),
+  { effectTime: effectStartTime, cameraTime: cameraStartTime }
+);
 
 for (let frame = 0; frame < frameCount; frame += 1) {
     const frameOffset = frame / fps;
@@ -184,8 +208,18 @@ for (let frame = 0; frame < frameCount; frame += 1) {
     process.stdout.write(`\rRendered ${frame + 1}/${frameCount} frames`);
   }
 
-  process.stdout.write('\nEncoding transparent MOV...\n');
-  await encodeMov(framesDir, outputPath, fps);
+  if (exportFormat === 'mov') {
+    process.stdout.write('\nEncoding transparent MOV...\n');
+    await encodeMov(framesDir, outputPath, fps);
+  } else if (exportFormat === 'mp4-360') {
+    process.stdout.write('\nEncoding 360 MP4 and injecting spherical metadata...\n');
+    const encodedPath = path.join(framesDir, 'encoded-panorama.mp4');
+    await encodeMp4(framesDir, encodedPath, fps);
+    await injectSphericalMetadata(encodedPath, outputPath);
+  } else {
+    process.stdout.write('\nEncoding MP4...\n');
+    await encodeMp4(framesDir, outputPath, fps);
+  }
   process.stdout.write(`Done: ${outputPath}\n`);
 } finally {
   if (browser) {
@@ -398,6 +432,34 @@ async function encodeMov(framesDir, output, frameRate) {
     ];
     await runFfmpeg(qtrleArgs);
   }
+}
+
+async function encodeMp4(framesDir, output, frameRate) {
+  const inputPattern = path.join(framesDir, 'frame_%05d.png');
+  await runFfmpeg([
+    '-y',
+    '-framerate',
+    String(frameRate),
+    '-i',
+    inputPattern,
+    '-c:v',
+    'libx264',
+    '-profile:v',
+    'main',
+    '-preset',
+    'medium',
+    '-crf',
+    '18',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(frameRate),
+    output
+  ]);
+}
+
+function normalizeExportFormat(value) {
+  return value === 'mp4-360' ? 'mp4-360' : value === 'mp4' ? 'mp4' : 'mov';
 }
 
 async function runFfmpeg(ffmpegArgs) {

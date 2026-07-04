@@ -865,6 +865,41 @@
             <span>摄像机</span>
             <output id="timelineValue">0.00s</output>
           </div>
+          <div class="control-grid camera-control-grid">
+            <label class="camera-type-row">
+              <span>摄像机类型</span>
+              <select id="cameraType">
+                <option value="perspective">透视摄像机</option>
+                <option value="panorama">360° 全景摄像机</option>
+              </select>
+              <span class="camera-unit">模式</span>
+            </label>
+            <label>
+              <span>相机大小</span>
+              <input id="cameraDisplaySize" type="range" min="0.2" max="5" step="0.05" value="1" />
+              <input id="cameraDisplaySizeValue" class="value-input" type="number" min="0.2" max="5" step="0.05" value="1.00" />
+            </label>
+            <label>
+              <span>焦段</span>
+              <input id="cameraFocalLength" type="range" min="8" max="300" step="0.1" value="22.74" />
+              <input id="cameraFocalLengthValue" class="value-input" type="number" min="8" max="300" step="0.1" value="22.74" />
+            </label>
+            <label class="wide-toggle camera-dof-toggle">
+              <input id="cameraDofEnabled" type="checkbox" />
+              <span>开启景深（透视模式）</span>
+            </label>
+            <label>
+              <span>光圈 f/</span>
+              <input id="cameraAperture" type="range" min="1.2" max="22" step="0.1" value="5.6" disabled />
+              <input id="cameraApertureValue" class="value-input" type="number" min="1.2" max="22" step="0.1" value="5.6" disabled />
+            </label>
+            <label>
+              <span>焦点距离</span>
+              <input id="cameraFocusDistance" type="range" min="0.05" max="100" step="0.05" value="7.18" disabled />
+              <input id="cameraFocusDistanceValue" class="value-input" type="number" min="0.05" max="100" step="0.05" value="7.18" disabled />
+            </label>
+          </div>
+          <p class="camera-mode-hint" id="cameraModeHint">相机大小调整场景中的相机线框和手柄；焦段控制最终取景，景深参数可独立 K 帧。</p>
           <div class="timeline-wrap">
             <input id="timeline" type="range" min="0" max="5" step="0.01" value="0" />
             <div id="timelineMarkers" class="timeline-markers" aria-hidden="true"></div>
@@ -876,7 +911,7 @@
             </button>
             <button class="small-button" id="addKeyframe" title="记录当前摄像机关键帧">
               <i data-lucide="key-round"></i>
-              <span>K帧</span>
+              <span>相机 K 帧</span>
             </button>
             <button class="small-button" id="toggleCameraView" title="按导出画幅预览最终摄像机画面">
               <i data-lucide="camera"></i>
@@ -895,6 +930,10 @@
             <button class="small-button" id="rotateKeyframe" title="旋转选中的摄像机关键帧">
               <i data-lucide="rotate-3d"></i>
               <span>旋转</span>
+            </button>
+            <button class="small-button" id="scaleKeyframe" title="调整摄像机显示大小（快捷键 S）">
+              <i data-lucide="maximize-2"></i>
+              <span>大小</span>
             </button>
           </div>
           <div class="camera-curve-row">
@@ -927,6 +966,14 @@
 
         <div class="export-row" aria-label="Export controls">
           <div class="number-row">
+            <label>
+              <span>格式</span>
+              <select id="exportFormat">
+                <option value="mov">透明 MOV</option>
+                <option value="mp4">MP4</option>
+                <option value="mp4-360">360° MP4</option>
+              </select>
+            </label>
             <label>
               <span>宽</span>
               <input id="exportWidth" type="number" min="128" max="7680" step="16" value="1920" />

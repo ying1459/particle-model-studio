@@ -20,6 +20,7 @@ import {
   Download,
   KeyRound,
   Lightbulb,
+  Maximize2,
   Move3D,
   Orbit,
   PanelLeftClose,
@@ -42,6 +43,7 @@ createIcons({
     Download,
     KeyRound,
     Lightbulb,
+    Maximize2,
     Move3D,
     Move3d: Move3D,
     Orbit,
@@ -221,6 +223,13 @@ const controlsUi = {
   worldIntensity: document.querySelector('#worldIntensity'),
   worldBlur: document.querySelector('#worldBlur'),
   worldRotation: document.querySelector('#worldRotation'),
+  cameraType: document.querySelector('#cameraType'),
+  cameraDisplaySize: document.querySelector('#cameraDisplaySize'),
+  cameraFocalLength: document.querySelector('#cameraFocalLength'),
+  cameraDofEnabled: document.querySelector('#cameraDofEnabled'),
+  cameraAperture: document.querySelector('#cameraAperture'),
+  cameraFocusDistance: document.querySelector('#cameraFocusDistance'),
+  cameraModeHint: document.querySelector('#cameraModeHint'),
   timeline: document.querySelector('#timeline'),
   duration: document.querySelector('#duration'),
   cameraCurve: document.querySelector('#cameraCurve'),
@@ -240,11 +249,13 @@ const controlsUi = {
   clearKeyframes: document.querySelector('#clearKeyframes'),
   moveKeyframe: document.querySelector('#moveKeyframe'),
   rotateKeyframe: document.querySelector('#rotateKeyframe'),
+  scaleKeyframe: document.querySelector('#scaleKeyframe'),
   timelineMarkers: document.querySelector('#timelineMarkers'),
   keyframeCount: document.querySelector('#keyframeCount'),
   exportWidth: document.querySelector('#exportWidth'),
   exportHeight: document.querySelector('#exportHeight'),
   exportFps: document.querySelector('#exportFps'),
+  exportFormat: document.querySelector('#exportFormat'),
   exportMov: document.querySelector('#exportMov'),
   exportStatus: document.querySelector('#exportStatus')
 };
@@ -331,6 +342,10 @@ const outputUi = {
   worldIntensity: document.querySelector('#worldIntensityValue'),
   worldBlur: document.querySelector('#worldBlurValue'),
   worldRotation: document.querySelector('#worldRotationValue'),
+  cameraDisplaySize: document.querySelector('#cameraDisplaySizeValue'),
+  cameraFocalLength: document.querySelector('#cameraFocalLengthValue'),
+  cameraAperture: document.querySelector('#cameraApertureValue'),
+  cameraFocusDistance: document.querySelector('#cameraFocusDistanceValue'),
   handControlInfluence: document.querySelector('#handControlInfluenceValue'),
   handControlSmoothing: document.querySelector('#handControlSmoothingValue'),
   handControlFps: document.querySelector('#handControlFpsValue'),
@@ -485,7 +500,14 @@ const state = {
   handControlInfluence: Number(controlsUi.handControlInfluence?.value || 0.85),
   handControlSmoothing: Number(controlsUi.handControlSmoothing?.value || 0.72),
   handControlFps: Number(controlsUi.handControlFps?.value || 18),
-  handControlMirror: Boolean(controlsUi.handControlMirror?.checked)
+  handControlMirror: Boolean(controlsUi.handControlMirror?.checked),
+  cameraType: controlsUi.cameraType?.value || 'perspective',
+  cameraSensorWidth: 36,
+  cameraDisplaySize: Number(controlsUi.cameraDisplaySize?.value || 1),
+  cameraFocalLength: Number(controlsUi.cameraFocalLength?.value || 22.74),
+  cameraDofEnabled: Boolean(controlsUi.cameraDofEnabled?.checked),
+  cameraAperture: Number(controlsUi.cameraAperture?.value || 5.6),
+  cameraFocusDistance: Number(controlsUi.cameraFocusDistance?.value || 7.18)
 };
 
 const cameraAnimation = {
@@ -499,6 +521,221 @@ const cameraAnimation = {
 const parameterKeyframes = [];
 const parameterKeyframeButtons = new Map();
 const VALID_CAMERA_CURVES = new Set(['linear', 'easeInOut', 'easeIn', 'easeOut', 'hold']);
+const undoHistory = {
+  past: [],
+  restoring: false,
+  maxEntries: 50
+};
+
+function cloneUndoValue(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function captureUndoSceneModels() {
+  return sceneModelObjects.map((record) => ({
+    id: record.id,
+    name: record.name,
+    source: record.source,
+    payload: record.payload,
+    options: cloneUndoValue(record.options),
+    transform: cloneUndoValue(record.transform),
+    effectRotation: cloneUndoValue(record.effectRotation)
+  }));
+}
+
+function captureUndoSnapshot(label = '编辑') {
+  return {
+    label,
+    options: cloneUndoValue(captureKeyframeOptions()),
+    cameraSettings: cloneUndoValue(getCameraSettings()),
+    cameraSnapshot: cloneUndoValue(captureCameraSnapshot()),
+    exportSettings: {
+      ...getExportResolution(),
+      fps: Number(controlsUi.exportFps.value) || 30
+    },
+    cameraAnimation: {
+      duration: cameraAnimation.duration,
+      time: cameraAnimation.time,
+      curve: cameraAnimation.curve,
+      curveStrength: cameraAnimation.curveStrength
+    },
+    cameraKeyframes: cloneUndoValue(getSortedCameraKeyframes()),
+    parameterKeyframes: cloneUndoValue(serializeParameterKeyframes()),
+    lights: cloneUndoValue(serializeSceneLights()),
+    worldExport: state.worldExport,
+    sceneModels: captureUndoSceneModels(),
+    activeSceneModelId: selectedSceneModelId,
+    imageSplatTransform: imageSplatRoot || realSplatRoot ? cloneUndoValue(captureImageSplatTransform()) : null
+  };
+}
+
+function getUndoSnapshotFingerprint(snapshot) {
+  return JSON.stringify({
+    options: snapshot.options,
+    cameraSettings: snapshot.cameraSettings,
+    cameraSnapshot: snapshot.cameraSnapshot,
+    exportSettings: snapshot.exportSettings,
+    cameraAnimation: snapshot.cameraAnimation,
+    cameraKeyframes: snapshot.cameraKeyframes,
+    parameterKeyframes: snapshot.parameterKeyframes,
+    lights: snapshot.lights,
+    worldExport: snapshot.worldExport,
+    sceneModels: snapshot.sceneModels.map((record) => ({
+      id: record.id,
+      name: record.name,
+      options: record.options,
+      transform: record.transform,
+      effectRotation: record.effectRotation
+    })),
+    activeSceneModelId: snapshot.activeSceneModelId,
+    imageSplatTransform: snapshot.imageSplatTransform
+  });
+}
+
+function recordUndoStep(label = '编辑') {
+  if (undoHistory.restoring || exportSettings.hideUi || !initialModelReady) {
+    return false;
+  }
+  const snapshot = captureUndoSnapshot(label);
+  const fingerprint = getUndoSnapshotFingerprint(snapshot);
+  const previous = undoHistory.past[undoHistory.past.length - 1];
+  if (previous?.fingerprint === fingerprint) {
+    return false;
+  }
+  undoHistory.past.push({ snapshot, fingerprint });
+  if (undoHistory.past.length > undoHistory.maxEntries) {
+    undoHistory.past.splice(0, undoHistory.past.length - undoHistory.maxEntries);
+  }
+  return true;
+}
+
+async function restoreUndoSceneModels(models = [], activeId = null) {
+  if (!models.length) {
+    return;
+  }
+  const structureChanged = models.length !== sceneModelObjects.length || models.some((snapshot, index) => {
+    const current = sceneModelObjects[index];
+    return !current || current.id !== snapshot.id || current.source !== snapshot.source;
+  });
+
+  if (!structureChanged) {
+    models.forEach((snapshot, index) => {
+      const record = sceneModelObjects[index];
+      record.name = snapshot.name;
+      record.payload = snapshot.payload;
+      record.options = sanitizeSceneModelOptions(snapshot.options);
+      record.transform = normalizeSceneModelTransform(snapshot.transform);
+      record.effectRotation = normalizeVectorArray(snapshot.effectRotation, [0, 0, 0]);
+      if (record.snapshotRoot) {
+        applySceneModelTransformToObject(record.snapshotRoot, record.transform);
+        const effectRoot = record.snapshotRoot.children[0];
+        if (effectRoot) {
+          effectRoot.rotation.fromArray(record.effectRotation);
+          effectRoot.updateMatrixWorld(true);
+        }
+      }
+    });
+    const targetId = models.some((record) => record.id === activeId) ? activeId : models[0].id;
+    if (selectedSceneModelId !== targetId) {
+      await activateSceneModel(targetId, { force: true });
+    } else {
+      const activeRecord = getSelectedSceneModel();
+      applySceneModelOptionsToState(activeRecord.options);
+      applyActiveSceneModelTransform(activeRecord.transform);
+      modelEffectRoot.rotation.fromArray(activeRecord.effectRotation);
+    }
+    return;
+  }
+
+  sceneModelObjects.forEach((record) => disposeSceneModelSnapshot(record));
+  sceneModelObjects.length = 0;
+  models.forEach((snapshot) => {
+    sceneModelObjects.push(createSceneModelRecord({
+      id: snapshot.id,
+      name: snapshot.name,
+      source: snapshot.source,
+      payload: snapshot.payload,
+      options: snapshot.options,
+      transform: snapshot.transform,
+      effectRotation: snapshot.effectRotation
+    }));
+  });
+
+  const targetId = sceneModelObjects.some((record) => record.id === activeId)
+    ? activeId
+    : sceneModelObjects[0].id;
+  sceneModelSaveSuspended = true;
+  try {
+    for (const record of sceneModelObjects) {
+      selectedSceneModelId = record.id;
+      currentModelPayload = record.payload || null;
+      applySceneModelOptionsToState(record.options);
+      applyActiveSceneModelTransform(record.transform);
+      modelEffectRoot.rotation.fromArray(record.effectRotation);
+      await buildParticles(record.source, record.name, { resetView: false });
+      buildSceneModelSnapshotFromActive(record);
+    }
+    const activeRecord = sceneModelObjects.find((record) => record.id === targetId) || sceneModelObjects[0];
+    selectedSceneModelId = activeRecord.id;
+    disposeSceneModelSnapshot(activeRecord);
+    currentModelPayload = activeRecord.payload || null;
+    applySceneModelOptionsToState(activeRecord.options);
+    applyActiveSceneModelTransform(activeRecord.transform);
+    modelEffectRoot.rotation.fromArray(activeRecord.effectRotation);
+    await buildParticles(activeRecord.source, activeRecord.name, { resetView: false });
+    currentSource = activeRecord.source;
+    currentLabel = activeRecord.name;
+  } finally {
+    sceneModelSaveSuspended = false;
+  }
+}
+
+async function undoLastAction() {
+  if (undoHistory.restoring || !undoHistory.past.length) {
+    setStatus(undoHistory.restoring ? 'Undoing' : 'Nothing to undo');
+    return false;
+  }
+  const entry = undoHistory.past.pop();
+  undoHistory.restoring = true;
+  cameraAnimation.playing = false;
+  updatePlayButton();
+  setStatus(`Undo: ${entry.snapshot.label}`);
+  try {
+    await restoreUndoSceneModels(entry.snapshot.sceneModels, entry.snapshot.activeSceneModelId);
+    await applyOptionsSnapshot(entry.snapshot.options, true);
+    state.worldExport = Boolean(entry.snapshot.worldExport);
+    controlsUi.worldExport.checked = state.worldExport;
+    cameraAnimation.duration = entry.snapshot.cameraAnimation.duration;
+    cameraAnimation.curve = entry.snapshot.cameraAnimation.curve;
+    cameraAnimation.curveStrength = entry.snapshot.cameraAnimation.curveStrength;
+    controlsUi.duration.value = cameraAnimation.duration;
+    controlsUi.timeline.max = cameraAnimation.duration;
+    importCameraKeyframes(entry.snapshot.cameraKeyframes);
+    importParameterKeyframes(entry.snapshot.parameterKeyframes);
+    applySceneLightSnapshots(entry.snapshot.lights, { updateUi: true });
+    setCameraSettings(entry.snapshot.cameraSettings, true);
+    setExportResolution(
+      entry.snapshot.exportSettings.width,
+      entry.snapshot.exportSettings.height,
+      entry.snapshot.exportSettings.fps
+    );
+    applyCameraSnapshot(entry.snapshot.cameraSnapshot);
+    if (entry.snapshot.imageSplatTransform) {
+      applyImageSplatTransformSnapshot(entry.snapshot.imageSplatTransform);
+    }
+    setCameraTime(entry.snapshot.cameraAnimation.time, true);
+    syncUi();
+    renderSceneModelList();
+    setStatus('Undone');
+    return true;
+  } catch (error) {
+    console.error(error);
+    setStatus('Undo failed');
+    return false;
+  } finally {
+    undoHistory.restoring = false;
+  }
+}
 
 const NUMERIC_KEYFRAME_FIELDS = [
   'pointSize',
@@ -587,7 +824,11 @@ const NUMERIC_KEYFRAME_FIELDS = [
   'morphDirZ',
   'worldIntensity',
   'worldBlur',
-  'worldRotation'
+  'worldRotation',
+  'cameraSensorWidth',
+  'cameraFocalLength',
+  'cameraAperture',
+  'cameraFocusDistance'
 ];
 const COLOR_KEYFRAME_FIELDS = ['colorA', 'colorB'];
 const BOOLEAN_KEYFRAME_FIELDS = [
@@ -598,11 +839,22 @@ const BOOLEAN_KEYFRAME_FIELDS = [
   'modelAnimEnabled',
   'modelAnimPlaying',
   'worldEnabled',
-  'worldVisible'
+  'worldVisible',
+  'cameraDofEnabled'
 ];
-const STRING_KEYFRAME_FIELDS = ['effectMode'];
+const STRING_KEYFRAME_FIELDS = ['effectMode', 'cameraType'];
 const REBUILD_NUMERIC_FIELDS = new Set(['sampleCleanup', 'emissionCount', 'imageSplatCount']);
-const PARAMETER_KEYFRAME_FIELDS = NUMERIC_KEYFRAME_FIELDS.filter((field) => !REBUILD_NUMERIC_FIELDS.has(field));
+const CAMERA_KEYFRAME_FIELDS = new Set([
+  'cameraSensorWidth',
+  'cameraFocalLength',
+  'cameraAperture',
+  'cameraFocusDistance',
+  'cameraDofEnabled'
+]);
+const PARAMETER_KEYFRAME_FIELDS = [
+  ...NUMERIC_KEYFRAME_FIELDS.filter((field) => !REBUILD_NUMERIC_FIELDS.has(field)),
+  'cameraDofEnabled'
+];
 const VISIBLE_MODEL_MATERIAL_FIELDS = new Set(['particleizeProgress', 'modelVisibility', 'modelWhite', 'modelRoughness', 'dissolve']);
 const MAX_TEXTURE_SAMPLER_SIZE = 1024;
 const safeDisplayTextureCache = new WeakMap();
@@ -1023,6 +1275,12 @@ function createPostTarget(name, width, height, options = {}) {
   });
   target.texture.name = name;
   target.texture.generateMipmaps = false;
+  if (options.depthBuffer) {
+    target.depthTexture = new THREE.DepthTexture(width, height, THREE.UnsignedIntType);
+    target.depthTexture.format = THREE.DepthFormat;
+    target.depthTexture.type = THREE.UnsignedIntType;
+    target.depthTexture.name = `${name}-depth`;
+  }
   return target;
 }
 
@@ -1119,6 +1377,8 @@ scene.add(lightHandleGroup);
 const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.001, 100);
 const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, 0.001, 100);
 const outputFrameCamera = new THREE.PerspectiveCamera(48, 16 / 9, 0.001, 100);
+camera.filmGauge = state.cameraSensorWidth;
+camera.setFocalLength(state.cameraFocalLength);
 const CAMERA_PREVIEW_INTERVAL_MS = exportSettings.hideUi ? 1000 / 15 : 1000 / 10;
 const ANIMATED_PARTICLE_PREVIEW_INTERVAL_MS = exportSettings.hideUi ? 1000 / 30 : 1000 / 18;
 perfStats.cameraPreviewFps = 1000 / CAMERA_PREVIEW_INTERVAL_MS;
@@ -1145,6 +1405,9 @@ transformControls.visible = false;
 scene.add(transformControls);
 let activeCameraQuaternion = null;
 transformControls.addEventListener('dragging-changed', (event) => {
+  if (event.value) {
+    recordUndoStep('对象变换');
+  }
   orbit.enabled = !event.value;
   if (!event.value) {
     if (selectedImageSplat) {
@@ -1189,6 +1452,7 @@ transformControls.addEventListener('objectChange', () => {
   updateCameraPathCurve();
 });
 orbit.addEventListener('start', () => {
+  recordUndoStep('摄像机视角');
   orbitInteracting = true;
   cameraPreviewResumeAt = performance.now() + CAMERA_PREVIEW_ORBIT_PAUSE_MS;
   if (!transformControls.dragging && !cameraAnimation.playing) {
@@ -1330,10 +1594,18 @@ const compositeMaterial = new THREE.ShaderMaterial({
   uniforms: {
     uBaseTexture: { value: sceneTarget.texture },
     uBloomTexture: { value: blurTargetA.texture },
+    uDepthTexture: { value: sceneTarget.depthTexture },
     uBloomStrength: { value: 1 },
     uBloomAlpha: { value: 1 },
     uToneExposure: { value: renderer.toneMappingExposure },
-    uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 }
+    uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 },
+    uDofEnabled: { value: 0 },
+    uCameraNear: { value: camera.near },
+    uCameraFar: { value: camera.far },
+    uFocusDistance: { value: state.cameraFocusDistance },
+    uAperture: { value: state.cameraAperture },
+    uFocalLength: { value: state.cameraFocalLength },
+    uResolution: { value: new THREE.Vector2(drawingSize.width, drawingSize.height) }
   },
   depthTest: false,
   depthWrite: false,
@@ -1341,10 +1613,18 @@ const compositeMaterial = new THREE.ShaderMaterial({
   fragmentShader: `
     uniform sampler2D uBaseTexture;
     uniform sampler2D uBloomTexture;
+    uniform sampler2D uDepthTexture;
     uniform float uBloomStrength;
     uniform float uBloomAlpha;
     uniform float uToneExposure;
     uniform float uTransparentOutput;
+    uniform float uDofEnabled;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    uniform float uFocusDistance;
+    uniform float uAperture;
+    uniform float uFocalLength;
+    uniform vec2 uResolution;
 
     varying vec2 vUv;
 
@@ -1405,8 +1685,45 @@ const compositeMaterial = new THREE.ShaderMaterial({
       return mix(low, high, step(vec3(0.0031308), value));
     }
 
+    float perspectiveDepthToViewZ(float invClipZ, float nearValue, float farValue) {
+      return (nearValue * farValue) / ((farValue - nearValue) * invClipZ - farValue);
+    }
+
+    vec4 sampleDepthOfField(vec2 uv) {
+      vec4 center = texture2D(uBaseTexture, uv);
+      if (uDofEnabled < 0.5) {
+        return center;
+      }
+
+      float depth = texture2D(uDepthTexture, uv).x;
+      float viewDistance = max(-perspectiveDepthToViewZ(depth, uCameraNear, uCameraFar), 0.001);
+      float apertureScale = clamp(5.6 / max(uAperture, 1.2), 0.25, 4.7);
+      float focalScale = clamp(uFocalLength / 50.0, 0.18, 6.0);
+      float coc = clamp(abs(viewDistance - uFocusDistance) / max(viewDistance, 0.1) * apertureScale * focalScale, 0.0, 1.0);
+      vec2 texel = 1.0 / max(uResolution, vec2(2.0));
+      vec2 radius = texel * mix(0.0, 14.0, coc);
+      if (coc < 0.002) {
+        return center;
+      }
+
+      vec4 color = center * 0.18;
+      color += texture2D(uBaseTexture, uv + vec2(1.0, 0.0) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(-1.0, 0.0) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(0.0, 1.0) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(0.0, -1.0) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(0.707, 0.707) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(-0.707, 0.707) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(0.707, -0.707) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(-0.707, -0.707) * radius) * 0.082;
+      color += texture2D(uBaseTexture, uv + vec2(1.65, 0.0) * radius) * 0.041;
+      color += texture2D(uBaseTexture, uv + vec2(-1.65, 0.0) * radius) * 0.041;
+      color += texture2D(uBaseTexture, uv + vec2(0.0, 1.65) * radius) * 0.041;
+      color += texture2D(uBaseTexture, uv + vec2(0.0, -1.65) * radius) * 0.041;
+      return color;
+    }
+
     void main() {
-      vec4 base = texture2D(uBaseTexture, vUv);
+      vec4 base = sampleDepthOfField(vUv);
       vec4 bloom = texture2D(uBloomTexture, vUv);
       bloom.rgb = max(bloom.rgb - vec3(0.0012), vec3(0.0));
       bloom.a = max(bloom.a - 0.001, 0.0);
@@ -1427,6 +1744,118 @@ const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), compositeMaterial);
 postQuad.frustumCulled = false;
 postScene.add(postQuad);
+
+const panoramaMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uCubeTexture: { value: null },
+    uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform samplerCube uCubeTexture;
+    uniform float uTransparentOutput;
+    varying vec2 vUv;
+
+    const float PI = 3.141592653589793;
+
+    void main() {
+      float longitude = (vUv.x * 2.0 - 1.0) * PI;
+      float latitude = (vUv.y - 0.5) * PI;
+      float cosLatitude = cos(latitude);
+      vec3 direction = normalize(vec3(
+        sin(longitude) * cosLatitude,
+        sin(latitude),
+        -cos(longitude) * cosLatitude
+      ));
+      vec4 color = textureCube(uCubeTexture, direction);
+      color.a = mix(1.0, color.a, uTransparentOutput);
+      gl_FragColor = color;
+    }
+  `
+});
+
+const panoramaResources = new WeakMap();
+
+function getPanoramaResources(targetRenderer, outputHeight = 1024) {
+  const requestedFaceSize = THREE.MathUtils.clamp(Math.ceil(Number(outputHeight) / 2), 256, 1536);
+  let resources = panoramaResources.get(targetRenderer);
+  if (!resources) {
+    const target = new THREE.WebGLCubeRenderTarget(requestedFaceSize, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+      depthBuffer: true
+    });
+    target.texture.name = 'particle-panorama-cube';
+    resources = {
+      target,
+      camera: new THREE.CubeCamera(camera.near, camera.far, target),
+      faceSize: requestedFaceSize
+    };
+    panoramaResources.set(targetRenderer, resources);
+  } else if (resources.faceSize !== requestedFaceSize) {
+    resources.target.setSize(requestedFaceSize);
+    resources.faceSize = requestedFaceSize;
+  }
+  return resources;
+}
+
+function renderPanoramaFor(targetRenderer, poseCamera, options = {}) {
+  const outputTarget = options.outputTarget ?? targetRenderer.getRenderTarget();
+  const width = Math.max(2, Math.round(Number(options.width) || 2048));
+  const height = Math.max(2, Math.round(Number(options.height) || width / 2));
+  const transparent = options.transparent ?? exportSettings.transparent;
+  const viewport = options.viewport || null;
+  const resources = getPanoramaResources(targetRenderer, height);
+  const previousTarget = targetRenderer.getRenderTarget();
+  const previousClearColor = new THREE.Color();
+  const previousAlpha = targetRenderer.getClearAlpha();
+  const previousViewport = new THREE.Vector4();
+  const previousScissor = new THREE.Vector4();
+  const previousScissorTest = targetRenderer.getScissorTest?.() || false;
+  const previousPostMaterial = postQuad.material;
+  targetRenderer.getClearColor(previousClearColor);
+  targetRenderer.getViewport(previousViewport);
+  targetRenderer.getScissor(previousScissor);
+
+  resources.camera.near = poseCamera.near;
+  resources.camera.far = poseCamera.far;
+  resources.camera.position.copy(poseCamera.position);
+  resources.camera.quaternion.copy(poseCamera.quaternion).normalize();
+  resources.camera.updateMatrixWorld(true);
+  resources.camera.update(targetRenderer, scene);
+
+  panoramaMaterial.uniforms.uCubeTexture.value = resources.target.texture;
+  panoramaMaterial.uniforms.uTransparentOutput.value = transparent ? 1 : 0;
+  postQuad.material = panoramaMaterial;
+  targetRenderer.setRenderTarget(outputTarget);
+  if (outputTarget) {
+    setFullTargetViewport(targetRenderer, outputTarget);
+  } else if (viewport) {
+    targetRenderer.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+    targetRenderer.setScissor(viewport.x, viewport.y, viewport.width, viewport.height);
+    targetRenderer.setScissorTest(true);
+  } else {
+    targetRenderer.setViewport(0, 0, width, height);
+    targetRenderer.setScissor(0, 0, width, height);
+    targetRenderer.setScissorTest(false);
+  }
+  targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
+  targetRenderer.clear(true, true, true);
+  targetRenderer.render(postScene, postCamera);
+
+  postQuad.material = previousPostMaterial;
+  targetRenderer.setRenderTarget(previousTarget);
+  targetRenderer.setViewport(previousViewport);
+  targetRenderer.setScissor(previousScissor);
+  targetRenderer.setScissorTest(previousScissorTest);
+  targetRenderer.setClearColor(previousClearColor, previousAlpha);
+}
 
 const particleMaterial = new THREE.ShaderMaterial({
   uniforms,
@@ -9248,6 +9677,7 @@ function syncUi() {
   controlsUi.timeline.max = cameraAnimation.duration;
   controlsUi.timeline.value = cameraAnimation.time;
   syncCameraCurveUi();
+  syncCameraSettingsFromState(true);
 
   setValueInput('particleCount', state.particleCount);
   NUMERIC_KEYFRAME_FIELDS.forEach((field) => setValueInput(field, state[field]));
@@ -9306,18 +9736,29 @@ function formatControlValue(key, value) {
     return Number(value).toFixed(3);
   }
 
+  if (key === 'cameraSensorWidth' || key === 'cameraAperture') {
+    return Number(value).toFixed(1);
+  }
+
+  if (key === 'cameraFocalLength' || key === 'cameraFocusDistance') {
+    return Number(value).toFixed(2);
+  }
+
   return Number(value).toFixed(2);
 }
 
 function setupParameterKeyframeButtons() {
   PARAMETER_KEYFRAME_FIELDS.forEach((field) => {
     const control = controlsUi[field];
-    if (!control || control.type !== 'range') {
+    if (!control || (control.type !== 'range' && control.type !== 'checkbox')) {
       return;
     }
 
     const label = control.closest('label');
-    if (!label || !label.closest('.control-grid') || label.classList.contains('wide-toggle')) {
+    if (!label || !label.closest('.control-grid')) {
+      return;
+    }
+    if (label.classList.contains('wide-toggle') && !CAMERA_KEYFRAME_FIELDS.has(field)) {
       return;
     }
 
@@ -9412,6 +9853,8 @@ function resetCamera() {
   orbit.maxDistance = 100;
   camera.position.set(0, 0.7, 7.2);
   orbit.target.set(0, 0.05, 0);
+  state.cameraFocusDistance = camera.position.distanceTo(orbit.target);
+  syncCameraSettingsFromState(true);
   orbit.update();
 }
 
@@ -9444,6 +9887,102 @@ function frameImageSplatCamera(source) {
   orbit.update();
 }
 
+function normalizeCameraType(value) {
+  return value === 'panorama' ? 'panorama' : 'perspective';
+}
+
+function syncCameraSettingsFromState(updateUi = false) {
+  state.cameraType = normalizeCameraType(state.cameraType);
+  state.cameraSensorWidth = THREE.MathUtils.clamp(Number(state.cameraSensorWidth) || 36, 12, 70);
+  state.cameraFocalLength = THREE.MathUtils.clamp(Number(state.cameraFocalLength) || 22.74, 8, 300);
+  state.cameraDisplaySize = THREE.MathUtils.clamp(Number(state.cameraDisplaySize) || 1, 0.2, 5);
+  state.cameraAperture = THREE.MathUtils.clamp(Number(state.cameraAperture) || 5.6, 1.2, 22);
+  state.cameraFocusDistance = THREE.MathUtils.clamp(Number(state.cameraFocusDistance) || 7.18, 0.05, 100);
+  state.cameraDofEnabled = Boolean(state.cameraDofEnabled) && state.cameraType === 'perspective';
+
+  camera.filmGauge = state.cameraSensorWidth;
+  camera.setFocalLength(state.cameraFocalLength);
+  camera.updateProjectionMatrix();
+
+  if (updateUi) {
+    controlsUi.cameraType.value = state.cameraType;
+    controlsUi.cameraDofEnabled.checked = state.cameraDofEnabled;
+    setRangeValue('cameraDisplaySize', state.cameraDisplaySize);
+    setRangeValue('cameraFocalLength', state.cameraFocalLength);
+    setRangeValue('cameraAperture', state.cameraAperture);
+    setRangeValue('cameraFocusDistance', state.cameraFocusDistance);
+    setValueInput('cameraDisplaySize', state.cameraDisplaySize);
+    setValueInput('cameraFocalLength', state.cameraFocalLength);
+    setValueInput('cameraAperture', state.cameraAperture);
+    setValueInput('cameraFocusDistance', state.cameraFocusDistance);
+  }
+
+  const perspective = state.cameraType === 'perspective';
+  const dofControlsEnabled = perspective && state.cameraDofEnabled;
+  controlsUi.cameraDofEnabled.disabled = !perspective;
+  controlsUi.cameraAperture.disabled = !dofControlsEnabled;
+  controlsUi.cameraFocusDistance.disabled = !dofControlsEnabled;
+  outputUi.cameraAperture.disabled = !dofControlsEnabled;
+  outputUi.cameraFocusDistance.disabled = !dofControlsEnabled;
+  if (controlsUi.cameraModeHint) {
+    controlsUi.cameraModeHint.textContent = perspective
+      ? '相机大小调整场景中的相机线框和手柄；焦段控制最终取景，景深参数可独立 K 帧。'
+      : '相机大小调整场景中的相机线框；360° 模式输出 2:1 全景且关闭景深。';
+  }
+  updateCameraMarkerDisplaySize();
+  setCameraPreviewDirty();
+}
+
+function setCameraType(value, options = {}) {
+  state.cameraType = normalizeCameraType(value);
+  if (state.cameraType === 'panorama' && options.preserveResolution !== true) {
+    const width = Math.max(256, Math.round(Number(controlsUi.exportWidth.value) || 3840));
+    controlsUi.exportWidth.value = width;
+    controlsUi.exportHeight.value = Math.max(128, Math.round(width / 2));
+    updateCameraPreviewLayout(true);
+  }
+  syncCameraSettingsFromState(true);
+}
+
+function setCameraSettings(settings = {}, updateUi = true) {
+  if (settings.type !== undefined || settings.cameraType !== undefined) {
+    state.cameraType = normalizeCameraType(settings.type ?? settings.cameraType);
+  }
+  if (settings.sensorWidth !== undefined || settings.cameraSensorWidth !== undefined) {
+    state.cameraSensorWidth = Number(settings.sensorWidth ?? settings.cameraSensorWidth);
+  }
+  if (settings.focalLength !== undefined || settings.cameraFocalLength !== undefined) {
+    state.cameraFocalLength = Number(settings.focalLength ?? settings.cameraFocalLength);
+  }
+  if (settings.displaySize !== undefined || settings.cameraDisplaySize !== undefined) {
+    state.cameraDisplaySize = Number(settings.displaySize ?? settings.cameraDisplaySize);
+  }
+  if (settings.dofEnabled !== undefined || settings.cameraDofEnabled !== undefined) {
+    state.cameraDofEnabled = Boolean(settings.dofEnabled ?? settings.cameraDofEnabled);
+  }
+  if (settings.aperture !== undefined || settings.cameraAperture !== undefined) {
+    state.cameraAperture = Number(settings.aperture ?? settings.cameraAperture);
+  }
+  if (settings.focusDistance !== undefined || settings.cameraFocusDistance !== undefined) {
+    state.cameraFocusDistance = Number(settings.focusDistance ?? settings.cameraFocusDistance);
+  }
+  syncCameraSettingsFromState(updateUi);
+  return getCameraSettings();
+}
+
+function getCameraSettings() {
+  return {
+    type: normalizeCameraType(state.cameraType),
+    sensorWidth: state.cameraSensorWidth,
+    focalLength: state.cameraFocalLength,
+    displaySize: state.cameraDisplaySize,
+    fov: camera.fov,
+    dofEnabled: Boolean(state.cameraDofEnabled),
+    aperture: state.cameraAperture,
+    focusDistance: state.cameraFocusDistance
+  };
+}
+
 function getExportResolution() {
   const width = Math.max(1, Math.round(Number(controlsUi.exportWidth?.value) || 1920));
   const height = Math.max(1, Math.round(Number(controlsUi.exportHeight?.value) || 1080));
@@ -9462,7 +10001,9 @@ function updateCameraPreviewLayout(force = false) {
   const { width, height, aspect } = getExportResolution();
   cameraPreviewUi.root.style.setProperty('--camera-preview-aspect', `${width} / ${height}`);
   if (cameraPreviewUi.info) {
-    cameraPreviewUi.info.textContent = `${width} x ${height}`;
+    cameraPreviewUi.info.textContent = state.cameraType === 'panorama'
+      ? `${width} x ${height} · 360°`
+      : `${width} x ${height}`;
   }
 
   const viewWidth = Math.max(2, Math.round(cameraPreviewUi.canvas.clientWidth || 0));
@@ -9488,6 +10029,19 @@ function updateCameraPreviewLayout(force = false) {
   resizePostTargetSet(cameraPreviewPostTargets, renderWidth, renderHeight);
   cameraPreviewLayoutCache = { width: viewWidth, height: viewHeight, renderWidth, renderHeight, aspect, pixelRatio };
   return cameraPreviewLayoutCache;
+}
+
+function setExportResolution(width, height, fps) {
+  const safeWidth = THREE.MathUtils.clamp(Math.round(Number(width) || 1920), 128, 7680);
+  const safeHeight = THREE.MathUtils.clamp(Math.round(Number(height) || 1080), 128, 4320);
+  controlsUi.exportWidth.value = safeWidth;
+  controlsUi.exportHeight.value = safeHeight;
+  if (Number.isFinite(Number(fps))) {
+    controlsUi.exportFps.value = THREE.MathUtils.clamp(Math.round(Number(fps)), 1, 60);
+  }
+  updateCameraPreviewLayout(true);
+  setCameraPreviewDirty();
+  return getExportResolution();
 }
 
 function getMainCameraViewLayout() {
@@ -9544,12 +10098,15 @@ function setCameraViewLocked(value) {
 }
 
 function copyCameraProjection(source, target, aspect) {
-  target.fov = source.fov;
   target.zoom = source.zoom;
+  target.filmGauge = state.cameraSensorWidth;
+  target.filmOffset = source.filmOffset;
+  target.focus = source.focus;
   target.near = source.near;
   target.far = source.far;
   target.aspect = Math.max(0.01, aspect);
   target.up.copy(source.up);
+  target.setFocalLength(state.cameraFocalLength);
   target.updateProjectionMatrix();
 }
 
@@ -9641,12 +10198,22 @@ function renderCameraPreview(force = false) {
   cameraPreviewRenderer.toneMappingExposure = renderer.toneMappingExposure;
 
   try {
-    renderSceneWithGlowFor(
-      cameraPreviewRenderer,
-      configureCameraPreviewCamera(layout.aspect),
-      cameraPreviewPostTargets,
-      { outputTarget: null, transparent: false }
-    );
+    const previewCamera = configureCameraPreviewCamera(layout.aspect);
+    if (state.cameraType === 'panorama') {
+      renderPanoramaFor(cameraPreviewRenderer, previewCamera, {
+        outputTarget: null,
+        transparent: false,
+        width: layout.renderWidth,
+        height: layout.renderHeight
+      });
+    } else {
+      renderSceneWithGlowFor(
+        cameraPreviewRenderer,
+        previewCamera,
+        cameraPreviewPostTargets,
+        { outputTarget: null, transparent: false }
+      );
+    }
   } finally {
     scene.background = previousPreviewBackground;
     scene.backgroundIntensity = previousPreviewBackgroundIntensity;
@@ -9672,6 +10239,13 @@ function captureCameraSnapshot() {
     target: target.toArray(),
     quaternion: snapshotCamera.quaternion.toArray(),
     fov: snapshotCamera.fov,
+    focalLength: state.cameraFocalLength,
+    filmGauge: state.cameraSensorWidth,
+    displaySize: state.cameraDisplaySize,
+    cameraType: state.cameraType,
+    dofEnabled: state.cameraDofEnabled,
+    aperture: state.cameraAperture,
+    focusDistance: state.cameraFocusDistance,
     zoom: snapshotCamera.zoom,
     near: snapshotCamera.near,
     far: snapshotCamera.far,
@@ -9724,13 +10298,21 @@ function applyCameraSnapshot(snapshot = {}, options = {}) {
 
 function applyCameraProjectionSnapshot(snapshot = {}) {
   const sourceFov = Number(snapshot.fov);
+  const sourceFocalLength = Number(snapshot.focalLength);
+  const sourceFilmGauge = Number(snapshot.filmGauge ?? snapshot.sensorWidth);
   const sourceZoom = Number(snapshot.zoom);
   const sourceNear = Number(snapshot.near);
   const sourceFar = Number(snapshot.far);
   const outputAspect = window.innerWidth / Math.max(window.innerHeight, 1);
 
-  if (Number.isFinite(sourceFov) && sourceFov > 1 && sourceFov < 160) {
+  if (Number.isFinite(sourceFilmGauge)) {
+    state.cameraSensorWidth = THREE.MathUtils.clamp(sourceFilmGauge, 12, 70);
+  }
+  if (Number.isFinite(sourceFocalLength)) {
+    state.cameraFocalLength = THREE.MathUtils.clamp(sourceFocalLength, 8, 300);
+  } else if (Number.isFinite(sourceFov) && sourceFov > 1 && sourceFov < 160) {
     camera.fov = sourceFov;
+    state.cameraFocalLength = camera.getFocalLength();
   }
   if (Number.isFinite(sourceZoom) && sourceZoom > 0.001 && sourceZoom < 1000) {
     camera.zoom = sourceZoom;
@@ -9742,8 +10324,24 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
     camera.far = sourceFar;
   }
 
+  if (snapshot.cameraType !== undefined || snapshot.type !== undefined) {
+    state.cameraType = normalizeCameraType(snapshot.cameraType ?? snapshot.type);
+  }
+  if (snapshot.dofEnabled !== undefined) {
+    state.cameraDofEnabled = Boolean(snapshot.dofEnabled);
+  }
+  if (Number.isFinite(Number(snapshot.aperture))) {
+    state.cameraAperture = Number(snapshot.aperture);
+  }
+  if (Number.isFinite(Number(snapshot.focusDistance))) {
+    state.cameraFocusDistance = Number(snapshot.focusDistance);
+  }
+  if (Number.isFinite(Number(snapshot.displaySize ?? snapshot.cameraDisplaySize))) {
+    state.cameraDisplaySize = Number(snapshot.displaySize ?? snapshot.cameraDisplaySize);
+  }
+
   camera.aspect = outputAspect;
-  camera.updateProjectionMatrix();
+  syncCameraSettingsFromState(true);
 }
 
 function addCameraKeyframe() {
@@ -9754,9 +10352,7 @@ function addCameraKeyframe() {
     time: Number(cameraAnimation.time.toFixed(3)),
     position: camera.position.toArray(),
     target: orbit.target.toArray(),
-    quaternion: camera.quaternion.toArray(),
-    options: captureKeyframeOptions(),
-    lights: serializeSceneLights()
+    quaternion: camera.quaternion.toArray()
   };
   const existingIndex = cameraAnimation.keyframes.findIndex(
     (item) => Math.abs(item.time - keyframe.time) < 0.035
@@ -9777,10 +10373,10 @@ function addCameraKeyframe() {
 function captureKeyframeOptions() {
   return {
     particleCount: state.particleCount,
-    ...Object.fromEntries(NUMERIC_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
+    ...Object.fromEntries(NUMERIC_KEYFRAME_FIELDS.filter((field) => !CAMERA_KEYFRAME_FIELDS.has(field)).map((field) => [field, state[field]])),
     ...Object.fromEntries(COLOR_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
-    ...Object.fromEntries(BOOLEAN_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
-    ...Object.fromEntries(STRING_KEYFRAME_FIELDS.map((field) => [field, state[field]]))
+    ...Object.fromEntries(BOOLEAN_KEYFRAME_FIELDS.filter((field) => !CAMERA_KEYFRAME_FIELDS.has(field)).map((field) => [field, state[field]])),
+    effectMode: state.effectMode
   };
 }
 
@@ -9890,8 +10486,6 @@ function getSortedParameterKeyframes(field = '') {
 }
 
 function getOptionKeyframesForField(field) {
-  const cameraOptionKeyframes = getSortedCameraKeyframes()
-    .filter((keyframe) => keyframe.options && keyframe.options[field] !== undefined);
   const parameterOptionKeyframes = getSortedParameterKeyframes(field).map((keyframe) => ({
     id: keyframe.id,
     time: keyframe.time,
@@ -9900,12 +10494,11 @@ function getOptionKeyframesForField(field) {
     curveStrength: cameraAnimation.curveStrength
   }));
 
-  return [...cameraOptionKeyframes, ...parameterOptionKeyframes]
-    .sort((a, b) => a.time - b.time);
+  return parameterOptionKeyframes.sort((a, b) => a.time - b.time);
 }
 
 function hasKeyframedOptions() {
-  return cameraAnimation.keyframes.some((keyframe) => keyframe.options) || parameterKeyframes.length > 0;
+  return parameterKeyframes.length > 0;
 }
 
 async function applyOptionsSnapshot(options = {}, updateUi = false) {
@@ -9967,13 +10560,16 @@ async function applyOptionsSnapshot(options = {}, updateUi = false) {
 
   STRING_KEYFRAME_FIELDS.forEach((field) => {
     if (typeof options[field] === 'string') {
-      const nextValue = field === 'effectMode' && VALID_EFFECT_MODES.has(options[field]) ? options[field] : 'particles';
+      const nextValue = field === 'effectMode'
+        ? (VALID_EFFECT_MODES.has(options[field]) ? options[field] : 'particles')
+        : normalizeCameraType(options[field]);
       visibleModelNeedsSync = visibleModelNeedsSync || state[field] !== nextValue;
       state[field] = nextValue;
     }
   });
 
   syncUniforms();
+  syncCameraSettingsFromState(updateUi);
   if (visibleModelNeedsSync) {
     updateVisibleModelMaterials();
     syncEffectVisibility();
@@ -10192,11 +10788,14 @@ function applyKeyframedOptionsAtTime(time, updateUi = false) {
     }
     const value = pickOptionValue(keyframes, time, field);
     if (value !== undefined) {
-      state[field] = field === 'effectMode' && VALID_EFFECT_MODES.has(value) ? value : 'particles';
+      state[field] = field === 'effectMode'
+        ? (VALID_EFFECT_MODES.has(value) ? value : 'particles')
+        : normalizeCameraType(value);
     }
   });
 
   syncUniforms();
+  syncCameraSettingsFromState(updateUi);
   const animationStateChanged =
     previousAnimProgress !== state.modelAnimProgress ||
     previousAnimEnabled !== state.modelAnimEnabled ||
@@ -10558,6 +11157,7 @@ function createCameraMarker(index, keyframe, position, target) {
   group.quaternion.copy(getKeyframeQuaternion(keyframe));
   group.userData.keyframeId = keyframe.id;
   group.userData.keyframeHandle = true;
+  group.scale.setScalar(state.cameraDisplaySize);
 
   const color = selectedKeyframeId === keyframe.id ? 0xffffff : index === 0 ? 0x00f0ff : 0xffbf36;
   const lineMaterial = new THREE.LineBasicMaterial({
@@ -10677,6 +11277,22 @@ function createCameraMarker(index, keyframe, position, target) {
   group.add(upArrow);
 
   return group;
+}
+
+function updateCameraMarkerDisplaySize() {
+  if (!cameraPathGroup) {
+    return;
+  }
+  const size = THREE.MathUtils.clamp(Number(state.cameraDisplaySize) || 1, 0.2, 5);
+  cameraPathGroup.children.forEach((child) => {
+    if (child.userData.keyframeHandle) {
+      child.scale.setScalar(size);
+    }
+  });
+  if (selectedKeyframeId && selectedTransformProxy) {
+    selectedTransformProxy.scale.setScalar(size);
+    selectedTransformProxy.updateMatrixWorld(true);
+  }
 }
 
 function handlePathPointerDown(event) {
@@ -11124,7 +11740,7 @@ function selectCameraKeyframeHandle(keyframeId, options = {}) {
 
   syncTransformProxyFromKeyframe(keyframe);
   transformControls.setMode(selectedKeyframeMode);
-  transformControls.setSpace(selectedKeyframeMode === 'rotate' ? 'local' : 'world');
+  transformControls.setSpace(selectedKeyframeMode === 'translate' ? 'world' : 'local');
   transformControls.attach(selectedTransformProxy);
   transformControls.visible = true;
   transformControls.enabled = true;
@@ -11158,9 +11774,21 @@ function commitSelectedKeyframeTransform() {
   keyframe.position = selectedTransformProxy.position.toArray();
   keyframe.quaternion = selectedTransformProxy.quaternion.toArray();
   keyframe.target = selectedTransformProxy.position.clone().addScaledVector(direction, previousDistance).toArray();
+  if (selectedKeyframeMode === 'scale') {
+    const displaySize = (
+      Math.abs(selectedTransformProxy.scale.x) +
+      Math.abs(selectedTransformProxy.scale.y) +
+      Math.abs(selectedTransformProxy.scale.z)
+    ) / 3;
+    state.cameraDisplaySize = THREE.MathUtils.clamp(displaySize, 0.2, 5);
+    setRangeValue('cameraDisplaySize', state.cameraDisplaySize);
+    setValueInput('cameraDisplaySize', state.cameraDisplaySize);
+    updateCameraMarkerDisplaySize();
+  }
   if (selectedKeyframeObject) {
     selectedKeyframeObject.position.copy(selectedTransformProxy.position);
     selectedKeyframeObject.quaternion.copy(selectedTransformProxy.quaternion);
+    selectedKeyframeObject.scale.setScalar(state.cameraDisplaySize);
   }
   return keyframe;
 }
@@ -11173,12 +11801,14 @@ function updateSelectedCameraMarkerFromKeyframe(keyframe) {
   const position = new THREE.Vector3().fromArray(keyframe.position);
   selectedKeyframeObject.position.copy(position);
   selectedKeyframeObject.quaternion.copy(getKeyframeQuaternion(keyframe));
+  selectedKeyframeObject.scale.setScalar(state.cameraDisplaySize);
 }
 
 function syncTransformProxyFromKeyframe(keyframe) {
   const position = new THREE.Vector3().fromArray(keyframe.position);
   selectedTransformProxy.position.copy(position);
   selectedTransformProxy.quaternion.copy(getKeyframeQuaternion(keyframe));
+  selectedTransformProxy.scale.setScalar(state.cameraDisplaySize);
   selectedTransformProxy.updateMatrixWorld(true);
 }
 
@@ -11220,9 +11850,9 @@ function frameKeyframeForEditing(keyframe) {
 }
 
 function setSelectedKeyframeMode(mode) {
-  selectedKeyframeMode = mode;
-  transformControls.setMode(mode);
-  transformControls.setSpace(mode === 'rotate' ? 'local' : 'world');
+  selectedKeyframeMode = ['translate', 'rotate', 'scale'].includes(mode) ? mode : 'translate';
+  transformControls.setMode(selectedKeyframeMode);
+  transformControls.setSpace(selectedKeyframeMode === 'translate' ? 'world' : 'local');
   updateKeyframeModeButtons();
 
   if (selectedKeyframeId) {
@@ -11233,6 +11863,7 @@ function setSelectedKeyframeMode(mode) {
 function updateKeyframeModeButtons() {
   controlsUi.moveKeyframe.classList.toggle('active', selectedKeyframeMode === 'translate');
   controlsUi.rotateKeyframe.classList.toggle('active', selectedKeyframeMode === 'rotate');
+  controlsUi.scaleKeyframe?.classList.toggle('active', selectedKeyframeMode === 'scale');
 }
 
 function updateCameraPathCurve() {
@@ -11276,12 +11907,11 @@ function importCameraKeyframes(keyframes) {
         id: keyframe.id || `imported-${index}`,
         time: THREE.MathUtils.clamp(Number(keyframe.time) || 0, 0, cameraAnimation.duration),
         position,
-        target,
-        options: { ...captureKeyframeOptions(), ...(keyframe.options || {}) },
-        lights: Array.isArray(lightSnapshot)
-          ? lightSnapshot.map((light, lightIndex) => normalizeLightSnapshot(light, lightIndex))
-          : serializeSceneLights()
+        target
       };
+      if (Array.isArray(lightSnapshot)) {
+        imported.lights = lightSnapshot.map((light, lightIndex) => normalizeLightSnapshot(light, lightIndex));
+      }
       if (keyframe.curve !== undefined) {
         imported.curve = normalizeCameraCurve(keyframe.curve);
       }
@@ -11311,8 +11941,10 @@ async function exportMovFromUi() {
   controlsUi.exportStatus.value = 'Exporting...';
 
   try {
+    const format = normalizeExportFormat(controlsUi.exportFormat?.value);
     const payload = {
       name: `particle-camera-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`,
+      format,
       duration: cameraAnimation.duration,
       fps: Number(controlsUi.exportFps.value),
       width: Number(controlsUi.exportWidth.value),
@@ -11414,6 +12046,30 @@ function glowEnabled() {
     state.particleizeProgress > 0.02 &&
     state.glowRadius > 0 &&
     state.glowExposure > 0;
+}
+
+function normalizeExportFormat(value) {
+  return value === 'mp4-360' ? 'mp4-360' : value === 'mp4' ? 'mp4' : 'mov';
+}
+
+function syncExportFormatUi() {
+  const format = normalizeExportFormat(controlsUi.exportFormat?.value);
+  if (controlsUi.exportFormat) {
+    controlsUi.exportFormat.value = format;
+  }
+  const label = format === 'mp4-360' ? '导出 360° MP4' : format === 'mp4' ? '导出 MP4' : '导出透明 MOV';
+  const title = format === 'mp4-360'
+    ? '导出带球面元数据的 2:1 H.264 MP4'
+    : format === 'mp4'
+      ? '导出 H.264 MP4'
+      : '导出透明底 MOV';
+  const buttonLabel = controlsUi.exportMov?.querySelector('span');
+  if (buttonLabel) {
+    buttonLabel.textContent = label;
+  }
+  if (controlsUi.exportMov) {
+    controlsUi.exportMov.title = title;
+  }
 }
 
 function glowBlurRadius() {
@@ -11550,6 +12206,17 @@ function setSceneModelSnapshotsVisible(visible) {
   };
 }
 
+function configureCompositeCameraUniforms(renderCamera, targets) {
+  compositeMaterial.uniforms.uDepthTexture.value = targets.sceneTarget.depthTexture;
+  compositeMaterial.uniforms.uDofEnabled.value = state.cameraDofEnabled && state.cameraType === 'perspective' ? 1 : 0;
+  compositeMaterial.uniforms.uCameraNear.value = renderCamera.near;
+  compositeMaterial.uniforms.uCameraFar.value = renderCamera.far;
+  compositeMaterial.uniforms.uFocusDistance.value = state.cameraFocusDistance;
+  compositeMaterial.uniforms.uAperture.value = state.cameraAperture;
+  compositeMaterial.uniforms.uFocalLength.value = state.cameraFocalLength;
+  compositeMaterial.uniforms.uResolution.value.set(targets.sceneTarget.width, targets.sceneTarget.height);
+}
+
 function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options = {}) {
   syncParticleLightingUniforms();
   updateSceneModelSnapshotUniforms();
@@ -11565,6 +12232,8 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   const previousScissor = new THREE.Vector4();
   const previousScissorTest = targetRenderer.getScissorTest?.() || false;
   const forceOutputComposite = Boolean(options.forceOutputComposite && finalViewport && targets?.sceneTarget);
+  const depthOfFieldEnabled = Boolean(state.cameraDofEnabled && state.cameraType === 'perspective' && targets?.sceneTarget?.depthTexture);
+  const requiresOutputComposite = forceOutputComposite || depthOfFieldEnabled;
   targetRenderer.getViewport(previousViewport);
   targetRenderer.getScissor(previousScissor);
   const applyFinalViewport = () => {
@@ -11602,12 +12271,12 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   }
 
   if (!glowEnabled()) {
-    targetRenderer.setRenderTarget(forceOutputComposite ? targets.sceneTarget : outputTarget);
-    setFullTargetViewport(targetRenderer, forceOutputComposite ? targets.sceneTarget : outputTarget);
+    targetRenderer.setRenderTarget(requiresOutputComposite ? targets.sceneTarget : outputTarget);
+    setFullTargetViewport(targetRenderer, requiresOutputComposite ? targets.sceneTarget : outputTarget);
     targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
     targetRenderer.clear(true, true, true);
     targetRenderer.render(scene, renderCamera);
-    if (forceOutputComposite) {
+    if (requiresOutputComposite) {
       targetRenderer.setRenderTarget(targets.glowTarget);
       setFullTargetViewport(targetRenderer, targets.glowTarget);
       targetRenderer.setClearColor(0x000000, 0);
@@ -11617,6 +12286,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
       compositeMaterial.uniforms.uBloomStrength.value = 0;
       compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
       compositeMaterial.uniforms.uBloomAlpha.value = 0;
+      configureCompositeCameraUniforms(renderCamera, targets);
       targetRenderer.setRenderTarget(outputTarget);
       applyOutputViewport();
       targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
@@ -11751,6 +12421,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     : state.effectMode === 'image'
       ? THREE.MathUtils.clamp(0.015 + bloomShape * 0.23, 0.015, 0.245)
     : THREE.MathUtils.clamp(0.02 + bloomShape * 0.28, 0.02, 0.3);
+  configureCompositeCameraUniforms(renderCamera, targets);
 
   targetRenderer.setRenderTarget(outputTarget);
   applyOutputViewport();
@@ -11776,17 +12447,28 @@ function renderSceneWithGlow() {
     renderer.clear(true, true, true);
 
     try {
-      renderSceneWithGlowFor(
-        renderer,
-        configureOutputCamera(outputFrameCamera, layout.aspect, cameraAnimation.time),
-        cameraViewPostTargets,
-        {
+      const viewCamera = configureOutputCamera(outputFrameCamera, layout.aspect, cameraAnimation.time);
+      if (state.cameraType === 'panorama') {
+        renderPanoramaFor(renderer, viewCamera, {
           outputTarget: null,
           transparent: false,
-          viewport: layout,
-          forceOutputComposite: true
-        }
-      );
+          width: layout.renderWidth,
+          height: layout.renderHeight,
+          viewport: layout
+        });
+      } else {
+        renderSceneWithGlowFor(
+          renderer,
+          viewCamera,
+          cameraViewPostTargets,
+          {
+            outputTarget: null,
+            transparent: false,
+            viewport: layout,
+            forceOutputComposite: true
+          }
+        );
+      }
     } finally {
       restoreHelpers();
     }
@@ -11862,8 +12544,29 @@ function updateDissolve(value, updateControl = true) {
   }
 }
 
+function stabilizeSceneModelTransformsForRender() {
+  const activeRecord = getSelectedSceneModel();
+  if (activeRecord) {
+    applyActiveSceneModelTransform(activeRecord.transform);
+    modelEffectRoot.rotation.fromArray(normalizeVectorArray(activeRecord.effectRotation, [0, 0, 0]));
+  }
+  sceneModelObjects.forEach((record) => {
+    if (!record.snapshotRoot) {
+      return;
+    }
+    applySceneModelTransformToObject(record.snapshotRoot, record.transform);
+    const effectRoot = record.snapshotRoot.children[0];
+    if (effectRoot) {
+      effectRoot.rotation.fromArray(normalizeVectorArray(record.effectRotation, [0, 0, 0]));
+      effectRoot.updateMatrixWorld(true);
+    }
+  });
+  scene.updateMatrixWorld(true);
+}
+
 function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSeconds) {
   const cameraFrameTime = THREE.MathUtils.clamp(Number(cameraTimeSeconds) || 0, 0, cameraAnimation.duration);
+  stabilizeSceneModelTransformsForRender();
   if (cameraAnimation.keyframes.length || parameterKeyframes.length) {
     applyKeyframedOptionsAtTime(cameraFrameTime, false);
     applyKeyframedLightsAtTime(cameraFrameTime, false);
@@ -11893,28 +12596,50 @@ function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSe
   const exportResolution = getExportResolution();
   const previousRenderSize = new THREE.Vector2();
   renderer.getSize(previousRenderSize);
+  const previousPixelRatio = renderer.getPixelRatio();
   const shouldResizeForExport =
     Math.round(previousRenderSize.x) !== exportResolution.width ||
-    Math.round(previousRenderSize.y) !== exportResolution.height;
+    Math.round(previousRenderSize.y) !== exportResolution.height ||
+    Math.abs(previousPixelRatio - EXPORT_RENDER_PIXEL_RATIO) > 0.0001;
   const restoreHelpers = setEditorHelpersVisible(false);
   try {
     if (shouldResizeForExport) {
+      renderer.setPixelRatio(EXPORT_RENDER_PIXEL_RATIO);
       renderer.setSize(exportResolution.width, exportResolution.height, false);
       resizePostTargets();
     }
-    renderSceneWithGlowFor(
-      renderer,
-      configureOutputCamera(outputFrameCamera, exportResolution.aspect, cameraFrameTime),
-      { sceneTarget, glowTarget, blurTargetA, blurTargetB }
-    );
+    const renderCamera = configureOutputCamera(outputFrameCamera, exportResolution.aspect, cameraFrameTime);
+    if (state.cameraType === 'panorama') {
+      renderPanoramaFor(renderer, renderCamera, {
+        outputTarget: null,
+        transparent: exportSettings.transparent,
+        width: exportResolution.width,
+        height: exportResolution.height
+      });
+    } else {
+      renderSceneWithGlowFor(
+        renderer,
+        renderCamera,
+        { sceneTarget, glowTarget, blurTargetA, blurTargetB }
+      );
+    }
     return canvas.toDataURL('image/png');
   } finally {
     if (shouldResizeForExport) {
+      renderer.setPixelRatio(previousPixelRatio);
       renderer.setSize(previousRenderSize.x, previousRenderSize.y, false);
       resizePostTargets();
     }
     restoreHelpers();
   }
+}
+
+async function prepareExportFrame(timeSeconds = 0, cameraTimeSeconds = timeSeconds) {
+  stabilizeSceneModelTransformsForRender();
+  renderStudioFrame(timeSeconds, undefined, cameraTimeSeconds);
+  await nextFrame();
+  renderStudioFrame(timeSeconds, undefined, cameraTimeSeconds);
+  return true;
 }
 
 function isStudioReady() {
@@ -12006,6 +12731,10 @@ function getPerformanceStats() {
 window.particleStudio = {
   isReady: isStudioReady,
   renderFrame: renderStudioFrame,
+  prepareExportFrame,
+  undo: undoLastAction,
+  canUndo: () => undoHistory.past.length > 0 && !undoHistory.restoring,
+  checkpointUndo: (label = '编辑') => recordUndoStep(label),
   setOptions: (options, updateUi = false) => applyOptionsSnapshot(options, updateUi),
   setMorphTargetModel: async (target = {}) => {
     if (!target?.url && !target?.dataUrl) {
@@ -12033,6 +12762,10 @@ window.particleStudio = {
   setCameraTime: (time, applyCamera = true) => setCameraTime(Number(time), applyCamera),
   getCameraKeyframes: () => getSortedCameraKeyframes(),
   setCameraSnapshot: (snapshot, options = {}) => applyCameraSnapshot(snapshot, options),
+  setCameraSettings: (settings, updateUi = true) => setCameraSettings(settings, updateUi),
+  getCameraSettings,
+  setExportResolution,
+  getOptions: () => ({ ...captureKeyframeOptions(), ...getCameraSettings() }),
   setLights: (lights) => importSceneLights(lights, false),
   getLights: () => serializeSceneLights(),
   getPerformanceStats,
@@ -12266,6 +12999,10 @@ window.particleStudio = {
       ? activeModelTransformRoot.position
       : selectedTransformProxy.position).toArray(),
     activeModelPosition: activeModelTransformRoot.position.toArray(),
+    proxyScale: selectedTransformProxy.scale.toArray(),
+    cameraMarkerScale: selectedKeyframeObject?.scale?.toArray() || null,
+    cameraDisplaySize: state.cameraDisplaySize,
+    keyframeMode: selectedKeyframeMode,
     attachedToProxy: transformControls.object === selectedTransformProxy,
     attachedToModelRoot: transformControls.object === activeModelTransformRoot,
     visible: transformControls.visible
@@ -12453,6 +13190,9 @@ function updateNumericControl(key, value) {
   } else if (VISIBLE_MODEL_MATERIAL_FIELDS.has(key)) {
     updateVisibleModelMaterials();
   }
+  if (CAMERA_KEYFRAME_FIELDS.has(key)) {
+    syncCameraSettingsFromState(true);
+  }
 }
 
 function normalizeNumericStateValue(key, value) {
@@ -12466,6 +13206,22 @@ function normalizeNumericStateValue(key, value) {
 
   if (key === 'imageSplatScale') {
     return Math.max(0.01, value);
+  }
+
+  if (key === 'cameraSensorWidth') {
+    return THREE.MathUtils.clamp(value, 12, 70);
+  }
+
+  if (key === 'cameraFocalLength') {
+    return THREE.MathUtils.clamp(value, 8, 300);
+  }
+
+  if (key === 'cameraAperture') {
+    return THREE.MathUtils.clamp(value, 1.2, 22);
+  }
+
+  if (key === 'cameraFocusDistance') {
+    return THREE.MathUtils.clamp(value, 0.05, 100);
   }
 
   if (CLAMP_01_FIELDS.has(key)) {
@@ -12575,6 +13331,41 @@ HAND_CONTROL_NUMERIC_FIELDS.forEach((key) => {
   });
 });
 
+controlsUi.cameraType?.addEventListener('change', () => {
+  setCameraType(controlsUi.cameraType.value);
+  if (controlsUi.exportFormat) {
+    if (state.cameraType === 'panorama') {
+      controlsUi.exportFormat.value = 'mp4-360';
+    } else if (controlsUi.exportFormat.value === 'mp4-360') {
+      controlsUi.exportFormat.value = 'mp4';
+    }
+    syncExportFormatUi();
+  }
+});
+
+controlsUi.exportFormat?.addEventListener('change', () => {
+  if (controlsUi.exportFormat.value === 'mp4-360') {
+    setCameraType('panorama');
+  }
+  syncExportFormatUi();
+});
+syncExportFormatUi();
+
+controlsUi.cameraDofEnabled?.addEventListener('change', () => {
+  state.cameraDofEnabled = controlsUi.cameraDofEnabled.checked;
+  syncCameraSettingsFromState(true);
+});
+
+controlsUi.cameraDisplaySize?.addEventListener('input', () => {
+  state.cameraDisplaySize = Number(controlsUi.cameraDisplaySize.value);
+  syncCameraSettingsFromState(true);
+});
+
+outputUi.cameraDisplaySize?.addEventListener('change', () => {
+  state.cameraDisplaySize = Number(outputUi.cameraDisplaySize.value);
+  syncCameraSettingsFromState(true);
+});
+
 ['input', 'change'].forEach((eventName) => {
   controlsUi.exportWidth?.addEventListener(eventName, () => {
     updateCameraPreviewLayout(true);
@@ -12626,6 +13417,10 @@ controlsUi.moveKeyframe.addEventListener('click', () => {
 
 controlsUi.rotateKeyframe.addEventListener('click', () => {
   setSelectedKeyframeMode('rotate');
+});
+
+controlsUi.scaleKeyframe?.addEventListener('click', () => {
+  setSelectedKeyframeMode('scale');
 });
 
 controlsUi.moveImageSplat?.addEventListener('click', () => {
@@ -12698,7 +13493,81 @@ lightsUi.sizeValue?.addEventListener('change', () => updateSelectedLightProperty
 lightsUi.move?.addEventListener('click', () => setSelectedLightMode('translate'));
 lightsUi.rotate?.addEventListener('click', () => setSelectedLightMode('rotate'));
 
+const UNDO_SKIPPED_CONTROL_IDS = new Set([
+  'timeline',
+  'playTimeline',
+  'toggleCameraView',
+  'exportMov',
+  'exportFormat',
+  'panelToggle',
+  'moveKeyframe',
+  'rotateKeyframe',
+  'scaleKeyframe',
+  'moveImageSplat',
+  'rotateImageSplat',
+  'scaleImageSplat',
+  'moveSceneModel',
+  'rotateSceneModel',
+  'scaleSceneModel',
+  'moveLight',
+  'rotateLight',
+  'checkLocalSharp',
+  'installLocalSharp',
+  'runLocalSharp',
+  'handControlEnabled',
+  'modelInput',
+  'worldInput',
+  'morphTargetInput'
+]);
+
+function getUndoableControl(target) {
+  const control = target?.closest?.('input, select, button');
+  if (!control || UNDO_SKIPPED_CONTROL_IDS.has(control.id) || control.disabled) {
+    return null;
+  }
+  if (control.tagName === 'BUTTON') {
+    const mutatingButton = control.classList.contains('keyframe-dot') ||
+      control.hasAttribute('data-preset') ||
+      control.hasAttribute('data-effect-mode') ||
+      new Set([
+        'resetCamera',
+        'addKeyframe',
+        'clearKeyframes',
+        'duplicateSceneModel',
+        'deleteSceneModel',
+        'addPointLight',
+        'addSunLight',
+        'addSpotLight',
+        'addAreaLight',
+        'deleteLight'
+      ]).has(control.id);
+    return mutatingButton ? control : null;
+  }
+  return control;
+}
+
+document.addEventListener('pointerdown', (event) => {
+  const control = getUndoableControl(event.target);
+  if (control) {
+    recordUndoStep(control.title || control.id || '参数调整');
+  }
+}, true);
+
+document.addEventListener('focusin', (event) => {
+  const control = getUndoableControl(event.target);
+  if (control && control.tagName !== 'BUTTON') {
+    recordUndoStep(control.id || '参数调整');
+  }
+}, true);
+
 window.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+    event.preventDefault();
+    event.stopPropagation();
+    void undoLastAction();
+    return;
+  }
+
   const tagName = document.activeElement?.tagName?.toLowerCase();
   if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
     return;
@@ -12763,6 +13632,10 @@ modelInput.addEventListener('click', () => {
   if (!appendModelImportClickArmed) {
     pendingModelImportMode = 'replace';
   }
+
+  if (event.key.toLowerCase() === 's' && selectedKeyframeId) {
+    setSelectedKeyframeMode('scale');
+  }
 });
 
 modelInput.addEventListener('change', () => {
@@ -12770,6 +13643,7 @@ modelInput.addEventListener('change', () => {
   const importMode = pendingModelImportMode;
   pendingModelImportMode = 'replace';
   if (file) {
+    recordUndoStep(importMode === 'append' ? '追加模型' : '导入模型');
     loadAssetFile(file, { importMode });
   }
   modelInput.value = '';
@@ -12826,6 +13700,7 @@ morphUi.input?.addEventListener('change', () => {
 dropZone.addEventListener('drop', (event) => {
   const [file] = event.dataTransfer.files;
   if (file) {
+    recordUndoStep('导入模型');
     pendingModelImportMode = 'replace';
     loadAssetFile(file, { importMode: 'replace' });
   }

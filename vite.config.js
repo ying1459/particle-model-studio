@@ -25,11 +25,14 @@ export default defineConfig({
           let morphTargetPath = '';
           let worldPath = '';
           let imageSplatPath = '';
+          const sceneModelPaths = [];
 
           try {
             const body = await readJsonBody(req);
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const outputName = sanitizeFilename(body.name || `particle-camera-${timestamp}`) + '.mov';
+            const format = normalizeExportFormat(body.format);
+            const outputExtension = format === 'mov' ? 'mov' : 'mp4';
+            const outputName = sanitizeFilename(body.name || `particle-camera-${timestamp}`) + `.${outputExtension}`;
             const outputRelativePath = path.join('exports', outputName);
             const outputPath = path.resolve(rootDir, outputRelativePath);
             const tempDir = path.join(tmpdir(), 'particle-studio-export');
@@ -37,6 +40,27 @@ export default defineConfig({
             const modelUrl = await writeExportModel(body.model, Date.now());
             if (modelUrl) {
               modelPath = path.resolve(rootDir, modelUrl.replace(/^\//, ''));
+            }
+            let sceneModelsForRenderer = null;
+            if (Array.isArray(body.sceneModels?.models) && body.sceneModels.models.length) {
+              sceneModelsForRenderer = {
+                activeId: body.sceneModels.activeId,
+                models: []
+              };
+              for (let index = 0; index < body.sceneModels.models.length; index += 1) {
+                const sceneModel = body.sceneModels.models[index];
+                const url = await writeExportModel(sceneModel, Date.now() + 100 + index);
+                if (!url) {
+                  continue;
+                }
+                sceneModelPaths.push(path.resolve(rootDir, url.replace(/^\//, '')));
+                sceneModelsForRenderer.models.push({
+                  ...sceneModel,
+                  path: undefined,
+                  dataUrl: undefined,
+                  url
+                });
+              }
             }
             const morphTargetUrl = await writeExportModel(body.morphTarget, Date.now() + 1);
             if (morphTargetUrl) {
@@ -57,6 +81,7 @@ export default defineConfig({
               configPath,
               JSON.stringify(
                 {
+                  format,
                   duration: clampNumber(body.duration, 0.25, 120, 5),
                   fps: clampNumber(body.fps, 1, 60, 30),
                   width: clampNumber(body.width, 128, 7680, 1920),
@@ -72,7 +97,9 @@ export default defineConfig({
                   options: body.options || null,
                   cameraCurve: body.cameraCurve || null,
                   cameraKeyframes: Array.isArray(body.cameraKeyframes) ? body.cameraKeyframes : [],
+                  parameterKeyframes: Array.isArray(body.parameterKeyframes) ? body.parameterKeyframes : [],
                   cameraSnapshot: body.cameraSnapshot || null,
+                  sceneModels: sceneModelsForRenderer,
                   lights: Array.isArray(body.lights) ? body.lights : [],
                   imageSplat: body.imageSplat
                     ? {
@@ -129,6 +156,7 @@ export default defineConfig({
             if (imageSplatPath) {
               await rm(imageSplatPath, { force: true });
             }
+            await Promise.all(sceneModelPaths.map((filePath) => rm(filePath, { force: true })));
           }
         });
       }
@@ -155,6 +183,10 @@ function readJsonBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+function normalizeExportFormat(value) {
+  return value === 'mp4-360' ? 'mp4-360' : value === 'mp4' ? 'mp4' : 'mov';
 }
 
 async function writeExportModel(model, stamp) {

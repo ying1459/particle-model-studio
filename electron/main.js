@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ffmpegStaticPath from 'ffmpeg-static';
+import { injectSphericalMetadata } from './spatial-metadata.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, '..');
@@ -140,17 +141,26 @@ function registerIpc() {
 }
 
 async function exportMov(payload) {
+  const format = normalizeExportFormat(payload.format);
   const duration = clampNumber(payload.duration, 0.25, 120, 5);
   const fps = clampNumber(payload.fps, 1, 60, 30);
-  const width = clampNumber(payload.width, 128, 7680, 1920);
-  const height = clampNumber(payload.height, 128, 4320, 1080);
+  let width = Math.round(clampNumber(payload.width, 128, 7680, 1920));
+  let height = Math.round(clampNumber(payload.height, 128, 4320, 1080));
+  if (format !== 'mov') {
+    width -= width % 2;
+    height -= height % 2;
+  }
+  if (format === 'mp4-360') {
+    height = Math.max(128, Math.round(width / 2));
+  }
   const pixelRatio = clampNumber(payload.pixelRatio, 0.5, 2, 1);
   const startTime = clampNumber(payload.startTime, 0, 120, 0);
   const cameraStartTime = clampNumber(payload.cameraStartTime, 0, 120, startTime);
   const effectStartTime = clampNumber(payload.effectStartTime, 0, 86400, startTime);
   const frameCount = Math.max(2, Math.round(duration * fps));
   const outputDir = path.join(app.getPath('videos'), 'Particle Model Studio');
-  const outputName = `${sanitizeFilename(payload.name || `particle-camera-${timestampName()}`)}.mov`;
+  const extension = format === 'mov' ? 'mov' : 'mp4';
+  const outputName = `${sanitizeFilename(payload.name || `particle-camera-${timestampName()}`)}.${extension}`;
   const outputPath = path.join(outputDir, outputName);
   const framesDir = await mkdtemp(path.join(tmpdir(), 'particle-desktop-mov-'));
   exportModelDir = await mkdtemp(path.join(tmpdir(), 'particle-desktop-model-'));
@@ -272,7 +282,7 @@ async function exportMov(payload) {
 
     const params = new URLSearchParams({
       export: '1',
-      transparent: '1',
+      transparent: format === 'mov' ? '1' : '0',
       duration: String(duration),
       pixelRatio: String(pixelRatio),
       t: String(Date.now())
@@ -289,6 +299,9 @@ async function exportMov(payload) {
 
     await hiddenWindow.loadURL(`particle://app/index.html?${params.toString()}`);
     await waitForRendererReady(hiddenWindow);
+    await hiddenWindow.webContents.executeJavaScript(
+      `window.particleStudio.setExportResolution(${JSON.stringify(width)}, ${JSON.stringify(height)}, ${JSON.stringify(fps)})`
+    );
 
     if (payload.options) {
       await hiddenWindow.webContents.executeJavaScript(
@@ -360,13 +373,20 @@ async function exportMov(payload) {
       );
     }
 
-    if (payload.cameraSnapshot) {
+    const cameraSnapshot = format === 'mp4-360'
+      ? { ...(payload.cameraSnapshot || {}), cameraType: 'panorama', dofEnabled: false, cameraDofEnabled: false }
+      : payload.cameraSnapshot;
+    if (cameraSnapshot) {
       await hiddenWindow.webContents.executeJavaScript(
-        `window.particleStudio.setCameraSnapshot(${JSON.stringify(payload.cameraSnapshot)}, ${JSON.stringify({
+        `window.particleStudio.setCameraSnapshot(${JSON.stringify(cameraSnapshot)}, ${JSON.stringify({
           pose: !hasCameraKeyframes
         })})`
       );
     }
+
+    await hiddenWindow.webContents.executeJavaScript(
+      `window.particleStudio.prepareExportFrame(${JSON.stringify(effectStartTime)}, ${JSON.stringify(cameraStartTime)})`
+    );
 
     for (let frame = 0; frame < frameCount; frame += 1) {
       const frameOffset = frame / fps;
@@ -379,11 +399,22 @@ async function exportMov(payload) {
       await writeFile(path.join(framesDir, `frame_${String(frame).padStart(5, '0')}.png`), png, 'base64');
     }
 
-    await encodeMov(framesDir, outputPath, fps);
+    if (format === 'mov') {
+      await encodeMov(framesDir, outputPath, fps);
+    } else if (format === 'mp4-360') {
+      const encodedPath = path.join(framesDir, 'encoded-panorama.mp4');
+      await encodeMp4(framesDir, encodedPath, fps);
+      await injectSphericalMetadata(encodedPath, outputPath);
+    } else {
+      await encodeMp4(framesDir, outputPath, fps);
+    }
     return {
       ok: true,
       path: outputPath,
-      relativePath: outputPath
+      relativePath: outputPath,
+      format,
+      width,
+      height
     };
   } finally {
     if (hiddenWindow && !hiddenWindow.isDestroyed()) {
@@ -886,6 +917,50 @@ async function encodeMov(framesDir, outputPath, fps) {
   if (code !== 0) {
     throw new Error(stderr || `FFmpeg exited with code ${code}`);
   }
+}
+
+async function encodeMp4(framesDir, outputPath, fps) {
+  const inputPattern = path.join(framesDir, 'frame_%05d.png');
+  const ffmpegPath = getFfmpegPath();
+  const args = [
+    '-y',
+    '-framerate',
+    String(fps),
+    '-i',
+    inputPattern,
+    '-c:v',
+    'libx264',
+    '-profile:v',
+    'main',
+    '-preset',
+    'medium',
+    '-crf',
+    '18',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(fps),
+    outputPath
+  ];
+
+  const child = spawn(ffmpegPath, args, {
+    cwd: app.isPackaged ? path.dirname(ffmpegPath) : appRoot,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  const [code] = await once(child, 'exit');
+
+  if (code !== 0) {
+    throw new Error(stderr || `FFmpeg exited with code ${code}`);
+  }
+}
+
+function normalizeExportFormat(value) {
+  return value === 'mp4-360' ? 'mp4-360' : value === 'mp4' ? 'mp4' : 'mov';
 }
 
 function getFfmpegPath() {

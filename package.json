@@ -1,6 +1,6 @@
 {
   "name": "particle-model-studio",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -12,6 +12,8 @@
     "dist:win:portable": "npm run build && electron-builder --win portable --x64",
     "export:mov": "node scripts/export-mov.js",
     "test:smoke": "node scripts/smoke-test.js",
+    "test:electron": "node scripts/electron-smoke-test.js",
+    "test:electron:packaged": "node scripts/electron-smoke-test.js --packaged",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -47,7 +49,17 @@
         "from": "tools/ml-sharp",
         "to": "tools/ml-sharp",
         "filter": [
-          "**/*"
+          "README.md",
+          "run-sharp.py"
+        ]
+      },
+      {
+        "from": "tools/spatial-media",
+        "to": "tools/spatial-media",
+        "filter": [
+          "README.md",
+          "LICENSE-spatial-media.txt",
+          "Spatial Media Metadata Injector.exe"
         ]
       }
     ],

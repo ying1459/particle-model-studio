@@ -12,3 +12,7 @@ The optional Full SHARP release contains Apple ml-sharp software and the Apple M
 - The model license limits use, modification and redistribution to non-commercial scientific research and academic development. It excludes commercial exploitation, product development, and use in commercial products or services.
 
 The MIT license in this repository applies only to the original Particle Model Studio source code and does not replace or override any third-party license.
+
+## Google Spatial Media Metadata Injector
+
+The Lite package includes Google's Spatial Media Metadata Injector as a manual compatibility utility for existing 360° videos. It comes from the `google/spatial-media` project and is distributed under the Apache License 2.0. The license text is included at `resources/tools/spatial-media/LICENSE-spatial-media.txt`.
