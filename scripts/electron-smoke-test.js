@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { rm } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegPath from 'ffmpeg-static';
@@ -12,9 +12,12 @@ const executablePath = packaged
   ? path.join(rootDir, 'release', 'win-unpacked', 'Particle Model Studio.exe')
   : path.join(rootDir, 'node_modules', 'electron', 'dist', 'electron.exe');
 const errors = [];
+const projectSmokePath = path.join(rootDir, 'verification', 'electron-project-smoke.pms');
 let electronApp;
 
 try {
+  await mkdir(path.dirname(projectSmokePath), { recursive: true });
+  await rm(projectSmokePath, { force: true });
   electronApp = await electron.launch({
     executablePath,
     args: packaged ? [] : ['.'],
@@ -25,6 +28,11 @@ try {
     },
     timeout: 60000
   });
+
+  await electronApp.evaluate(async ({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+  }, projectSmokePath);
 
   const page = await electronApp.firstWindow({ timeout: 60000 });
   page.on('console', (message) => {
@@ -103,6 +111,62 @@ try {
   if (Math.abs(result.undoDissolve - 0.2) > 0.01) {
     throw new Error(`Undo failed: ${JSON.stringify(result)}`);
   }
+
+  const projectResult = await page.evaluate(async () => {
+    await window.particleStudio.setOptions({ dissolve: 0.37, spread: 1.23 }, true);
+    window.particleStudio.setCameraSettings({ displaySize: 1.75, focalLength: 70 });
+    window.particleStudio.setCameraKeyframes([
+      { id: 'project-camera', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0] }
+    ]);
+    window.particleStudio.setParameterKeyframes([
+      { id: 'project-param', field: 'noise', time: 1, value: 0.64 }
+    ]);
+    window.particleStudio.setCameraTime(0, false);
+    const before = window.particleStudio.captureProject();
+    const save = await window.electronAPI.saveProject({
+      document: before,
+      suggestedName: 'electron-project-smoke',
+      saveAs: true
+    });
+
+    await window.particleStudio.setOptions({ dissolve: 0.91, spread: 0.12 }, true);
+    window.particleStudio.setCameraSettings({ displaySize: 0.5, focalLength: 18 });
+    window.particleStudio.setCameraKeyframes([]);
+    window.particleStudio.setParameterKeyframes([]);
+
+    const opened = await window.electronAPI.openProject();
+    await window.particleStudio.applyProject(opened.document);
+    const after = window.particleStudio.captureProject();
+    return {
+      save: { ok: save.ok, name: save.name, bytes: save.bytes },
+      opened: { ok: opened.ok, name: opened.name },
+      format: after.format,
+      dissolve: after.scene.options.dissolve,
+      spread: after.scene.options.spread,
+      displaySize: after.scene.cameraSettings.displaySize,
+      focalLength: after.scene.cameraSettings.focalLength,
+      cameraKeyframes: after.scene.cameraKeyframes.length,
+      parameterKeyframes: after.scene.parameterKeyframes.length
+    };
+  });
+  const savedProject = JSON.parse(await readFile(projectSmokePath, 'utf8'));
+  const embeddedModel = savedProject.scene?.sceneModels?.models?.find((model) => model.dataUrl);
+  if (
+    !projectResult.save.ok ||
+    !projectResult.opened.ok ||
+    projectResult.format !== 'particle-model-studio-project' ||
+    Math.abs(projectResult.dissolve - 0.37) > 0.01 ||
+    Math.abs(projectResult.spread - 1.23) > 0.01 ||
+    Math.abs(projectResult.displaySize - 1.75) > 0.01 ||
+    Math.abs(projectResult.focalLength - 70) > 0.01 ||
+    projectResult.cameraKeyframes !== 1 ||
+    projectResult.parameterKeyframes !== 1 ||
+    !embeddedModel
+  ) {
+    throw new Error(`Project save/open roundtrip failed: ${JSON.stringify({ projectResult, embeddedModel: Boolean(embeddedModel) })}`);
+  }
+  result.project = projectResult;
+  await rm(projectSmokePath, { force: true });
 
   const exportResult = await page.evaluate(async () => {
     const source = document.createElement('canvas');
@@ -186,6 +250,7 @@ try {
   console.log(JSON.stringify({ ok: true, packaged, executablePath, result, errors }, null, 2));
 } finally {
   await electronApp?.close().catch(() => {});
+  await rm(projectSmokePath, { force: true }).catch(() => {});
 }
 
 async function probeMedia(filePath) {

@@ -26,6 +26,19 @@
           </button>
         </div>
 
+        <div class="project-bar" aria-label="工程文件">
+          <input id="projectInput" type="file" accept=".pms,application/json" />
+          <button class="small-button" id="openProject" type="button" title="打开 .pms 工程（Ctrl+O）">
+            <i data-lucide="folder-open"></i>
+            <span>打开工程</span>
+          </button>
+          <button class="small-button" id="saveProject" type="button" title="保存 .pms 工程（Ctrl+S）">
+            <i data-lucide="save"></i>
+            <span>保存工程</span>
+          </button>
+          <span class="project-name" id="projectName">未保存工程</span>
+        </div>
+
         <label class="drop-zone" id="dropZone" for="modelInput">
           <input id="modelInput" type="file" accept=".blend,.glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz" />
           <span class="drop-title">导入模型 / Blender / 图片 / 360 HDR / Gaussian Splat</span>

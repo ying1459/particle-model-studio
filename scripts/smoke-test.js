@@ -388,6 +388,11 @@ try {
   const stats = await page.locator('#stats').innerText();
   await writeDataUrl(path.join(outDir, 'preview.png'), await page.evaluate(() => window.particleStudio.capturePng()));
 
+  const cameraDistanceLighting = await verifyCameraDistanceLighting(page);
+  if (!cameraDistanceLighting.ok) {
+    throw new Error(`Camera distance changes scene lighting: ${JSON.stringify(cameraDistanceLighting)}`);
+  }
+
   await page.evaluate(async () => {
     await window.particleStudio.setOptions(
       {
@@ -428,6 +433,13 @@ try {
   if (!exportCameraPose?.hasTimelineCamera || Math.abs(Number(exportCameraPose.position?.[0] || 0)) > 0.15) {
     throw new Error(`Export camera preview is not using keyed camera: ${JSON.stringify(exportCameraPose)}`);
   }
+  await page.evaluate(() => window.particleStudio.setCameraSnapshot({
+    position: [0, 2.4, 9.5],
+    target: [0, 0, 0],
+    cameraType: 'perspective',
+    focalLength: 35,
+    filmGauge: 36
+  }));
   const sceneHitTest = await page.evaluate(() => window.particleStudio.getSceneHitTestDebug());
   if (!sceneHitTest.cameraPathVisible || !sceneHitTest.cameraHit || !sceneHitTest.modelHit) {
     throw new Error(`Camera/model viewport hit testing is broken: ${JSON.stringify(sceneHitTest)}`);
@@ -724,6 +736,7 @@ try {
         exportPreview: path.join(outDir, 'export-preview.png'),
         importMode: importModeCheck,
         cameraFeatures: cameraFeatureCheck,
+        cameraDistanceLighting,
         imageSplat: imageSplatCheck,
         animation: animationCheck,
         mov: movPath,
@@ -816,6 +829,120 @@ async function verifyImportReplaceAndAppend(page) {
     activeAfterReplace: replaceState.asset?.model?.name,
     activeAfterAppend: appendState.asset?.model?.name
   };
+}
+
+async function verifyCameraDistanceLighting(page) {
+  const frames = await page.evaluate(async () => {
+    window.particleStudio.clearCameraKeyframes();
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setExportResolution(512, 288, 24);
+    await window.particleStudio.setOptions({
+      effectMode: 'particles',
+      particleizeProgress: 0,
+      modelVisibility: 1,
+      glowRadius: 0,
+      glowExposure: 0,
+      autoRotate: false,
+      worldEnabled: false,
+      worldVisible: false
+    }, true);
+
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.7, 7.2],
+      target: [0, 0, 0],
+      cameraType: 'perspective',
+      focalLength: 35,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+    const near = window.particleStudio.renderFrame(0, undefined, 0);
+
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 1.56, 16],
+      target: [0, 0, 0],
+      cameraType: 'perspective',
+      focalLength: 35,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+    const far = window.particleStudio.renderFrame(0, undefined, 0);
+    return { near, far };
+  });
+
+  await writeDataUrl(path.join(outDir, 'lighting-near.png'), frames.near);
+  await writeDataUrl(path.join(outDir, 'lighting-far.png'), frames.far);
+  const measured = await measureForegroundLighting(page, frames.near, frames.far);
+  const ratio = measured.far.meanLuminance / Math.max(measured.near.meanLuminance, 0.0001);
+  const colorDistance = Math.hypot(
+    measured.near.meanRgb[0] - measured.far.meanRgb[0],
+    measured.near.meanRgb[1] - measured.far.meanRgb[1],
+    measured.near.meanRgb[2] - measured.far.meanRgb[2]
+  );
+  return {
+    ok:
+      measured.near.pixelCount > 100 &&
+      measured.far.pixelCount > 40 &&
+      ratio > 0.82 &&
+      ratio < 1.18 &&
+      colorDistance < 28,
+    ratio,
+    colorDistance,
+    ...measured
+  };
+}
+
+async function measureForegroundLighting(page, nearDataUrl, farDataUrl) {
+  return page.evaluate(
+    async ({ near, far }) => {
+      const width = 256;
+      const height = 144;
+
+      function loadImage(src) {
+        return new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = reject;
+          image.src = src;
+        });
+      }
+
+      async function measure(src) {
+        const image = await loadImage(src);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        context.drawImage(image, 0, 0, width, height);
+        const data = context.getImageData(0, 0, width, height).data;
+        let pixelCount = 0;
+        let luminance = 0;
+        const rgb = [0, 0, 0];
+        for (let offset = 0; offset < data.length; offset += 4) {
+          const r = data[offset];
+          const g = data[offset + 1];
+          const b = data[offset + 2];
+          const backgroundDistance = Math.abs(r - 9) + Math.abs(g - 10) + Math.abs(b - 12);
+          const value = r * 0.2126 + g * 0.7152 + b * 0.0722;
+          if (backgroundDistance < 22 || value < 13) {
+            continue;
+          }
+          pixelCount += 1;
+          luminance += value;
+          rgb[0] += r;
+          rgb[1] += g;
+          rgb[2] += b;
+        }
+        return {
+          pixelCount,
+          meanLuminance: luminance / Math.max(pixelCount, 1),
+          meanRgb: rgb.map((value) => value / Math.max(pixelCount, 1))
+        };
+      }
+
+      return { near: await measure(near), far: await measure(far) };
+    },
+    { near: nearDataUrl, far: farDataUrl }
+  );
 }
 
 async function verifyImageSplatControls(page) {
@@ -1054,6 +1181,8 @@ async function compareRenderedFrames(page, previewDataUrl, exportDataUrl) {
         let maxX = -1;
         let maxY = -1;
         let weight = 0;
+        let pixelCount = 0;
+        const rgb = [0, 0, 0];
         let cx = 0;
         let cy = 0;
 
@@ -1069,7 +1198,11 @@ async function compareRenderedFrames(page, previewDataUrl, exportDataUrl) {
             minY = Math.min(minY, y);
             maxX = Math.max(maxX, x);
             maxY = Math.max(maxY, y);
+            pixelCount += 1;
             weight += value;
+            rgb[0] += data[offset];
+            rgb[1] += data[offset + 1];
+            rgb[2] += data[offset + 2];
             cx += x * value;
             cy += y * value;
           }
@@ -1084,7 +1217,9 @@ async function compareRenderedFrames(page, previewDataUrl, exportDataUrl) {
           width: (maxX - minX + 1) / targetWidth,
           height: (maxY - minY + 1) / targetHeight,
           cx: (cx / weight) / targetWidth,
-          cy: (cy / weight) / targetHeight
+          cy: (cy / weight) / targetHeight,
+          meanLuminance: weight / Math.max(pixelCount, 1),
+          meanRgb: rgb.map((value) => value / Math.max(pixelCount, 1))
         };
       }
 
@@ -1098,13 +1233,22 @@ async function compareRenderedFrames(page, previewDataUrl, exportDataUrl) {
       const sizeDelta = Math.abs(a.width - b.width) + Math.abs(a.height - b.height);
       const shapeRatioDelta =
         Math.abs((a.width / Math.max(a.height, 0.0001)) - (b.width / Math.max(b.height, 0.0001)));
-      const strictMatch = centerDelta < 0.06 && sizeDelta < 0.16 && shapeRatioDelta < 0.35;
-      const sparsePointMatch = centerDelta < 0.045 && sizeDelta < 0.14 && shapeRatioDelta < 0.55;
+      const luminanceDelta = Math.abs(a.meanLuminance - b.meanLuminance);
+      const colorDistance = Math.hypot(
+        a.meanRgb[0] - b.meanRgb[0],
+        a.meanRgb[1] - b.meanRgb[1],
+        a.meanRgb[2] - b.meanRgb[2]
+      );
+      const colorMatch = luminanceDelta < 24 && colorDistance < 38;
+      const strictMatch = centerDelta < 0.06 && sizeDelta < 0.16 && shapeRatioDelta < 0.35 && colorMatch;
+      const sparsePointMatch = centerDelta < 0.045 && sizeDelta < 0.14 && shapeRatioDelta < 0.55 && colorMatch;
       return {
         ok: strictMatch || sparsePointMatch,
         centerDelta,
         sizeDelta,
         shapeRatioDelta,
+        luminanceDelta,
+        colorDistance,
         preview: a,
         exported: b
       };

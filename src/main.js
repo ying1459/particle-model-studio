@@ -18,6 +18,7 @@ import {
   Camera,
   createIcons,
   Download,
+  FolderOpen,
   KeyRound,
   Lightbulb,
   Maximize2,
@@ -30,6 +31,7 @@ import {
   Plus,
   RotateCcw,
   Rotate3D,
+  Save,
   Sun,
   Sparkles,
   Trash2,
@@ -41,6 +43,7 @@ createIcons({
     Box,
     Camera,
     Download,
+    FolderOpen,
     KeyRound,
     Lightbulb,
     Maximize2,
@@ -55,6 +58,7 @@ createIcons({
     Rotate3D,
     Rotate3d: Rotate3D,
     RotateCcw,
+    Save,
     Sun,
     Sparkles,
     Trash2,
@@ -79,6 +83,12 @@ const modelName = document.querySelector('#modelName');
 const statusText = document.querySelector('#status');
 const statsText = document.querySelector('#stats');
 const resetCameraButton = document.querySelector('#resetCamera');
+const projectUi = {
+  input: document.querySelector('#projectInput'),
+  open: document.querySelector('#openProject'),
+  save: document.querySelector('#saveProject'),
+  name: document.querySelector('#projectName')
+};
 const presetButtons = [...document.querySelectorAll('[data-preset]')];
 const effectModeButtons = [...document.querySelectorAll('[data-effect-mode]')];
 const MODEL_EXTENSIONS = new Set(['blend', 'glb', 'gltf', 'obj', 'stl', 'fbx']);
@@ -1220,7 +1230,9 @@ pmremGenerator.compileEquirectangularShader();
 
 const postSize = new THREE.Vector2();
 const postClearColor = new THREE.Color();
-const bloomScale = exportSettings.hideUi ? 0.5 : 0.35;
+// Preview, camera view, and hidden export must use the same bloom resolution.
+// Different scales change the apparent glow energy and break WYSIWYG output.
+const bloomScale = 0.4;
 const perfStats = {
   requestedPixelRatio,
   renderPixelRatio,
@@ -1344,7 +1356,10 @@ function resizePostTargets() {
 }
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x090a0c, 0.035);
+// Camera-distance fog made unchanged lighting appear darker when the camera
+// moved away. Atmospheric depth should be an explicit effect, not an editor
+// default, so keep the base scene camera-distance invariant.
+scene.fog = null;
 RectAreaLightUniformsLib.init();
 const activeModelTransformRoot = new THREE.Group();
 activeModelTransformRoot.name = 'Active Scene Model Transform';
@@ -2211,6 +2226,7 @@ const particleMaterial = new THREE.ShaderMaterial({
       corePointSize *= mix(1.0, 0.56 + growHead * 0.32 + sheetMask * 0.22 + dissolveMistMask * 0.12, strandMask);
       corePointSize *= 1.0 + sheetMask * (0.08 + uDissolveMist * 0.12);
       corePointSize *= mix(1.0, 0.92 + morphRibbon * (0.18 + uMorphFlow * 0.06), morphMode);
+      corePointSize = max(corePointSize, 0.95 * uPixelRatio);
       float glowSourceSize = corePointSize * 1.08 + min(uGlowRadius, 1400.0) * uPixelRatio * 0.018;
       gl_PointSize = mix(corePointSize, max(corePointSize, glowSourceSize), step(0.5, uGlowPass));
       vCoreRadius = clamp((corePointSize / max(gl_PointSize, 0.001)) * 0.48, 0.025, 0.48);
@@ -2532,6 +2548,7 @@ const emissionMaterial = new THREE.ShaderMaterial({
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
+      baseSize = max(baseSize, 0.95 * uPixelRatio);
       float glowSize = baseSize * (1.55 + clamp(uEmissionGlow, 0.0, 4.0) * 1.12);
       gl_PointSize = mix(baseSize, max(baseSize, glowSize), step(0.5, uGlowPass));
       gl_Position = projectionMatrix * mvPosition;
@@ -3959,11 +3976,6 @@ function commitSelectedSceneModelTransform() {
     return null;
   }
 
-  if (transformControls.object === selectedTransformProxy) {
-    activeModelTransformRoot.position.copy(selectedTransformProxy.position);
-    activeModelTransformRoot.quaternion.copy(selectedTransformProxy.quaternion).normalize();
-    activeModelTransformRoot.scale.copy(selectedTransformProxy.scale);
-  }
   activeModelTransformRoot.quaternion.normalize();
   activeModelTransformRoot.updateMatrixWorld(true);
   record.transform = captureActiveSceneModelTransform();
@@ -8156,6 +8168,23 @@ function syncUniforms() {
   syncParticleLightingUniforms();
 }
 
+function serializeProjectWorldEnvironment() {
+  if (!currentWorldPayload?.extension || (!currentWorldPayload.dataUrl && !currentWorldPayload.path)) {
+    return null;
+  }
+
+  return {
+    ...currentWorldPayload,
+    enabled: state.worldEnabled,
+    visible: state.worldVisible,
+    export: state.worldExport,
+    intensity: state.worldIntensity,
+    backgroundIntensity: state.worldIntensity,
+    blur: state.worldBlur,
+    rotation: state.worldRotation
+  };
+}
+
 function syncEmissionUniforms() {
   emissionUniforms.uEmissionEnabled.value = state.emissionEnabled ? 1 : 0;
   emissionUniforms.uEmissionIntensity.value = state.emissionIntensity;
@@ -12048,6 +12077,245 @@ function glowEnabled() {
     state.glowExposure > 0;
 }
 
+const PROJECT_FORMAT = 'particle-model-studio-project';
+const PROJECT_SCHEMA_VERSION = 1;
+let currentProjectName = '';
+
+function captureProjectDocument() {
+  commitSelectedImageSplatTransform();
+  commitSelectedLightTransform();
+  commitSelectedSceneModelTransform();
+  const keyframe = commitSelectedKeyframeTransform();
+  if (keyframe) {
+    updateSelectedCameraMarkerFromKeyframe(keyframe);
+  }
+
+  const sceneModels = serializeSceneModels();
+  const exportResolution = getExportResolution();
+  return {
+    format: PROJECT_FORMAT,
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    appVersion: '1.0.5',
+    savedAt: new Date().toISOString(),
+    scene: {
+      options: captureKeyframeOptions(),
+      cameraSettings: getCameraSettings(),
+      cameraSnapshot: captureCameraSnapshot(),
+      cameraKeyframes: getSortedCameraKeyframes(),
+      parameterKeyframes: serializeParameterKeyframes(),
+      cameraAnimation: {
+        duration: cameraAnimation.duration,
+        time: cameraAnimation.time,
+        curve: cameraAnimation.curve,
+        curveStrength: cameraAnimation.curveStrength
+      },
+      exportSettings: {
+        width: exportResolution.width,
+        height: exportResolution.height,
+        fps: Number(controlsUi.exportFps.value) || 30,
+        format: normalizeExportFormat(controlsUi.exportFormat?.value)
+      },
+      lights: serializeSceneLights(),
+      world: serializeProjectWorldEnvironment(),
+      imageSplat: serializeImageSplatObject(),
+      morphTarget: serializeMorphTargetModel(),
+      sceneModels,
+      model: sceneModels?.models?.length ? null : currentModelPayload
+    }
+  };
+}
+
+async function saveProjectFromUi(saveAs = false) {
+  if (projectUi.save) {
+    projectUi.save.disabled = true;
+  }
+  setStatus('Saving project');
+
+  try {
+    const document = captureProjectDocument();
+    const suggestedName = getProjectSuggestedName();
+    let result;
+    if (window.electronAPI?.saveProject) {
+      result = await window.electronAPI.saveProject({ document, suggestedName, saveAs });
+    } else {
+      const blob = new Blob([JSON.stringify(document)], { type: 'application/json' });
+      const link = documentElement('a');
+      const name = `${suggestedName}.pms`;
+      link.href = URL.createObjectURL(blob);
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      result = { ok: true, name };
+    }
+
+    if (result?.canceled) {
+      setStatus('Ready');
+      return result;
+    }
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Project save failed');
+    }
+    currentProjectName = result.name || `${suggestedName}.pms`;
+    syncProjectName();
+    setStatus('Project saved');
+    return result;
+  } catch (error) {
+    console.error(error);
+    setStatus('Project save failed');
+    return { ok: false, error: error.message || String(error) };
+  } finally {
+    if (projectUi.save) {
+      projectUi.save.disabled = false;
+    }
+  }
+}
+
+async function openProjectFromUi() {
+  if (projectUi.open) {
+    projectUi.open.disabled = true;
+  }
+  setStatus('Opening project');
+
+  try {
+    if (window.electronAPI?.openProject) {
+      const result = await window.electronAPI.openProject();
+      if (result?.canceled) {
+        setStatus('Ready');
+        return result;
+      }
+      if (!result?.ok) {
+        throw new Error(result?.error || 'Project open failed');
+      }
+      await applyProjectDocument(result.document);
+      currentProjectName = result.name || 'project.pms';
+      syncProjectName();
+      return result;
+    }
+
+    projectUi.input?.click();
+    return { ok: true, awaitingFile: true };
+  } catch (error) {
+    console.error(error);
+    setStatus('Project open failed');
+    return { ok: false, error: error.message || String(error) };
+  } finally {
+    if (projectUi.open) {
+      projectUi.open.disabled = false;
+    }
+  }
+}
+
+async function applyProjectDocument(document) {
+  validateProjectDocument(document);
+  const project = document.scene;
+  undoHistory.restoring = true;
+  cameraAnimation.playing = false;
+  updatePlayButton();
+  setStatus('Restoring project');
+
+  try {
+    const sceneModels = project.sceneModels?.models?.length
+      ? project.sceneModels
+      : project.model?.dataUrl
+        ? {
+            activeId: 'project-model',
+            models: [{ ...project.model, id: 'project-model', name: project.model.name || 'Project Model' }]
+          }
+        : null;
+
+    if (sceneModels) {
+      await importSceneModels(sceneModels);
+    } else {
+      disposeAllSceneModels();
+      currentModelPayload = null;
+    }
+
+    if (project.imageSplat?.dataUrl || project.imageSplat?.url) {
+      await window.particleStudio.setImageSplatObject(project.imageSplat);
+    } else {
+      removeImageSplatObject();
+      await removeRealSplatObject();
+      currentImageSplatPayload = null;
+      currentGaussianSplatPayload = null;
+    }
+
+    if (project.morphTarget?.dataUrl || project.morphTarget?.url) {
+      await window.particleStudio.setMorphTargetModel(project.morphTarget);
+    } else {
+      clearMorphTarget({ rebuild: false });
+    }
+
+    if (project.world?.dataUrl || project.world?.url) {
+      state.worldExport = project.world.export !== false;
+      await window.particleStudio.setWorldEnvironment({
+        ...project.world,
+        url: project.world.url || project.world.dataUrl
+      });
+    } else {
+      disposeWorldEnvironment();
+      currentWorldPayload = null;
+      state.worldEnabled = false;
+      state.worldVisible = false;
+      syncWorldEnvironment();
+    }
+
+    await applyOptionsSnapshot(project.options || {}, false);
+    importSceneLights(Array.isArray(project.lights) ? project.lights : [], false);
+    setCameraDuration(project.cameraAnimation?.duration ?? 5);
+    setCameraCurve(project.cameraAnimation?.curve, project.cameraAnimation?.curveStrength, { applyToSelected: false });
+    setCameraSettings(project.cameraSettings || {}, false);
+    applyCameraSnapshot(project.cameraSnapshot || {}, { pose: true });
+    importCameraKeyframes(Array.isArray(project.cameraKeyframes) ? project.cameraKeyframes : []);
+    importParameterKeyframes(Array.isArray(project.parameterKeyframes) ? project.parameterKeyframes : []);
+
+    const exportSettings = project.exportSettings || {};
+    setExportResolution(exportSettings.width, exportSettings.height, exportSettings.fps);
+    if (controlsUi.exportFormat) {
+      controlsUi.exportFormat.value = normalizeExportFormat(exportSettings.format);
+      syncExportFormatUi();
+    }
+    setCameraTime(project.cameraAnimation?.time ?? 0, true);
+    syncUi();
+    syncCameraSettingsFromState(true);
+    renderSceneModelList();
+    undoHistory.past.length = 0;
+    setStatus('Project loaded');
+    setCameraPreviewDirty();
+    return true;
+  } finally {
+    undoHistory.restoring = false;
+  }
+}
+
+function validateProjectDocument(document) {
+  if (!document || document.format !== PROJECT_FORMAT || Number(document.schemaVersion) !== PROJECT_SCHEMA_VERSION) {
+    throw new Error('这不是有效的 Particle Model Studio .pms 工程文件。');
+  }
+  if (!document.scene || typeof document.scene !== 'object') {
+    throw new Error('工程文件缺少场景数据。');
+  }
+}
+
+function getProjectSuggestedName() {
+  const base = currentProjectName || currentLabel || 'particle-project';
+  return String(base)
+    .replace(/\.pms$/i, '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+    .trim() || 'particle-project';
+}
+
+function syncProjectName() {
+  if (projectUi.name) {
+    projectUi.name.textContent = currentProjectName || '未保存工程';
+    projectUi.name.title = currentProjectName || '';
+  }
+}
+
+function documentElement(tagName) {
+  return window.document.createElement(tagName);
+}
+
 function normalizeExportFormat(value) {
   return value === 'mp4-360' ? 'mp4-360' : value === 'mp4' ? 'mp4' : 'mov';
 }
@@ -12824,8 +13092,10 @@ window.particleStudio = {
     worldEmissionParticles: worldRotationSnapshot(emissionParticles)
   }),
   setWorldEnvironment: async (world = {}) => {
-    if (!world?.url) {
+    const worldUrl = world?.url || world?.dataUrl;
+    if (!worldUrl) {
       disposeWorldEnvironment();
+      currentWorldPayload = null;
       if (world.enabled !== undefined) {
         state.worldEnabled = Boolean(world.enabled);
       }
@@ -12838,11 +13108,18 @@ window.particleStudio = {
     state.worldIntensity = normalizeNumericStateValue('worldIntensity', Number(world.intensity ?? state.worldIntensity));
     state.worldBlur = normalizeNumericStateValue('worldBlur', Number(world.blur ?? state.worldBlur));
     state.worldRotation = normalizeNumericStateValue('worldRotation', Number(world.rotation ?? state.worldRotation));
-    await loadWorldEnvironmentUrl(world.url, {
-      name: world.name || world.url.split('/').pop()?.split('?')[0] || 'HDR Environment',
+    await loadWorldEnvironmentUrl(worldUrl, {
+      name: world.name || worldUrl.split('/').pop()?.split('?')[0] || 'HDR Environment',
       extension: world.extension,
       enabled: state.worldEnabled
     });
+    if (world.dataUrl) {
+      currentWorldPayload = {
+        name: world.name || `environment.${world.extension || 'hdr'}`,
+        extension: world.extension || 'hdr',
+        dataUrl: world.dataUrl
+      };
+    }
     syncUi();
     return true;
   },
@@ -13007,6 +13284,8 @@ window.particleStudio = {
     attachedToModelRoot: transformControls.object === activeModelTransformRoot,
     visible: transformControls.visible
   }),
+  captureProject: () => captureProjectDocument(),
+  applyProject: (document) => applyProjectDocument(document),
   getSceneHitTestDebug: () => {
     const result = {
       cameraPathVisible: cameraPathGroup.visible,
@@ -13423,6 +13702,32 @@ controlsUi.scaleKeyframe?.addEventListener('click', () => {
   setSelectedKeyframeMode('scale');
 });
 
+projectUi.save?.addEventListener('click', () => {
+  void saveProjectFromUi(false);
+});
+
+projectUi.open?.addEventListener('click', () => {
+  void openProjectFromUi();
+});
+
+projectUi.input?.addEventListener('change', async () => {
+  const file = projectUi.input.files?.[0];
+  projectUi.input.value = '';
+  if (!file) {
+    return;
+  }
+  try {
+    setStatus('Opening project');
+    const document = JSON.parse((await file.text()).replace(/^\uFEFF/, ''));
+    await applyProjectDocument(document);
+    currentProjectName = file.name;
+    syncProjectName();
+  } catch (error) {
+    console.error(error);
+    setStatus('Project open failed');
+  }
+});
+
 controlsUi.moveImageSplat?.addEventListener('click', () => {
   selectImageSplatObject();
   setSelectedImageSplatMode('translate');
@@ -13499,6 +13804,9 @@ const UNDO_SKIPPED_CONTROL_IDS = new Set([
   'toggleCameraView',
   'exportMov',
   'exportFormat',
+  'saveProject',
+  'openProject',
+  'projectInput',
   'panelToggle',
   'moveKeyframe',
   'rotateKeyframe',
@@ -13561,6 +13869,20 @@ document.addEventListener('focusin', (event) => {
 }, true);
 
 window.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    event.stopPropagation();
+    void saveProjectFromUi(event.shiftKey);
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'o') {
+    event.preventDefault();
+    event.stopPropagation();
+    void openProjectFromUi();
+    return;
+  }
+
   if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
     event.preventDefault();
     event.stopPropagation();

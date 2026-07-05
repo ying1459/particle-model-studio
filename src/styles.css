@@ -173,6 +173,27 @@ body.panel-collapsed .panel-toggle .panel-toggle-closed {
   margin-bottom: 16px;
 }
 
+.project-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: -4px 0 12px;
+}
+
+.project-bar > input {
+  display: none;
+}
+
+.project-name {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: var(--cyan);

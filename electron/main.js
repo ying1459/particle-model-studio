@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, net, protocol, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readdirSync, statSync } from 'node:fs';
@@ -16,6 +16,7 @@ const preloadPath = path.join(__dirname, 'preload.cjs');
 let exportModelDir = '';
 const runtimeAssetDirs = new Set();
 const runtimeAssetMap = new Map();
+const projectPaths = new Map();
 const MIN_SHARP_CHECKPOINT_BYTES = 1024 * 1024 * 1024;
 
 protocol.registerSchemesAsPrivileged([
@@ -117,6 +118,14 @@ function registerIpc() {
     return exportMov(payload || {});
   });
 
+  ipcMain.handle('save-project', async (event, payload) => {
+    return saveProjectFile(event, payload || {});
+  });
+
+  ipcMain.handle('open-project', async (event) => {
+    return openProjectFile(event);
+  });
+
   ipcMain.handle('convert-blend-to-glb', async (_event, payload) => {
     return convertBlendToGlb(payload || {});
   });
@@ -138,6 +147,136 @@ function registerIpc() {
       shell.showItemInFolder(filePath);
     }
   });
+}
+
+async function saveProjectFile(event, payload) {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const ownerId = event.sender.id;
+  let outputPath = payload.saveAs ? '' : projectPaths.get(ownerId) || '';
+  const suggestedName = sanitizeFilename(payload.suggestedName || 'untitled-project');
+
+  if (!outputPath) {
+    const result = await dialog.showSaveDialog(owner || undefined, {
+      title: '保存 Particle Model Studio 工程',
+      defaultPath: `${suggestedName}.pms`,
+      filters: [
+        { name: 'Particle Model Studio Project', extensions: ['pms'] },
+        { name: 'JSON', extensions: ['json'] }
+      ]
+    });
+    if (result.canceled || !result.filePath) {
+      return { ok: false, canceled: true };
+    }
+    outputPath = result.filePath.toLowerCase().endsWith('.pms') ? result.filePath : `${result.filePath}.pms`;
+  }
+
+  const document = await embedProjectAssets(payload.document || {});
+  const serialized = JSON.stringify(document);
+  await writeFile(outputPath, serialized, 'utf8');
+  projectPaths.set(ownerId, outputPath);
+  if (owner && !owner.isDestroyed()) {
+    owner.setTitle(`${path.basename(outputPath)} - Particle Model Studio`);
+  }
+  return {
+    ok: true,
+    path: outputPath,
+    name: path.basename(outputPath),
+    bytes: Buffer.byteLength(serialized)
+  };
+}
+
+async function openProjectFile(event) {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(owner || undefined, {
+    title: '打开 Particle Model Studio 工程',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Particle Model Studio Project', extensions: ['pms'] },
+      { name: 'JSON', extensions: ['json'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths[0]) {
+    return { ok: false, canceled: true };
+  }
+
+  const inputPath = result.filePaths[0];
+  const document = JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, ''));
+  validateProjectDocument(document);
+  projectPaths.set(event.sender.id, inputPath);
+  if (owner && !owner.isDestroyed()) {
+    owner.setTitle(`${path.basename(inputPath)} - Particle Model Studio`);
+  }
+  return {
+    ok: true,
+    path: inputPath,
+    name: path.basename(inputPath),
+    document
+  };
+}
+
+function validateProjectDocument(document) {
+  if (!document || document.format !== 'particle-model-studio-project' || Number(document.schemaVersion) !== 1) {
+    throw new Error('这不是有效的 Particle Model Studio .pms 工程文件。');
+  }
+  if (!document.scene || typeof document.scene !== 'object') {
+    throw new Error('工程文件缺少场景数据。');
+  }
+}
+
+async function embedProjectAssets(document) {
+  const embedded = structuredClone(document);
+  const scene = embedded.scene || {};
+  if (scene.model) {
+    scene.model = await embedProjectAsset(scene.model);
+  }
+  if (scene.morphTarget) {
+    scene.morphTarget = await embedProjectAsset(scene.morphTarget);
+  }
+  if (scene.world) {
+    scene.world = await embedProjectAsset(scene.world);
+  }
+  if (scene.imageSplat) {
+    scene.imageSplat = await embedProjectAsset(scene.imageSplat);
+  }
+  if (Array.isArray(scene.sceneModels?.models)) {
+    scene.sceneModels.models = await Promise.all(scene.sceneModels.models.map((model) => embedProjectAsset(model)));
+  }
+  return embedded;
+}
+
+async function embedProjectAsset(descriptor) {
+  const embedded = { ...descriptor };
+  const sourcePath = embedded.path ? path.resolve(String(embedded.path)) : '';
+  if (!embedded.dataUrl && sourcePath && existsSync(sourcePath)) {
+    const buffer = await readFile(sourcePath);
+    const extension = String(embedded.extension || path.extname(sourcePath).slice(1)).toLowerCase();
+    embedded.dataUrl = `data:${projectAssetMime(extension)};base64,${buffer.toString('base64')}`;
+    embedded.size = embedded.size || buffer.byteLength;
+  }
+  if (sourcePath) {
+    embedded.sourcePath = sourcePath;
+  }
+  if (!embedded.dataUrl) {
+    throw new Error(`无法把素材“${embedded.name || sourcePath || '未命名素材'}”嵌入工程，请重新导入该素材后再保存。`);
+  }
+  delete embedded.path;
+  delete embedded.url;
+  return embedded;
+}
+
+function projectAssetMime(extension) {
+  const values = {
+    glb: 'model/gltf-binary',
+    gltf: 'model/gltf+json',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    hdr: 'image/vnd.radiance',
+    exr: 'image/x-exr',
+    json: 'application/json'
+  };
+  return values[extension] || 'application/octet-stream';
 }
 
 async function exportMov(payload) {
