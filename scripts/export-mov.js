@@ -11,6 +11,7 @@ import { chromium } from 'playwright';
 import { injectSphericalMetadata } from '../electron/spatial-metadata.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const videoProxyDirs = [];
 const args = parseArgs(process.argv.slice(2));
 const config = await readConfig(readOption('config', null));
 const exportFormat = normalizeExportFormat(readOption('format', config.format ?? 'mov'));
@@ -175,6 +176,9 @@ if (config.cameraCurve) {
     (cameraCurve) => window.particleStudio.setCameraCurve(cameraCurve.curve, cameraCurve.strength, { applyToSelected: false }),
     config.cameraCurve
   );
+  if (config.cameraCurve.pathMode) {
+    await page.evaluate((pathMode) => window.particleStudio.setCameraPathMode(pathMode), config.cameraCurve.pathMode);
+  }
 }
 
 if (Array.isArray(config.cameraKeyframes)) {
@@ -243,6 +247,7 @@ for (let frame = 0; frame < frameCount; frame += 1) {
 if (server) {
     server.kill();
   }
+  await Promise.all(videoProxyDirs.map((dir) => rm(dir, { recursive: true, force: true }).catch(() => {})));
 }
 
 async function normalizeSceneModelsForBrowser(sceneModels) {
@@ -292,6 +297,21 @@ async function normalizeVideoPlanesForBrowser(videoPlanes) {
 
   const normalized = [];
   for (const item of items) {
+    const extension = String(item.extension || '').toLowerCase();
+    if (extension === 'mov' && (item.path || item.dataUrl)) {
+      const proxy = await createMovBrowserProxy(item);
+      normalized.push({
+        ...item,
+        path: undefined,
+        url: undefined,
+        dataUrl: proxy.dataUrl,
+        playbackExtension: 'webm',
+        sourceExtension: 'mov',
+        size: proxy.size
+      });
+      continue;
+    }
+
     if (item.dataUrl || item.url) {
       normalized.push(item);
       continue;
@@ -317,6 +337,45 @@ async function normalizeVideoPlanesForBrowser(videoPlanes) {
         items: normalized
       }
     : null;
+}
+
+async function createMovBrowserProxy(item) {
+  const runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-cli-video-'));
+  videoProxyDirs.push(runtimeDir);
+  let inputPath = item.path ? path.resolve(rootDir, String(item.path)) : '';
+  if (!inputPath) {
+    inputPath = path.join(runtimeDir, 'source.mov');
+    await writeFile(inputPath, parseDataUrl(item.dataUrl).buffer);
+  }
+  const outputPath = path.join(runtimeDir, `${sanitizeExportName(item.name || 'video')}-proxy.webm`);
+  await transcodeVideoToWebm(inputPath, outputPath);
+  const buffer = await readFile(outputPath);
+  return {
+    dataUrl: `data:video/webm;base64,${buffer.toString('base64')}`,
+    size: buffer.byteLength
+  };
+}
+
+function parseDataUrl(dataUrl) {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(String(dataUrl || ''));
+  if (!match) {
+    throw new Error('Invalid video dataUrl.');
+  }
+  return {
+    mime: match[1] || 'application/octet-stream',
+    buffer: match[2]
+      ? Buffer.from(match[3] || '', 'base64')
+      : Buffer.from(decodeURIComponent(match[3] || ''), 'utf8')
+  };
+}
+
+function sanitizeExportName(value) {
+  return String(value)
+    .trim()
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-zA-Z0-9\u4e00-\u9fa5._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'video';
 }
 
 function mimeForModelExtension(extension = '') {
@@ -509,6 +568,31 @@ async function encodeMp4(framesDir, output, frameRate) {
     '-r',
     String(frameRate),
     output
+  ]);
+}
+
+async function transcodeVideoToWebm(inputPath, outputPath) {
+  await runFfmpeg([
+    '-y',
+    '-hide_banner',
+    '-i',
+    inputPath,
+    '-map',
+    '0:v:0',
+    '-an',
+    '-vf',
+    'format=rgba',
+    '-c:v',
+    'libvpx-vp9',
+    '-pix_fmt',
+    'yuva420p',
+    '-auto-alt-ref',
+    '0',
+    '-b:v',
+    '0',
+    '-crf',
+    '28',
+    outputPath
   ]);
 }
 

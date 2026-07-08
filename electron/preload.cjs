@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveProject: (payload) => ipcRenderer.invoke('save-project', payload),
   saveProjectRecovery: (payload) => ipcRenderer.invoke('save-project-recovery', payload),
   openProject: () => ipcRenderer.invoke('open-project'),
+  prepareVideoProxy: (payload) => ipcRenderer.invoke('prepare-video-proxy', payload),
   convertBlendToGlb: (payload) => ipcRenderer.invoke('convert-blend-to-glb', payload),
   checkLocalSharp: () => ipcRenderer.invoke('check-local-sharp'),
   installLocalSharp: (payload) => ipcRenderer.invoke('install-local-sharp', payload),

@@ -18,6 +18,7 @@ const streamedProjectSmokePath = path.join(rootDir, 'verification', 'electron-st
 const streamedAssetSmokePath = path.join(rootDir, 'verification', 'electron-streamed-asset-smoke.ply');
 const videoProjectSmokePath = path.join(rootDir, 'verification', 'electron-video-project-smoke.pms');
 const videoAssetSmokePath = path.join(rootDir, 'verification', 'electron-video-asset-smoke.mp4');
+const movAssetSmokePath = path.join(rootDir, 'verification', 'electron-video-alpha-smoke.mov');
 const missingProjectSmokePath = path.join(rootDir, 'verification', 'electron-missing-project-smoke.pms');
 const pathReferenceProjectSmokePath = path.join(rootDir, 'verification', 'electron-path-reference-smoke.pms');
 const uiScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-packaged.png' : 'electron-ui.png');
@@ -33,10 +34,12 @@ try {
   await rm(streamedAssetSmokePath, { force: true });
   await rm(videoProjectSmokePath, { force: true });
   await rm(videoAssetSmokePath, { force: true });
+  await rm(movAssetSmokePath, { force: true });
   await rm(missingProjectSmokePath, { force: true });
   await rm(pathReferenceProjectSmokePath, { force: true });
   await writeFile(streamedAssetSmokePath, Buffer.alloc(8 * 1024 * 1024, 0x5a));
   await writeFile(videoAssetSmokePath, Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex'));
+  await createAlphaMovSmoke(movAssetSmokePath);
   electronApp = await electron.launch({
     executablePath,
     args: packaged ? [] : ['.'],
@@ -182,11 +185,62 @@ try {
     throw new Error(`Undo failed: ${JSON.stringify(result)}`);
   }
 
+  const movProxyResult = await page.evaluate(async (assetPath) => {
+    const ipcProxy = await window.electronAPI.prepareVideoProxy({
+      path: assetPath,
+      extension: 'mov',
+      name: 'electron-video-alpha-smoke.mov'
+    });
+    await window.particleStudio.setVideoPlanes({
+      activeId: 'electron-mov-proxy-smoke',
+      items: [
+        {
+          id: 'electron-mov-proxy-smoke',
+          name: 'electron-video-alpha-smoke.mov',
+          extension: 'mov',
+          path: assetPath,
+          width: 1.8,
+          height: 1.8,
+          opacity: 0.9,
+          playbackRate: 1,
+          loop: true,
+          transform: { position: [0, 0.5, 0.25], rotation: [0, 180, 0], scale: [1, 1, 1] }
+        }
+      ]
+    });
+    const asset = window.particleStudio.getCurrentAsset().videoPlanes.find((item) => item.id === 'electron-mov-proxy-smoke');
+    const frame = await window.particleStudio.renderFrameAsync(0, undefined, 0);
+    return {
+      ipcProxy: {
+        ok: ipcProxy?.ok,
+        extension: ipcProxy?.extension,
+        url: ipcProxy?.url,
+        size: ipcProxy?.size
+      },
+      asset,
+      frameBytes: frame.length,
+      status: document.querySelector('#videoPlaneStatus')?.value || ''
+    };
+  }, movAssetSmokePath);
+  if (
+    !movProxyResult.ipcProxy?.ok ||
+    movProxyResult.ipcProxy.extension !== 'webm' ||
+    !movProxyResult.ipcProxy.url?.startsWith('/__runtime-asset/') ||
+    movProxyResult.ipcProxy.size < 100 ||
+    !movProxyResult.asset?.hasProxy ||
+    movProxyResult.asset.playbackExtension !== 'webm' ||
+    movProxyResult.frameBytes < 1000
+  ) {
+    throw new Error(`MOV proxy import failed: ${JSON.stringify(movProxyResult)}`);
+  }
+  result.movProxy = movProxyResult;
+
   const projectResult = await page.evaluate(async () => {
     await window.particleStudio.setOptions({ dissolve: 0.37, spread: 1.23 }, true);
     window.particleStudio.setCameraSettings({ displaySize: 1.75, focalLength: 70 });
+    window.particleStudio.setCameraPathMode('bezier');
     window.particleStudio.setCameraKeyframes([
-      { id: 'project-camera', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0] }
+      { id: 'project-camera', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0], handleOut: [0.5, 0.25, 0] }
     ]);
     window.particleStudio.setParameterKeyframes([
       { id: 'project-param', field: 'noise', time: 1, value: 0.64 }
@@ -201,6 +255,7 @@ try {
 
     await window.particleStudio.setOptions({ dissolve: 0.91, spread: 0.12 }, true);
     window.particleStudio.setCameraSettings({ displaySize: 0.5, focalLength: 18 });
+    window.particleStudio.setCameraPathMode('linear');
     window.particleStudio.setCameraKeyframes([]);
     window.particleStudio.setParameterKeyframes([]);
 
@@ -215,6 +270,8 @@ try {
       spread: after.scene.options.spread,
       displaySize: after.scene.cameraSettings.displaySize,
       focalLength: after.scene.cameraSettings.focalLength,
+      pathMode: after.scene.cameraAnimation.pathMode,
+      handleOut: after.scene.cameraKeyframes[0]?.handleOut,
       cameraKeyframes: after.scene.cameraKeyframes.length,
       parameterKeyframes: after.scene.parameterKeyframes.length
     };
@@ -229,6 +286,8 @@ try {
     Math.abs(projectResult.spread - 1.23) > 0.01 ||
     Math.abs(projectResult.displaySize - 1.75) > 0.01 ||
     Math.abs(projectResult.focalLength - 70) > 0.01 ||
+    projectResult.pathMode !== 'bezier' ||
+    Math.abs(Number(projectResult.handleOut?.[0] || 0) - 0.5) > 0.001 ||
     projectResult.cameraKeyframes !== 1 ||
     projectResult.parameterKeyframes !== 1 ||
     !embeddedModel
@@ -541,6 +600,7 @@ try {
   await rm(streamedAssetSmokePath, { force: true }).catch(() => {});
   await rm(videoProjectSmokePath, { force: true }).catch(() => {});
   await rm(videoAssetSmokePath, { force: true }).catch(() => {});
+  await rm(movAssetSmokePath, { force: true }).catch(() => {});
   await rm(missingProjectSmokePath, { force: true }).catch(() => {});
   await rm(pathReferenceProjectSmokePath, { force: true }).catch(() => {});
   if (recoverySmokeOutputPath) {
@@ -549,6 +609,39 @@ try {
   if (automaticRecoveryOutputPath) {
     await rm(automaticRecoveryOutputPath, { force: true }).catch(() => {});
   }
+}
+
+async function createAlphaMovSmoke(outputPath) {
+  await runFfmpeg([
+    '-y',
+    '-hide_banner',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=c=black@0.0:s=48x48:d=0.5:r=6,format=rgba,drawbox=x=8:y=8:w=32:h=32:color=red@0.65:t=fill',
+    '-c:v',
+    'qtrle',
+    '-pix_fmt',
+    'argb',
+    outputPath
+  ]);
+}
+
+async function runFfmpeg(args) {
+  const child = spawn(ffmpegPath, args, {
+    cwd: rootDir,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  const [code] = await once(child, 'exit');
+  if (code !== 0) {
+    throw new Error(`FFmpeg exited with code ${code}:\n${stderr}`);
+  }
+  return stderr;
 }
 
 async function probeMedia(filePath) {

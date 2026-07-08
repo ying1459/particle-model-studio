@@ -149,6 +149,10 @@ function registerIpc() {
     return openProjectFile(event);
   });
 
+  ipcMain.handle('prepare-video-proxy', async (_event, payload) => {
+    return prepareVideoProxy(payload || {});
+  });
+
   ipcMain.handle('convert-blend-to-glb', async (_event, payload) => {
     return convertBlendToGlb(payload || {});
   });
@@ -444,6 +448,106 @@ function projectAssetMime(extension) {
   return values[extension] || 'application/octet-stream';
 }
 
+async function prepareVideoProxy(payload = {}) {
+  const sourceExtension = sanitizeVideoExtension(
+    payload.extension ||
+    path.extname(String(payload.path || payload.name || '')).slice(1)
+  );
+  let runtimeDir = '';
+  let inputPath = '';
+
+  try {
+    runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-video-runtime-'));
+    const sourcePath = payload.path ? path.resolve(String(payload.path)) : '';
+    if (sourcePath && existsSync(sourcePath)) {
+      inputPath = sourcePath;
+    } else if (payload.dataUrl) {
+      const parsed = parseDataUrl(String(payload.dataUrl));
+      const inputName = `source.${sourceExtension || 'mov'}`;
+      inputPath = path.join(runtimeDir, inputName);
+      await writeFile(inputPath, parsed.buffer);
+    }
+
+    if (!inputPath || !existsSync(inputPath)) {
+      throw new Error('视频文件路径无效，无法生成 MOV 代理。');
+    }
+
+    const basename = sanitizeFilename(
+      path.basename(String(payload.name || inputPath), path.extname(String(payload.name || inputPath))) ||
+      'video'
+    );
+    const outputName = `${basename}-proxy.webm`;
+    const outputPath = path.join(runtimeDir, outputName);
+    const log = await transcodeVideoToWebm(inputPath, outputPath);
+
+    if (!existsSync(outputPath) || statSync(outputPath).size <= 0) {
+      throw new Error('MOV 代理转码没有生成可读取的视频。');
+    }
+
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    runtimeAssetDirs.add(runtimeDir);
+    runtimeAssetMap.set(token, outputPath);
+
+    return {
+      ok: true,
+      path: outputPath,
+      url: `/__runtime-asset/${token}/${encodeURIComponent(outputName)}`,
+      name: outputName,
+      extension: 'webm',
+      sourceExtension,
+      size: statSync(outputPath).size,
+      log: log.slice(-5000)
+    };
+  } catch (error) {
+    if (runtimeDir) {
+      await rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
+    }
+    return {
+      ok: false,
+      error: error?.message || String(error)
+    };
+  }
+}
+
+function parseDataUrl(dataUrl) {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl);
+  if (!match) {
+    throw new Error('视频 dataUrl 无效。');
+  }
+  const isBase64 = Boolean(match[2]);
+  const body = match[3] || '';
+  return {
+    mime: match[1] || 'application/octet-stream',
+    buffer: isBase64
+      ? Buffer.from(body, 'base64')
+      : Buffer.from(decodeURIComponent(body), 'utf8')
+  };
+}
+
+async function transcodeVideoToWebm(inputPath, outputPath) {
+  return runProcess(
+    getFfmpegPath(),
+    [
+      '-y',
+      '-hide_banner',
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-an',
+      '-vf', 'format=rgba',
+      '-c:v', 'libvpx-vp9',
+      '-pix_fmt', 'yuva420p',
+      '-auto-alt-ref', '0',
+      '-b:v', '0',
+      '-crf', '28',
+      outputPath
+    ],
+    {
+      cwd: path.dirname(inputPath),
+      timeoutMs: 20 * 60 * 1000
+    }
+  );
+}
+
 async function exportMov(payload) {
   const format = normalizeExportFormat(payload.format);
   const duration = clampNumber(payload.duration, 0.25, 120, 5);
@@ -583,22 +687,34 @@ async function exportMov(payload) {
           continue;
         }
         const extension = sanitizeVideoExtension(videoPlane.extension);
-        const videoName = `video-plane-${index}.${extension}`;
-        const videoPath = path.join(exportModelDir, videoName);
+        const originalVideoName = `video-plane-${index}.${extension}`;
+        const originalVideoPath = path.join(exportModelDir, originalVideoName);
         if (videoPlane.path) {
-          await copyFile(String(videoPlane.path), videoPath);
+          await copyFile(String(videoPlane.path), originalVideoPath);
         } else if (videoPlane.dataUrl) {
           const base64 = String(videoPlane.dataUrl).replace(/^data:[^;]+;base64,/, '');
-          await writeFile(videoPath, Buffer.from(base64, 'base64'));
+          await writeFile(originalVideoPath, Buffer.from(base64, 'base64'));
         } else {
           continue;
+        }
+
+        let renderVideoName = originalVideoName;
+        let renderVideoExtension = extension;
+        let renderVideoPath = originalVideoPath;
+        if (extension === 'mov') {
+          renderVideoName = `video-plane-${index}-proxy.webm`;
+          renderVideoExtension = 'webm';
+          renderVideoPath = path.join(exportModelDir, renderVideoName);
+          await transcodeVideoToWebm(originalVideoPath, renderVideoPath);
         }
 
         videoPlanesForRenderer.items.push({
           ...videoPlane,
           path: undefined,
           dataUrl: undefined,
-          url: `/__export-model/${videoName}`
+          sourceExtension: extension,
+          playbackExtension: renderVideoExtension,
+          url: `/__export-model/${renderVideoName}`
         });
       }
     }
@@ -702,6 +818,11 @@ async function exportMov(payload) {
           applyToSelected: false
         })})`
       );
+      if (payload.cameraCurve.pathMode) {
+        await hiddenWindow.webContents.executeJavaScript(
+          `window.particleStudio.setCameraPathMode(${JSON.stringify(payload.cameraCurve.pathMode)})`
+        );
+      }
     }
 
     if (Array.isArray(payload.cameraKeyframes)) {

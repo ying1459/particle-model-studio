@@ -975,8 +975,8 @@
             </label>
             <label>
               <span>焦点距离</span>
-              <input id="cameraFocusDistance" type="range" min="0.05" max="100" step="0.05" value="7.18" disabled />
-              <input id="cameraFocusDistanceValue" class="value-input" type="number" min="0.05" max="100" step="0.05" value="7.18" disabled />
+              <input id="cameraFocusDistance" type="range" min="0.05" max="10000" step="0.05" value="7.18" disabled />
+              <input id="cameraFocusDistanceValue" class="value-input" type="number" min="0.05" max="10000" step="0.05" value="7.18" disabled />
             </label>
           </div>
           <p class="camera-mode-hint" id="cameraModeHint">相机大小调整场景中的相机线框和手柄；焦段控制最终取景，景深参数可独立 K 帧。</p>
@@ -1017,6 +1017,13 @@
             </button>
           </div>
           <div class="camera-curve-row">
+            <label>
+              <span>路径类型</span>
+              <select id="cameraPathMode">
+                <option value="linear">直线</option>
+                <option value="bezier">贝塞尔手柄</option>
+              </select>
+            </label>
             <label>
               <span>速度曲线</span>
               <select id="cameraCurve">

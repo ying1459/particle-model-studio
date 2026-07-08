@@ -314,6 +314,32 @@ try {
     const undoDissolve = window.particleStudio.getOptions().dissolve;
 
     window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setCameraCurve('linear', 1, { applyToSelected: false });
+    window.particleStudio.setCameraKeyframes([
+      {
+        id: 'bezier-a',
+        time: 0,
+        position: [-2, 0, 5],
+        target: [0, 0, 0],
+        handleOut: [0, 3, 0]
+      },
+      {
+        id: 'bezier-b',
+        time: 2,
+        position: [2, 0, 5],
+        target: [0, 0, 0],
+        handleIn: [0, 3, 0]
+      }
+    ]);
+    window.particleStudio.setCameraPathMode('linear');
+    window.particleStudio.setCameraTime(1, true);
+    const linearPathPose = window.particleStudio.getCameraPreviewPose();
+    window.particleStudio.setCameraPathMode('bezier');
+    window.particleStudio.setCameraTime(1, true);
+    const bezierPathPose = window.particleStudio.getCameraPreviewPose();
+    const bezierCurve = window.particleStudio.getCameraCurve();
+
+    window.particleStudio.setParameterKeyframes([]);
     window.particleStudio.setCameraKeyframes([]);
     window.particleStudio.setExportResolution(512, 288, 12);
     window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: true, aperture: 1.4, focusDistance: 0.5 });
@@ -330,6 +356,7 @@ try {
     });
 
     window.particleStudio.setExportResolution(1920, 1080, 30);
+    window.particleStudio.setCameraPathMode('linear');
     window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false, sensorWidth: 36 });
     window.particleStudio.setCameraSnapshot({ position: [0, 1.2, 6], target: [0, 0, 0], fov: 48 });
     return {
@@ -337,6 +364,9 @@ try {
       cameraOnlyDissolve,
       independentlyKeyedDissolve,
       undoDissolve,
+      linearPathPose,
+      bezierPathPose,
+      bezierCurve,
       dofFrameBytes,
       panoramaSettings,
       panoramaSize,
@@ -360,6 +390,13 @@ try {
   }
   if (Math.abs(cameraFeatureCheck.undoDissolve - 0.2) > 0.01) {
     throw new Error(`Undo failed to restore the previous parameter value: ${JSON.stringify(cameraFeatureCheck)}`);
+  }
+  if (
+    cameraFeatureCheck.bezierCurve?.pathMode !== 'bezier' ||
+    Math.abs(Number(cameraFeatureCheck.linearPathPose?.position?.[1] || 0)) > 0.05 ||
+    Number(cameraFeatureCheck.bezierPathPose?.position?.[1] || 0) < 1.2
+  ) {
+    throw new Error(`Bezier camera path failed: ${JSON.stringify(cameraFeatureCheck)}`);
   }
   if (cameraFeatureCheck.dofFrameBytes < 1000) {
     throw new Error(`Depth-of-field rendering failed: ${JSON.stringify(cameraFeatureCheck)}`);
@@ -391,6 +428,10 @@ try {
   const cameraDistanceLighting = await verifyCameraDistanceLighting(page);
   if (!cameraDistanceLighting.ok) {
     throw new Error(`Camera distance changes scene lighting: ${JSON.stringify(cameraDistanceLighting)}`);
+  }
+  const cameraClipRange = await verifyCameraClipRange(page);
+  if (!cameraClipRange.ok) {
+    throw new Error(`Camera clipping range is too short: ${JSON.stringify(cameraClipRange)}`);
   }
 
   await page.evaluate(async () => {
@@ -741,6 +782,7 @@ try {
         importMode: importModeCheck,
         cameraFeatures: cameraFeatureCheck,
         cameraDistanceLighting,
+        cameraClipRange,
         imageSplat: imageSplatCheck,
         videoPlane: videoPlaneCheck,
         animation: animationCheck,
@@ -894,6 +936,27 @@ async function verifyCameraDistanceLighting(page) {
     colorDistance,
     ...measured
   };
+}
+
+async function verifyCameraClipRange(page) {
+  return page.evaluate(() => {
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.7, 7.2],
+      target: [0, 0, 0],
+      cameraType: 'perspective',
+      focalLength: 35,
+      filmGauge: 36,
+      near: 0.001,
+      far: 100,
+      dofEnabled: false
+    });
+    const snapshot = window.particleStudio.captureViewCamera();
+    return {
+      ok: snapshot.near <= 0.0011 && snapshot.far >= 9999,
+      near: snapshot.near,
+      far: snapshot.far
+    };
+  });
 }
 
 async function measureForegroundLighting(page, nearDataUrl, farDataUrl) {

@@ -118,6 +118,10 @@ const exportSettings = {
 };
 const PREVIEW_PIXEL_RATIO_CAP = 1.25;
 const EXPORT_RENDER_PIXEL_RATIO = 1;
+const CAMERA_DEFAULT_NEAR = 0.001;
+const CAMERA_DEFAULT_FAR = 10000;
+const CAMERA_ORBIT_MAX_DISTANCE = 10000;
+const CAMERA_FOCUS_DISTANCE_MAX = 10000;
 const PICK_POINT_SAMPLE_LIMIT = 16000;
 const MODEL_PICK_BOX_PADDING_PX = 42;
 const CAMERA_PREVIEW_ORBIT_PAUSE_MS = 160;
@@ -259,6 +263,7 @@ const controlsUi = {
   cameraModeHint: document.querySelector('#cameraModeHint'),
   timeline: document.querySelector('#timeline'),
   duration: document.querySelector('#duration'),
+  cameraPathMode: document.querySelector('#cameraPathMode'),
   cameraCurve: document.querySelector('#cameraCurve'),
   cameraCurveStrength: document.querySelector('#cameraCurveStrength'),
   handControlEnabled: document.querySelector('#handControlEnabled'),
@@ -546,12 +551,14 @@ const cameraAnimation = {
   duration: Number(exportSettings.duration || controlsUi.duration.value),
   time: 0,
   playing: false,
+  pathMode: controlsUi.cameraPathMode?.value || 'linear',
   curve: controlsUi.cameraCurve?.value || 'easeInOut',
   curveStrength: Number(controlsUi.cameraCurveStrength?.value || 2),
   keyframes: []
 };
 const parameterKeyframes = [];
 const parameterKeyframeButtons = new Map();
+const VALID_CAMERA_PATH_MODES = new Set(['linear', 'bezier', 'smooth']);
 const VALID_CAMERA_CURVES = new Set(['linear', 'easeInOut', 'easeIn', 'easeOut', 'hold']);
 const undoHistory = {
   past: [],
@@ -588,6 +595,7 @@ function captureUndoSnapshot(label = '编辑') {
     cameraAnimation: {
       duration: cameraAnimation.duration,
       time: cameraAnimation.time,
+      pathMode: cameraAnimation.pathMode,
       curve: cameraAnimation.curve,
       curveStrength: cameraAnimation.curveStrength
     },
@@ -743,6 +751,7 @@ async function undoLastAction() {
     state.worldExport = Boolean(entry.snapshot.worldExport);
     controlsUi.worldExport.checked = state.worldExport;
     cameraAnimation.duration = entry.snapshot.cameraAnimation.duration;
+    cameraAnimation.pathMode = normalizeCameraPathMode(entry.snapshot.cameraAnimation.pathMode);
     cameraAnimation.curve = entry.snapshot.cameraAnimation.curve;
     cameraAnimation.curveStrength = entry.snapshot.cameraAnimation.curveStrength;
     controlsUi.duration.value = cameraAnimation.duration;
@@ -1416,9 +1425,9 @@ const lightHandleGroup = new THREE.Group();
 lightHandleGroup.visible = !exportSettings.hideUi;
 scene.add(lightHandleGroup);
 
-const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.001, 100);
-const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, 0.001, 100);
-const outputFrameCamera = new THREE.PerspectiveCamera(48, 16 / 9, 0.001, 100);
+const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
+const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
+const outputFrameCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
 camera.filmGauge = state.cameraSensorWidth;
 camera.setFocalLength(state.cameraFocalLength);
 const CAMERA_PREVIEW_INTERVAL_MS = exportSettings.hideUi ? 1000 / 15 : 1000 / 10;
@@ -1435,7 +1444,7 @@ const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enableDamping = true;
 orbit.dampingFactor = 0.07;
 orbit.minDistance = 0.02;
-orbit.maxDistance = 100;
+orbit.maxDistance = CAMERA_ORBIT_MAX_DISTANCE;
 const clock = new THREE.Clock();
 const cameraPathGroup = new THREE.Group();
 cameraPathGroup.visible = !exportSettings.hideUi;
@@ -1452,7 +1461,11 @@ transformControls.addEventListener('dragging-changed', (event) => {
   }
   orbit.enabled = !event.value;
   if (!event.value) {
-    if (selectedImageSplat) {
+    if (selectedCameraBezierHandle) {
+      commitSelectedBezierHandleTransform();
+      rebuildCameraPath();
+      selectCameraBezierHandle(selectedCameraBezierHandle.keyframeId, selectedCameraBezierHandle.type);
+    } else if (selectedImageSplat) {
       commitSelectedImageSplatTransform();
       syncImageSplatTransformButtons();
     } else if (selectedVideoPlaneId) {
@@ -1473,6 +1486,13 @@ transformControls.addEventListener('dragging-changed', (event) => {
   }
 });
 transformControls.addEventListener('objectChange', () => {
+  if (selectedCameraBezierHandle) {
+    commitSelectedBezierHandleTransform();
+    updateCameraPathCurve();
+    setCameraPreviewDirty();
+    return;
+  }
+
   if (selectedImageSplat) {
     commitSelectedImageSplatTransform();
     return;
@@ -1522,6 +1542,7 @@ scene.add(selectedTransformProxy);
 let selectedKeyframeId = null;
 let selectedKeyframeObject = null;
 let selectedKeyframeMode = 'translate';
+let selectedCameraBezierHandle = null;
 const sceneLights = [];
 let selectedLightId = null;
 let selectedLightMode = 'translate';
@@ -3978,6 +3999,7 @@ async function activateSceneModel(recordId, options = {}) {
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
   disposeSceneModelSnapshot(record);
   removeImageSplatObject();
   await removeRealSplatObject();
@@ -4117,6 +4139,7 @@ function getVideoPlaneDuration(record) {
 
 function normalizeVideoPlaneDescriptor(descriptor = {}, index = 0) {
   const extension = String(descriptor.extension || descriptor.payload?.extension || '').toLowerCase();
+  const playbackUrl = descriptor.playbackUrl || descriptor.proxyUrl || descriptor.url || descriptor.payload?.playbackUrl || descriptor.payload?.proxyUrl || descriptor.payload?.url;
   const width = Math.max(0.01, Number(descriptor.width) || 3);
   const rawHeight = Number(descriptor.height);
   const height = Math.max(0.01, Number.isFinite(rawHeight) && rawHeight > 0 ? rawHeight : width * 9 / 16);
@@ -4127,15 +4150,20 @@ function normalizeVideoPlaneDescriptor(descriptor = {}, index = 0) {
     path: descriptor.path || descriptor.payload?.path,
     sourcePath: descriptor.sourcePath || descriptor.payload?.sourcePath,
     dataUrl: descriptor.dataUrl || descriptor.payload?.dataUrl || null,
-    url: descriptor.url || descriptor.payload?.url,
+    url: descriptor.payload?.url,
     size: descriptor.size || descriptor.payload?.size
   };
   return {
     id: typeof descriptor.id === 'string' && descriptor.id ? descriptor.id : `video-${index}-${crypto.randomUUID()}`,
     name: descriptor.name || payload.name || `Video ${index + 1}`,
     extension,
+    playbackExtension: descriptor.playbackExtension || descriptor.payload?.playbackExtension || extension,
+    sourceExtension: descriptor.sourceExtension || descriptor.payload?.sourceExtension || extension,
     payload,
-    url: descriptor.url || payload.url || payload.dataUrl || '',
+    url: playbackUrl || payload.url || payload.dataUrl || '',
+    proxyUrl: descriptor.proxyUrl || descriptor.payload?.proxyUrl || '',
+    proxyPath: descriptor.proxyPath || descriptor.payload?.proxyPath || '',
+    proxyError: '',
     transform: normalizeVideoPlaneTransform(descriptor.transform || createDefaultVideoPlaneTransform(index)),
     width,
     height,
@@ -4202,9 +4230,58 @@ function waitForVideoMetadata(video) {
   });
 }
 
+function canPrepareMovProxy(descriptor) {
+  if (!descriptor || descriptor.extension !== 'mov') {
+    return false;
+  }
+  if (!window.electronAPI?.prepareVideoProxy) {
+    return false;
+  }
+  return Boolean(
+    descriptor.payload?.path ||
+    descriptor.payload?.sourcePath ||
+    descriptor.path ||
+    descriptor.sourcePath ||
+    descriptor.payload?.dataUrl ||
+    descriptor.dataUrl
+  );
+}
+
+async function prepareMovPlaybackProxy(descriptor) {
+  if (!canPrepareMovProxy(descriptor)) {
+    return null;
+  }
+  setStatus('Converting MOV');
+  const result = await window.electronAPI.prepareVideoProxy({
+    path: descriptor.payload?.path || descriptor.payload?.sourcePath || descriptor.path || descriptor.sourcePath || '',
+    dataUrl: descriptor.payload?.dataUrl || descriptor.dataUrl || '',
+    extension: descriptor.extension,
+    name: descriptor.name || descriptor.payload?.name || 'video.mov'
+  });
+  if (!result?.ok || !result.url) {
+    throw new Error(result?.error || 'MOV 代理转码失败。');
+  }
+  return result;
+}
+
 async function createVideoPlaneRecord(descriptor = {}, options = {}) {
   const normalized = normalizeVideoPlaneDescriptor(descriptor, videoPlaneObjects.length);
-  const url = normalized.url || normalized.payload?.url || normalized.payload?.dataUrl;
+  let url = normalized.url || normalized.payload?.url || normalized.payload?.dataUrl;
+  const originalUrl = url;
+  if (normalized.extension === 'mov') {
+    try {
+      const proxy = await prepareMovPlaybackProxy(normalized);
+      if (proxy?.url) {
+        normalized.proxyUrl = proxy.url;
+        normalized.proxyPath = proxy.path || '';
+        normalized.playbackExtension = proxy.extension || 'webm';
+        url = proxy.url;
+      }
+    } catch (error) {
+      normalized.proxyError = error?.message || String(error);
+      console.warn('MOV proxy preparation failed; trying direct playback.', error);
+    }
+  }
   if (!url) {
     throw new Error('Video has no readable URL.');
   }
@@ -4261,12 +4338,18 @@ async function createVideoPlaneRecord(descriptor = {}, options = {}) {
   const record = {
     ...normalized,
     url,
+    originalUrl,
     ownsUrl: Boolean(options.ownsUrl),
     video,
     texture,
     material,
     mesh,
     root,
+    proxyUrl: normalized.proxyUrl,
+    proxyPath: normalized.proxyPath,
+    proxyError: normalized.proxyError,
+    playbackExtension: normalized.playbackExtension,
+    sourceExtension: normalized.sourceExtension,
     metadataLoaded
   };
 
@@ -4314,7 +4397,9 @@ async function loadVideoPlaneFile(file, explicitExtension) {
     renderVideoPlaneList();
     syncVideoPlaneUi();
     if (controlsUi.videoPlaneStatus && extension === 'mov') {
-      controlsUi.videoPlaneStatus.value = `${file.name} · MOV 透明通道会在解码器支持时自动保留`;
+      controlsUi.videoPlaneStatus.value = record.proxyUrl
+        ? `${file.name} · MOV 已转为兼容代理预览，透明通道会尽量保留`
+        : `${file.name} · MOV 透明通道会在解码器支持时自动保留`;
     }
     setStatus('Ready');
     return true;
@@ -4347,7 +4432,7 @@ function disposeVideoPlaneRecord(record) {
   record.mesh?.geometry?.dispose?.();
   record.material?.dispose?.();
   if (record.ownsUrl && record.url) {
-    URL.revokeObjectURL(record.url);
+    URL.revokeObjectURL(record.originalUrl || record.url);
   }
 }
 
@@ -4411,6 +4496,7 @@ function selectVideoPlane(recordId) {
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
   renderSceneModelList();
   renderLightList();
   syncLightUi();
@@ -4511,7 +4597,11 @@ function syncVideoPlaneUi() {
   }
   if (controlsUi.videoPlaneStatus) {
     const alphaHint = record.extension === 'mov'
-      ? '；MOV 透明通道会在解码器支持时自动保留'
+      ? record.proxyUrl
+        ? '；MOV 已转为兼容代理预览，透明通道会尽量保留'
+        : record.proxyError
+          ? `；MOV 代理失败：${record.proxyError}`
+          : '；MOV 透明通道会在解码器支持时自动保留'
       : '';
     controlsUi.videoPlaneStatus.value = `${record.name || 'Video'} · ${duration.toFixed(2)}s${alphaHint}`;
   }
@@ -5193,7 +5283,7 @@ function hashUintToUnit(value) {
 function frameSharpPointCloudCamera() {
   activeCameraQuaternion = null;
   orbit.minDistance = 0.02;
-  orbit.maxDistance = 100;
+  orbit.maxDistance = CAMERA_ORBIT_MAX_DISTANCE;
   camera.position.set(0, 0.2, 5.0);
   orbit.target.set(0, 0, 0);
   camera.fov = 48;
@@ -9708,6 +9798,7 @@ function selectImageSplatObject() {
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
   renderLightList();
   syncLightUi();
   syncTransformProxyFromImageSplat();
@@ -10087,6 +10178,7 @@ function selectLightHandle(lightId) {
   selectedLightId = light.id;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
   activeCameraQuaternion = null;
   rebuildCameraPath();
   syncTransformProxyFromLight(light);
@@ -10554,7 +10646,7 @@ function resetCamera() {
 
   activeCameraQuaternion = null;
   orbit.minDistance = 0.02;
-  orbit.maxDistance = 100;
+  orbit.maxDistance = CAMERA_ORBIT_MAX_DISTANCE;
   camera.position.set(0, 0.7, 7.2);
   orbit.target.set(0, 0.05, 0);
   state.cameraFocusDistance = camera.position.distanceTo(orbit.target);
@@ -10583,7 +10675,7 @@ function frameImageSplatCamera(source) {
   }
 
   orbit.minDistance = 0.02;
-  orbit.maxDistance = 100;
+  orbit.maxDistance = CAMERA_ORBIT_MAX_DISTANCE;
   camera.position.set(0, 0.25, 5.2);
   orbit.target.set(0, 0, 0);
   camera.fov = 48;
@@ -10601,11 +10693,13 @@ function syncCameraSettingsFromState(updateUi = false) {
   state.cameraFocalLength = THREE.MathUtils.clamp(Number(state.cameraFocalLength) || 22.74, 8, 300);
   state.cameraDisplaySize = THREE.MathUtils.clamp(Number(state.cameraDisplaySize) || 1, 0.2, 5);
   state.cameraAperture = THREE.MathUtils.clamp(Number(state.cameraAperture) || 5.6, 1.2, 22);
-  state.cameraFocusDistance = THREE.MathUtils.clamp(Number(state.cameraFocusDistance) || 7.18, 0.05, 100);
+  state.cameraFocusDistance = THREE.MathUtils.clamp(Number(state.cameraFocusDistance) || 7.18, 0.05, CAMERA_FOCUS_DISTANCE_MAX);
   state.cameraDofEnabled = Boolean(state.cameraDofEnabled) && state.cameraType === 'perspective';
 
   camera.filmGauge = state.cameraSensorWidth;
   camera.setFocalLength(state.cameraFocalLength);
+  camera.near = THREE.MathUtils.clamp(Number(camera.near) || CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_NEAR, 1);
+  camera.far = Math.max(Number(camera.far) || CAMERA_DEFAULT_FAR, CAMERA_DEFAULT_FAR);
   camera.updateProjectionMatrix();
 
   if (updateUi) {
@@ -10806,8 +10900,8 @@ function copyCameraProjection(source, target, aspect) {
   target.filmGauge = state.cameraSensorWidth;
   target.filmOffset = source.filmOffset;
   target.focus = source.focus;
-  target.near = source.near;
-  target.far = source.far;
+  target.near = THREE.MathUtils.clamp(Number(source.near) || CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_NEAR, 1);
+  target.far = Math.max(Number(source.far) || CAMERA_DEFAULT_FAR, CAMERA_DEFAULT_FAR);
   target.aspect = Math.max(0.01, aspect);
   target.up.copy(source.up);
   target.setFocalLength(state.cameraFocalLength);
@@ -11022,10 +11116,10 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
     camera.zoom = sourceZoom;
   }
   if (Number.isFinite(sourceNear) && sourceNear > 0 && sourceNear < camera.far) {
-    camera.near = sourceNear;
+    camera.near = THREE.MathUtils.clamp(sourceNear, CAMERA_DEFAULT_NEAR, 1);
   }
   if (Number.isFinite(sourceFar) && sourceFar > camera.near) {
-    camera.far = sourceFar;
+    camera.far = Math.max(sourceFar, CAMERA_DEFAULT_FAR);
   }
 
   if (snapshot.cameraType !== undefined || snapshot.type !== undefined) {
@@ -11306,6 +11400,7 @@ function clearCameraKeyframes() {
   parameterKeyframes.length = 0;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
   if (selectedImageSplat) {
     selectImageSplatObject();
   } else {
@@ -11352,6 +11447,10 @@ function normalizeCameraCurveStrength(value) {
   return THREE.MathUtils.clamp(Number.isFinite(number) ? number : 2, 0.25, 6);
 }
 
+function normalizeCameraPathMode(value) {
+  return VALID_CAMERA_PATH_MODES.has(value) ? value : 'linear';
+}
+
 function getSelectedCameraKeyframe() {
   return selectedKeyframeId
     ? cameraAnimation.keyframes.find((item) => item.id === selectedKeyframeId) || null
@@ -11362,12 +11461,26 @@ function syncCameraCurveUi() {
   const selectedKeyframe = getSelectedCameraKeyframe();
   const curve = normalizeCameraCurve(selectedKeyframe?.curve ?? cameraAnimation.curve);
   const strength = normalizeCameraCurveStrength(selectedKeyframe?.curveStrength ?? cameraAnimation.curveStrength);
+  if (controlsUi.cameraPathMode) {
+    controlsUi.cameraPathMode.value = normalizeCameraPathMode(cameraAnimation.pathMode);
+  }
   if (controlsUi.cameraCurve) {
     controlsUi.cameraCurve.value = curve;
   }
   if (controlsUi.cameraCurveStrength) {
     controlsUi.cameraCurveStrength.value = strength.toFixed(2);
   }
+}
+
+function setCameraPathMode(value) {
+  cameraAnimation.pathMode = normalizeCameraPathMode(value);
+  syncCameraCurveUi();
+  rebuildCameraPath();
+  if (cameraAnimation.keyframes.length) {
+    applyTimelineAtTime(cameraAnimation.time, { updateUi: false });
+  }
+  setCameraPreviewDirty();
+  return cameraAnimation.pathMode;
 }
 
 function setCameraCurve(curveValue, strengthValue, options = {}) {
@@ -11691,14 +11804,23 @@ function interpolateKeyframeVector(keyframes, time, property) {
     }
   }
 
-  const p0 = new THREE.Vector3().fromArray(keyframes[Math.max(0, segmentIndex - 1)][property]);
   const p1 = new THREE.Vector3().fromArray(keyframes[segmentIndex][property]);
   const p2 = new THREE.Vector3().fromArray(keyframes[segmentIndex + 1][property]);
-  const p3 = new THREE.Vector3().fromArray(keyframes[Math.min(keyframes.length - 1, segmentIndex + 2)][property]);
   const startTime = keyframes[segmentIndex].time;
   const endTime = keyframes[segmentIndex + 1].time;
   const t = applyCameraCurve((time - startTime) / Math.max(endTime - startTime, 0.0001), keyframes[segmentIndex]);
-  return catmullRom(p0, p1, p2, p3, t);
+  const pathMode = normalizeCameraPathMode(cameraAnimation.pathMode);
+  if (property === 'position' && pathMode === 'bezier') {
+    const c1 = p1.clone().add(getCameraBezierHandleOffset(keyframes, segmentIndex, 'out'));
+    const c2 = p2.clone().add(getCameraBezierHandleOffset(keyframes, segmentIndex + 1, 'in'));
+    return cubicBezier(p1, c1, c2, p2, t);
+  }
+  if (property === 'position' && pathMode === 'smooth') {
+    const p0 = new THREE.Vector3().fromArray(keyframes[Math.max(0, segmentIndex - 1)][property]);
+    const p3 = new THREE.Vector3().fromArray(keyframes[Math.min(keyframes.length - 1, segmentIndex + 2)][property]);
+    return catmullRom(p0, p1, p2, p3, t);
+  }
+  return p1.lerp(p2, t);
 }
 
 function interpolateKeyframeQuaternion(keyframes, time) {
@@ -11756,6 +11878,53 @@ function getKeyframeDistance(keyframe) {
 
 function getKeyframeForward(keyframe) {
   return new THREE.Vector3(0, 0, -1).applyQuaternion(getKeyframeQuaternion(keyframe)).normalize();
+}
+
+function getVector3Array(value) {
+  if (!Array.isArray(value) || value.length < 3) {
+    return null;
+  }
+  const values = value.slice(0, 3).map(Number);
+  return values.every(Number.isFinite) ? values : null;
+}
+
+function getCameraBezierHandleOffset(keyframes, index, type) {
+  const keyframe = keyframes[index];
+  const saved = getVector3Array(type === 'in' ? keyframe?.handleIn : keyframe?.handleOut);
+  if (saved) {
+    return new THREE.Vector3().fromArray(saved);
+  }
+
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  if (type === 'out') {
+    const next = keyframes[index + 1];
+    const previous = keyframes[index - 1];
+    if (next) {
+      return new THREE.Vector3().fromArray(next.position).sub(position).multiplyScalar(1 / 3);
+    }
+    if (previous) {
+      return position.clone().sub(new THREE.Vector3().fromArray(previous.position)).multiplyScalar(1 / 3);
+    }
+  } else {
+    const previous = keyframes[index - 1];
+    const next = keyframes[index + 1];
+    if (previous) {
+      return new THREE.Vector3().fromArray(previous.position).sub(position).multiplyScalar(1 / 3);
+    }
+    if (next) {
+      return position.clone().sub(new THREE.Vector3().fromArray(next.position)).multiplyScalar(1 / 3);
+    }
+  }
+  return new THREE.Vector3();
+}
+
+function cubicBezier(p0, c1, c2, p3, t) {
+  const u = 1 - t;
+  return new THREE.Vector3()
+    .addScaledVector(p0, u * u * u)
+    .addScaledVector(c1, 3 * u * u * t)
+    .addScaledVector(c2, 3 * u * t * t)
+    .addScaledVector(p3, t * t * t);
 }
 
 function catmullRom(p0, p1, p2, p3, t) {
@@ -11830,7 +11999,24 @@ function rebuildCameraPath() {
     const marker = createCameraMarker(index, keyframe, position, target);
     cameraPathGroup.add(marker);
   });
+  if (normalizeCameraPathMode(cameraAnimation.pathMode) === 'bezier' && keyframes.length >= 2) {
+    keyframes.forEach((keyframe, index) => {
+      const handles = createCameraBezierHandles(index, keyframe, keyframes);
+      if (handles) {
+        cameraPathGroup.add(handles);
+      }
+    });
+  }
   if (selectedKeyframeId) {
+    if (
+      selectedCameraBezierHandle &&
+      normalizeCameraPathMode(cameraAnimation.pathMode) === 'bezier' &&
+      selectCameraBezierHandle(selectedCameraBezierHandle.keyframeId, selectedCameraBezierHandle.type)
+    ) {
+      updateCameraPathVisibility();
+      return;
+    }
+    selectedCameraBezierHandle = null;
     selectCameraKeyframeHandle(selectedKeyframeId, { preserveTimeline: true });
   }
   updateCameraPathVisibility();
@@ -11983,6 +12169,68 @@ function createCameraMarker(index, keyframe, position, target) {
   return group;
 }
 
+function createCameraBezierHandles(index, keyframe, keyframes) {
+  const position = new THREE.Vector3().fromArray(keyframe.position);
+  const group = new THREE.Group();
+  group.name = `Camera Bezier Handles ${index + 1}`;
+  group.userData.cameraBezierHandleGroup = true;
+  group.userData.keyframeId = keyframe.id;
+
+  if (index > 0) {
+    group.add(createCameraBezierHandle(keyframe, position, getCameraBezierHandleOffset(keyframes, index, 'in'), 'in'));
+  }
+  if (index < keyframes.length - 1) {
+    group.add(createCameraBezierHandle(keyframe, position, getCameraBezierHandleOffset(keyframes, index, 'out'), 'out'));
+  }
+
+  return group.children.length ? group : null;
+}
+
+function createCameraBezierHandle(keyframe, position, offset, type) {
+  const world = position.clone().add(offset);
+  const color = type === 'out' ? 0x2de1ea : 0xffbf36;
+  const selected = selectedCameraBezierHandle?.keyframeId === keyframe.id && selectedCameraBezierHandle?.type === type;
+  const group = new THREE.Group();
+  group.name = `Camera ${type === 'out' ? 'Out' : 'In'} Bezier Handle`;
+  group.userData.cameraBezierHandleGroup = true;
+  group.userData.keyframeId = keyframe.id;
+  group.userData.handleType = type;
+
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([position, world]),
+    new THREE.LineDashedMaterial({
+      color,
+      dashSize: 0.08,
+      gapSize: 0.06,
+      transparent: true,
+      opacity: selected ? 0.98 : 0.62,
+      depthTest: false
+    })
+  );
+  line.computeLineDistances();
+  line.userData.cameraBezierTangent = true;
+  line.userData.keyframeId = keyframe.id;
+  line.userData.handleType = type;
+  group.add(line);
+
+  const handle = new THREE.Mesh(
+    new THREE.SphereGeometry(selected ? 0.14 : 0.11, 18, 12),
+    new THREE.MeshBasicMaterial({
+      color: selected ? 0xffffff : color,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false
+    })
+  );
+  handle.position.copy(world);
+  handle.userData.cameraBezierHandle = true;
+  handle.userData.keyframeId = keyframe.id;
+  handle.userData.handleType = type;
+  group.add(handle);
+
+  return group;
+}
+
 function updateCameraMarkerDisplaySize() {
   if (!cameraPathGroup) {
     return;
@@ -12065,6 +12313,28 @@ function handlePathPointerDown(event) {
     }
   }
 
+  const cameraPathHit = findCameraPathPointerHit();
+  if (cameraPathHit) {
+    consumePointerEvent(event);
+    cameraAnimation.playing = false;
+    activeCameraQuaternion = null;
+    updatePlayButton();
+    if (cameraPathHit.type === 'bezier') {
+      const keyframe = cameraAnimation.keyframes.find((item) => item.id === cameraPathHit.keyframeId);
+      if (keyframe) {
+        setCameraTime(keyframe.time, false);
+      }
+      selectCameraBezierHandle(cameraPathHit.keyframeId, cameraPathHit.handleType, { frameIfTooClose: true });
+    } else {
+      const keyframe = cameraAnimation.keyframes.find((item) => item.id === cameraPathHit.keyframeId);
+      if (keyframe) {
+        setCameraTime(keyframe.time, false);
+        selectCameraKeyframeHandle(cameraPathHit.keyframeId, { frameIfTooClose: true });
+      }
+    }
+    return;
+  }
+
   const shouldCheckActiveModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || selectedVideoPlaneId || !selectedSceneModelId);
   const modelRecordIdUnderPointer = findSceneModelIdFromPointerHit({ includeActive: shouldCheckActiveModel });
   if (modelRecordIdUnderPointer) {
@@ -12079,20 +12349,6 @@ function handlePathPointerDown(event) {
     return;
   }
 
-  const keyframeIdFromPointer = findCameraKeyframeIdFromPointer();
-
-  if (keyframeIdFromPointer) {
-    const keyframe = cameraAnimation.keyframes.find((item) => item.id === keyframeIdFromPointer);
-    if (keyframe) {
-      consumePointerEvent(event);
-      cameraAnimation.playing = false;
-      activeCameraQuaternion = null;
-      updatePlayButton();
-      setCameraTime(keyframe.time, false);
-      selectCameraKeyframeHandle(keyframeIdFromPointer, { frameIfTooClose: true });
-      return;
-    }
-  }
 }
 
 function consumePointerEvent(event) {
@@ -12125,6 +12381,38 @@ function isRaycastHitVisible(object) {
 
   const materials = Array.isArray(object.material) ? object.material : [object.material];
   return materials.every((material) => !material || material.visible !== false);
+}
+
+function findCameraPathPointerHit() {
+  if (!cameraPathGroup.visible) {
+    return null;
+  }
+
+  const previousLineThreshold = raycaster.params.Line?.threshold ?? 1;
+  raycaster.params.Line = raycaster.params.Line || {};
+  raycaster.params.Line.threshold = 0.14;
+  const hit = raycaster
+    .intersectObjects(cameraPathGroup.children, true)
+    .find((item) => item.object.userData.cameraBezierHandle || item.object.userData.keyframeHandle);
+  raycaster.params.Line.threshold = previousLineThreshold;
+
+  if (hit?.object?.userData?.cameraBezierHandle) {
+    return {
+      type: 'bezier',
+      keyframeId: hit.object.userData.keyframeId,
+      handleType: hit.object.userData.handleType
+    };
+  }
+
+  if (hit?.object?.userData?.keyframeId) {
+    return {
+      type: 'keyframe',
+      keyframeId: hit.object.userData.keyframeId
+    };
+  }
+
+  const keyframeId = findCameraKeyframeIdFromPointer();
+  return keyframeId ? { type: 'keyframe', keyframeId } : null;
 }
 
 function findCameraKeyframeIdFromPointer() {
@@ -12454,11 +12742,100 @@ function isSceneModelPickObject(object) {
   return false;
 }
 
+function selectCameraBezierHandle(keyframeId, type, options = {}) {
+  if (normalizeCameraPathMode(cameraAnimation.pathMode) !== 'bezier') {
+    return false;
+  }
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === keyframeId);
+  const handle = findCameraBezierHandleObject(keyframeId, type);
+  if (!keyframe || !handle) {
+    selectedCameraBezierHandle = null;
+    return false;
+  }
+
+  selectedImageSplat = false;
+  selectedVideoPlaneId = null;
+  selectedLightId = null;
+  selectedKeyframeId = keyframe.id;
+  selectedKeyframeObject = findCameraMarkerObject(keyframe.id);
+  selectedCameraBezierHandle = { keyframeId: keyframe.id, type, object: handle };
+  renderLightList();
+  syncLightUi();
+  transformControls.setMode('translate');
+  transformControls.setSpace('world');
+  transformControls.attach(handle);
+  transformControls.visible = true;
+  transformControls.enabled = true;
+  updateKeyframeModeButtons();
+  syncCameraCurveUi();
+
+  if (options.frameIfTooClose) {
+    frameKeyframeForEditing(keyframe);
+  }
+  return true;
+}
+
+function findCameraBezierHandleObject(keyframeId, type) {
+  let found = null;
+  cameraPathGroup.traverse((child) => {
+    if (
+      !found &&
+      child.userData?.cameraBezierHandle &&
+      child.userData.keyframeId === keyframeId &&
+      child.userData.handleType === type
+    ) {
+      found = child;
+    }
+  });
+  return found;
+}
+
+function commitSelectedBezierHandleTransform() {
+  if (!selectedCameraBezierHandle?.keyframeId || !selectedCameraBezierHandle?.type) {
+    return null;
+  }
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === selectedCameraBezierHandle.keyframeId);
+  const handleObject = transformControls.object || selectedCameraBezierHandle.object;
+  if (!keyframe || !handleObject) {
+    return null;
+  }
+  const base = new THREE.Vector3().fromArray(keyframe.position);
+  const offset = handleObject.position.clone().sub(base);
+  if (selectedCameraBezierHandle.type === 'in') {
+    keyframe.handleIn = offset.toArray();
+  } else {
+    keyframe.handleOut = offset.toArray();
+  }
+  selectedCameraBezierHandle.object = handleObject;
+  updateSelectedBezierHandleTangent();
+  return keyframe;
+}
+
+function updateSelectedBezierHandleTangent() {
+  if (!selectedCameraBezierHandle?.object) {
+    return;
+  }
+  const keyframe = cameraAnimation.keyframes.find((item) => item.id === selectedCameraBezierHandle.keyframeId);
+  if (!keyframe) {
+    return;
+  }
+  const base = new THREE.Vector3().fromArray(keyframe.position);
+  const handle = selectedCameraBezierHandle.object;
+  const line = handle.parent?.children?.find((child) => child.userData?.cameraBezierTangent);
+  if (!line) {
+    return;
+  }
+  line.geometry.dispose();
+  line.geometry = new THREE.BufferGeometry().setFromPoints([base, handle.position]);
+  line.computeLineDistances?.();
+}
+
 function selectCameraKeyframeHandle(keyframeId, options = {}) {
   const { frameIfTooClose = false } = options;
   selectedImageSplat = false;
   selectedVideoPlaneId = null;
   selectedLightId = null;
+  selectedCameraBezierHandle = null;
   renderLightList();
   syncLightUi();
   selectedKeyframeId = keyframeId;
@@ -12490,7 +12867,7 @@ function findCameraMarkerObject(keyframeId) {
 }
 
 function commitSelectedKeyframeTransform() {
-  if (!selectedKeyframeId) {
+  if (!selectedKeyframeId || selectedCameraBezierHandle) {
     return null;
   }
 
@@ -12651,6 +13028,14 @@ function importCameraKeyframes(keyframes) {
       if (keyframe.curveStrength !== undefined) {
         imported.curveStrength = normalizeCameraCurveStrength(keyframe.curveStrength);
       }
+      const handleIn = getVector3Array(keyframe.handleIn);
+      const handleOut = getVector3Array(keyframe.handleOut);
+      if (handleIn) {
+        imported.handleIn = handleIn;
+      }
+      if (handleOut) {
+        imported.handleOut = handleOut;
+      }
       imported.quaternion = getKeyframeQuaternion({
         ...imported,
         quaternion: Array.isArray(keyframe.quaternion) ? keyframe.quaternion : undefined
@@ -12688,7 +13073,8 @@ async function exportMovFromUi() {
       effectStartTime: clock.elapsedTime,
       cameraCurve: {
         curve: cameraAnimation.curve,
-        strength: cameraAnimation.curveStrength
+        strength: cameraAnimation.curveStrength,
+        pathMode: cameraAnimation.pathMode
       },
       options: captureKeyframeOptions(),
       cameraKeyframes: getSortedCameraKeyframes(),
@@ -12802,7 +13188,7 @@ function captureProjectDocument() {
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.8',
+    appVersion: '1.0.9',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
@@ -12813,6 +13199,7 @@ function captureProjectDocument() {
       cameraAnimation: {
         duration: cameraAnimation.duration,
         time: cameraAnimation.time,
+        pathMode: cameraAnimation.pathMode,
         curve: cameraAnimation.curve,
         curveStrength: cameraAnimation.curveStrength
       },
@@ -13034,6 +13421,7 @@ async function applyProjectDocument(document) {
     await applyOptionsSnapshot(project.options || {}, false);
     importSceneLights(Array.isArray(project.lights) ? project.lights : [], false);
     setCameraDuration(project.cameraAnimation?.duration ?? 5);
+    setCameraPathMode(project.cameraAnimation?.pathMode ?? 'linear');
     setCameraCurve(project.cameraAnimation?.curve, project.cameraAnimation?.curveStrength, { applyToSelected: false });
     setCameraSettings(project.cameraSettings || {}, false);
     applyCameraSnapshot(project.cameraSnapshot || {}, { pose: true });
@@ -13793,9 +14181,11 @@ window.particleStudio = {
   },
   setDissolve: (value) => updateDissolve(value),
   setCameraCurve: (curve, strength, options = {}) => setCameraCurve(curve, strength, options),
+  setCameraPathMode: (mode) => setCameraPathMode(mode),
   getCameraCurve: () => ({
     curve: cameraAnimation.curve,
     strength: cameraAnimation.curveStrength,
+    pathMode: cameraAnimation.pathMode,
     selectedKeyframeId
   }),
   setCameraKeyframes: (keyframes) => importCameraKeyframes(keyframes),
@@ -14015,6 +14405,9 @@ window.particleStudio = {
       id: record.id,
       name: record.name,
       extension: record.extension,
+      playbackExtension: record.playbackExtension,
+      hasProxy: Boolean(record.proxyUrl),
+      proxyError: record.proxyError || '',
       hasPath: Boolean(record.payload?.path),
       hasDataUrl: Boolean(record.payload?.dataUrl),
       width: record.width,
@@ -14059,13 +14452,17 @@ window.particleStudio = {
         ? 'video'
         : selectedLightId
           ? 'light'
-          : selectedKeyframeId
-            ? 'camera'
+          : selectedCameraBezierHandle
+            ? 'camera-bezier'
+            : selectedKeyframeId
+              ? 'camera'
             : selectedSceneModelId
               ? 'model'
               : 'none',
     proxyPosition: (transformControls.object === activeModelTransformRoot
       ? activeModelTransformRoot.position
+      : selectedCameraBezierHandle && transformControls.object
+        ? transformControls.object.position
       : selectedVideoPlaneId && transformControls.object
         ? transformControls.object.position
         : selectedTransformProxy.position).toArray(),
@@ -14074,7 +14471,11 @@ window.particleStudio = {
     cameraMarkerScale: selectedKeyframeObject?.scale?.toArray() || null,
     cameraDisplaySize: state.cameraDisplaySize,
     keyframeMode: selectedKeyframeMode,
+    bezierHandle: selectedCameraBezierHandle
+      ? { keyframeId: selectedCameraBezierHandle.keyframeId, type: selectedCameraBezierHandle.type }
+      : null,
     attachedToProxy: transformControls.object === selectedTransformProxy,
+    attachedToBezierHandle: Boolean(selectedCameraBezierHandle && transformControls.object === selectedCameraBezierHandle.object),
     attachedToModelRoot: transformControls.object === activeModelTransformRoot,
     attachedToVideoRoot: Boolean(selectedVideoPlaneId && transformControls.object === getSelectedVideoPlane()?.root),
     visible: transformControls.visible
@@ -14297,7 +14698,7 @@ function normalizeNumericStateValue(key, value) {
   }
 
   if (key === 'cameraFocusDistance') {
-    return THREE.MathUtils.clamp(value, 0.05, 100);
+    return THREE.MathUtils.clamp(value, 0.05, CAMERA_FOCUS_DISTANCE_MAX);
   }
 
   if (CLAMP_01_FIELDS.has(key)) {
@@ -14461,6 +14862,10 @@ controlsUi.timeline.addEventListener('input', () => {
 
 controlsUi.duration.addEventListener('change', () => {
   setCameraDuration(Number(controlsUi.duration.value));
+});
+
+controlsUi.cameraPathMode?.addEventListener('change', () => {
+  setCameraPathMode(controlsUi.cameraPathMode.value);
 });
 
 controlsUi.cameraCurve?.addEventListener('change', () => {
