@@ -18,6 +18,7 @@ import {
   Camera,
   createIcons,
   Download,
+  Film,
   FolderOpen,
   KeyRound,
   Lightbulb,
@@ -43,6 +44,7 @@ createIcons({
     Box,
     Camera,
     Download,
+    Film,
     FolderOpen,
     KeyRound,
     Lightbulb,
@@ -96,6 +98,7 @@ const RASTER_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp']);
 const PANORAMA_TEXTURE_EXTENSIONS = new Set(['hdr', 'exr']);
 const IMAGE_EXTENSIONS = new Set([...RASTER_IMAGE_EXTENSIONS, ...PANORAMA_TEXTURE_EXTENSIONS]);
 const GAUSSIAN_SPLAT_EXTENSIONS = new Set(['ply', 'splat', 'ksplat', 'spz']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm']);
 const INLINE_MODEL_PAYLOAD_LIMIT = 160 * 1024 * 1024;
 const MIN_PARTICLE_COUNT = 1;
 const SHARP_PLY_PREVIEW_LIMIT = 320000;
@@ -215,6 +218,20 @@ const controlsUi = {
   moveSceneModel: document.querySelector('#moveSceneModel'),
   rotateSceneModel: document.querySelector('#rotateSceneModel'),
   scaleSceneModel: document.querySelector('#scaleSceneModel'),
+  videoPlaneList: document.querySelector('#videoPlaneList'),
+  addVideoPlane: document.querySelector('#addVideoPlane'),
+  duplicateVideoPlane: document.querySelector('#duplicateVideoPlane'),
+  deleteVideoPlane: document.querySelector('#deleteVideoPlane'),
+  moveVideoPlane: document.querySelector('#moveVideoPlane'),
+  rotateVideoPlane: document.querySelector('#rotateVideoPlane'),
+  scaleVideoPlane: document.querySelector('#scaleVideoPlane'),
+  videoPlaneWidth: document.querySelector('#videoPlaneWidth'),
+  videoPlaneHeight: document.querySelector('#videoPlaneHeight'),
+  videoPlaneOpacity: document.querySelector('#videoPlaneOpacity'),
+  videoPlanePlaybackRate: document.querySelector('#videoPlanePlaybackRate'),
+  videoPlaneTime: document.querySelector('#videoPlaneTime'),
+  videoPlaneLoop: document.querySelector('#videoPlaneLoop'),
+  videoPlaneStatus: document.querySelector('#videoPlaneStatus'),
   morphProgress: document.querySelector('#morphProgress'),
   morphFlow: document.querySelector('#morphFlow'),
   morphScatter: document.querySelector('#morphScatter'),
@@ -356,6 +373,11 @@ const outputUi = {
   cameraFocalLength: document.querySelector('#cameraFocalLengthValue'),
   cameraAperture: document.querySelector('#cameraApertureValue'),
   cameraFocusDistance: document.querySelector('#cameraFocusDistanceValue'),
+  videoPlaneWidth: document.querySelector('#videoPlaneWidthValue'),
+  videoPlaneHeight: document.querySelector('#videoPlaneHeightValue'),
+  videoPlaneOpacity: document.querySelector('#videoPlaneOpacityValue'),
+  videoPlanePlaybackRate: document.querySelector('#videoPlanePlaybackRateValue'),
+  videoPlaneTime: document.querySelector('#videoPlaneTimeValue'),
   handControlInfluence: document.querySelector('#handControlInfluenceValue'),
   handControlSmoothing: document.querySelector('#handControlSmoothingValue'),
   handControlFps: document.querySelector('#handControlFpsValue'),
@@ -575,6 +597,8 @@ function captureUndoSnapshot(label = '编辑') {
     worldExport: state.worldExport,
     sceneModels: captureUndoSceneModels(),
     activeSceneModelId: selectedSceneModelId,
+    videoPlanes: cloneUndoValue(serializeVideoPlanes()),
+    activeVideoPlaneId: selectedVideoPlaneId,
     imageSplatTransform: imageSplatRoot || realSplatRoot ? cloneUndoValue(captureImageSplatTransform()) : null
   };
 }
@@ -598,6 +622,8 @@ function getUndoSnapshotFingerprint(snapshot) {
       effectRotation: record.effectRotation
     })),
     activeSceneModelId: snapshot.activeSceneModelId,
+    videoPlanes: snapshot.videoPlanes,
+    activeVideoPlaneId: snapshot.activeVideoPlaneId,
     imageSplatTransform: snapshot.imageSplatTransform
   });
 }
@@ -712,6 +738,7 @@ async function undoLastAction() {
   setStatus(`Undo: ${entry.snapshot.label}`);
   try {
     await restoreUndoSceneModels(entry.snapshot.sceneModels, entry.snapshot.activeSceneModelId);
+    await importVideoPlanes(entry.snapshot.videoPlanes, { selectId: entry.snapshot.activeVideoPlaneId });
     await applyOptionsSnapshot(entry.snapshot.options, true);
     state.worldExport = Boolean(entry.snapshot.worldExport);
     controlsUi.worldExport.checked = state.worldExport;
@@ -1428,6 +1455,9 @@ transformControls.addEventListener('dragging-changed', (event) => {
     if (selectedImageSplat) {
       commitSelectedImageSplatTransform();
       syncImageSplatTransformButtons();
+    } else if (selectedVideoPlaneId) {
+      commitSelectedVideoPlaneTransform();
+      renderVideoPlaneList();
     } else if (selectedLightId) {
       commitSelectedLightTransform();
       syncLightUi();
@@ -1445,6 +1475,11 @@ transformControls.addEventListener('dragging-changed', (event) => {
 transformControls.addEventListener('objectChange', () => {
   if (selectedImageSplat) {
     commitSelectedImageSplatTransform();
+    return;
+  }
+
+  if (selectedVideoPlaneId) {
+    commitSelectedVideoPlaneTransform();
     return;
   }
 
@@ -1496,6 +1531,9 @@ const sceneModelObjects = [];
 let selectedSceneModelId = null;
 let selectedSceneModelMode = 'translate';
 let sceneModelSaveSuspended = false;
+const videoPlaneObjects = [];
+let selectedVideoPlaneId = null;
+let selectedVideoPlaneMode = 'translate';
 let pendingModelImportMode = 'replace';
 let appendModelImportClickArmed = false;
 
@@ -3936,6 +3974,7 @@ async function activateSceneModel(recordId, options = {}) {
 
   selectedSceneModelId = record.id;
   selectedImageSplat = false;
+  selectedVideoPlaneId = null;
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
@@ -4053,6 +4092,633 @@ async function deleteSelectedSceneModel() {
   const next = sceneModelObjects[Math.min(index, sceneModelObjects.length - 1)];
   selectedSceneModelId = null;
   await activateSceneModel(next.id, { skipSave: true, force: true });
+}
+
+function getSelectedVideoPlane() {
+  return videoPlaneObjects.find((record) => record.id === selectedVideoPlaneId) || null;
+}
+
+function normalizeVideoPlaneTransform(transform = {}) {
+  return normalizeSceneModelTransform(transform);
+}
+
+function createDefaultVideoPlaneTransform(index = videoPlaneObjects.length) {
+  return {
+    position: [index * 0.35, 0.85, 0.65 + index * 0.08],
+    rotation: [0, 180, 0],
+    scale: [1, 1, 1]
+  };
+}
+
+function getVideoPlaneDuration(record) {
+  const duration = Number(record?.video?.duration);
+  return Number.isFinite(duration) && duration > 0 ? duration : Math.max(0.001, Number(record?.duration) || 1);
+}
+
+function normalizeVideoPlaneDescriptor(descriptor = {}, index = 0) {
+  const extension = String(descriptor.extension || descriptor.payload?.extension || '').toLowerCase();
+  const width = Math.max(0.01, Number(descriptor.width) || 3);
+  const rawHeight = Number(descriptor.height);
+  const height = Math.max(0.01, Number.isFinite(rawHeight) && rawHeight > 0 ? rawHeight : width * 9 / 16);
+  const payload = {
+    ...(descriptor.payload || {}),
+    name: descriptor.name || descriptor.payload?.name,
+    extension,
+    path: descriptor.path || descriptor.payload?.path,
+    sourcePath: descriptor.sourcePath || descriptor.payload?.sourcePath,
+    dataUrl: descriptor.dataUrl || descriptor.payload?.dataUrl || null,
+    url: descriptor.url || descriptor.payload?.url,
+    size: descriptor.size || descriptor.payload?.size
+  };
+  return {
+    id: typeof descriptor.id === 'string' && descriptor.id ? descriptor.id : `video-${index}-${crypto.randomUUID()}`,
+    name: descriptor.name || payload.name || `Video ${index + 1}`,
+    extension,
+    payload,
+    url: descriptor.url || payload.url || payload.dataUrl || '',
+    transform: normalizeVideoPlaneTransform(descriptor.transform || createDefaultVideoPlaneTransform(index)),
+    width,
+    height,
+    opacity: THREE.MathUtils.clamp(Number(descriptor.opacity ?? 1), 0, 1),
+    playbackRate: THREE.MathUtils.clamp(Number(descriptor.playbackRate ?? 1), 0, 4),
+    timeOffset: Math.max(0, Number(descriptor.timeOffset ?? descriptor.currentTime ?? 0) || 0),
+    loop: descriptor.loop !== false,
+    muted: descriptor.muted !== false,
+    duration: Math.max(0.001, Number(descriptor.duration) || 1)
+  };
+}
+
+function createVideoPayload(file, extension) {
+  const filePath = getLocalFilePath(file);
+  if (filePath) {
+    return Promise.resolve({
+      name: file.name,
+      extension,
+      path: filePath,
+      size: file.size
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      resolve({
+        name: file.name,
+        extension,
+        dataUrl: reader.result,
+        size: file.size
+      });
+    });
+    reader.addEventListener('error', () => reject(reader.error));
+    reader.readAsDataURL(file);
+  });
+}
+
+function waitForVideoMetadata(video) {
+  if (video.readyState >= 1 && Number.isFinite(video.videoWidth) && video.videoWidth > 0) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, 8000);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener('loadedmetadata', onLoaded);
+      video.removeEventListener('error', onError);
+    };
+    const onLoaded = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Video could not be decoded.'));
+    };
+    video.addEventListener('loadedmetadata', onLoaded, { once: true });
+    video.addEventListener('error', onError, { once: true });
+  });
+}
+
+async function createVideoPlaneRecord(descriptor = {}, options = {}) {
+  const normalized = normalizeVideoPlaneDescriptor(descriptor, videoPlaneObjects.length);
+  const url = normalized.url || normalized.payload?.url || normalized.payload?.dataUrl;
+  if (!url) {
+    throw new Error('Video has no readable URL.');
+  }
+
+  const video = document.createElement('video');
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+  video.muted = normalized.muted;
+  video.loop = normalized.loop;
+  video.preload = 'auto';
+  video.src = url;
+  video.playbackRate = Math.max(0.0625, normalized.playbackRate || 1);
+
+  const metadataLoaded = await waitForVideoMetadata(video);
+  const sourceWidth = Math.max(1, video.videoWidth || 16);
+  const sourceHeight = Math.max(1, video.videoHeight || 9);
+  const aspect = sourceWidth / sourceHeight;
+  if (!descriptor.height) {
+    normalized.height = Math.max(0.01, normalized.width / Math.max(aspect, 0.001));
+  }
+  normalized.duration = getVideoPlaneDuration({ video, duration: normalized.duration });
+
+  const texture = new THREE.VideoTexture(video);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: normalized.opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    toneMapped: false,
+    alphaTest: 0.001
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+  mesh.name = `${normalized.name} Plane`;
+  mesh.renderOrder = 12;
+  mesh.userData.videoPlaneId = normalized.id;
+  mesh.userData.videoPlanePickTarget = true;
+  mesh.frustumCulled = false;
+  mesh.scale.set(normalized.width, normalized.height, 1);
+
+  const root = new THREE.Group();
+  root.name = normalized.name;
+  root.userData.videoPlaneId = normalized.id;
+  root.userData.videoPlanePickTarget = true;
+  root.add(mesh);
+  applySceneModelTransformToObject(root, normalized.transform);
+  scene.add(root);
+
+  const record = {
+    ...normalized,
+    url,
+    ownsUrl: Boolean(options.ownsUrl),
+    video,
+    texture,
+    material,
+    mesh,
+    root,
+    metadataLoaded
+  };
+
+  video.addEventListener('error', () => {
+    if (record.id === selectedVideoPlaneId && controlsUi.videoPlaneStatus) {
+      controlsUi.videoPlaneStatus.value = '视频解码失败：请换用 Chromium 支持的编码，MOV 透明建议 ProRes/HEVC Alpha 或转 WebM Alpha。';
+    }
+  });
+
+  const startTime = Math.min(normalized.timeOffset, Math.max(0, record.duration - 0.001));
+  if (startTime > 0) {
+    try {
+      video.currentTime = startTime;
+    } catch {
+      // Some codecs reject early seeks before enough data is buffered.
+    }
+  }
+  video.play().catch(() => {
+    // Muted autoplay is normally allowed in Electron/Chrome, but a paused video
+    // still works for export-time seeking and manual time controls.
+  });
+  return record;
+}
+
+async function loadVideoPlaneFile(file, explicitExtension) {
+  const extension = explicitExtension || file.name.split('.').pop()?.toLowerCase();
+  if (!extension || !VIDEO_EXTENSIONS.has(extension)) {
+    setStatus('Video failed');
+    return false;
+  }
+
+  setStatus('Loading video');
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const payload = await createVideoPayload(file, extension);
+    const record = await createVideoPlaneRecord({
+      name: file.name,
+      extension,
+      payload,
+      url: objectUrl
+    }, { ownsUrl: true });
+    videoPlaneObjects.push(record);
+    selectedVideoPlaneId = record.id;
+    selectVideoPlane(record.id);
+    renderVideoPlaneList();
+    syncVideoPlaneUi();
+    if (controlsUi.videoPlaneStatus && extension === 'mov') {
+      controlsUi.videoPlaneStatus.value = `${file.name} · MOV 透明通道会在解码器支持时自动保留`;
+    }
+    setStatus('Ready');
+    return true;
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    console.error(error);
+    setStatus('Video failed');
+    if (controlsUi.videoPlaneStatus) {
+      controlsUi.videoPlaneStatus.value = `视频导入失败：${error.message || error}`;
+    }
+    return false;
+  }
+}
+
+function disposeVideoPlaneRecord(record) {
+  if (!record) {
+    return;
+  }
+  if (record.root) {
+    scene.remove(record.root);
+  }
+  try {
+    record.video?.pause?.();
+    record.video?.removeAttribute?.('src');
+    record.video?.load?.();
+  } catch {
+    // Ignore media cleanup failures.
+  }
+  record.texture?.dispose?.();
+  record.mesh?.geometry?.dispose?.();
+  record.material?.dispose?.();
+  if (record.ownsUrl && record.url) {
+    URL.revokeObjectURL(record.url);
+  }
+}
+
+function clearVideoPlanes() {
+  videoPlaneObjects.forEach(disposeVideoPlaneRecord);
+  videoPlaneObjects.length = 0;
+  selectedVideoPlaneId = null;
+  if (!selectedKeyframeId && !selectedLightId && !selectedImageSplat && !selectedVideoPlaneId && !selectedSceneModelId) {
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
+}
+
+function captureVideoPlaneTransform(record) {
+  return {
+    position: record.root.position.toArray(),
+    quaternion: record.root.quaternion.normalize().toArray(),
+    scale: record.root.scale.toArray()
+  };
+}
+
+function commitSelectedVideoPlaneTransform() {
+  const record = getSelectedVideoPlane();
+  if (!record?.root) {
+    return null;
+  }
+  record.root.quaternion.normalize();
+  record.root.updateMatrixWorld(true);
+  record.transform = captureVideoPlaneTransform(record);
+  return record;
+}
+
+function updateVideoPlaneVisual(record) {
+  if (!record) {
+    return;
+  }
+  if (record.mesh) {
+    record.mesh.scale.set(Math.max(0.01, record.width), Math.max(0.01, record.height), 1);
+  }
+  if (record.material) {
+    record.material.opacity = THREE.MathUtils.clamp(record.opacity, 0, 1);
+    record.material.transparent = true;
+    record.material.needsUpdate = true;
+  }
+  if (record.video) {
+    record.video.loop = record.loop;
+    record.video.muted = record.muted;
+    record.video.playbackRate = Math.max(0.0625, Number(record.playbackRate) || 1);
+  }
+}
+
+function selectVideoPlane(recordId) {
+  const record = videoPlaneObjects.find((item) => item.id === recordId);
+  if (!record || exportSettings.hideUi) {
+    return false;
+  }
+  selectedVideoPlaneId = record.id;
+  selectedImageSplat = false;
+  selectedLightId = null;
+  selectedKeyframeId = null;
+  selectedKeyframeObject = null;
+  renderSceneModelList();
+  renderLightList();
+  syncLightUi();
+  transformControls.setMode(selectedVideoPlaneMode);
+  transformControls.setSpace(selectedVideoPlaneMode === 'rotate' || selectedVideoPlaneMode === 'scale' ? 'local' : 'world');
+  transformControls.attach(record.root);
+  transformControls.visible = true;
+  transformControls.enabled = true;
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
+  return true;
+}
+
+function setSelectedVideoPlaneMode(mode) {
+  selectedVideoPlaneMode = ['translate', 'rotate', 'scale'].includes(mode) ? mode : 'translate';
+  if (selectedVideoPlaneId) {
+    selectVideoPlane(selectedVideoPlaneId);
+    return;
+  }
+  updateVideoPlaneTransformButtons();
+}
+
+function updateVideoPlaneTransformButtons() {
+  controlsUi.moveVideoPlane?.classList.toggle('active', selectedVideoPlaneMode === 'translate');
+  controlsUi.rotateVideoPlane?.classList.toggle('active', selectedVideoPlaneMode === 'rotate');
+  controlsUi.scaleVideoPlane?.classList.toggle('active', selectedVideoPlaneMode === 'scale');
+}
+
+function renderVideoPlaneList() {
+  if (!controlsUi.videoPlaneList) {
+    return;
+  }
+  controlsUi.videoPlaneList.innerHTML = '';
+  videoPlaneObjects.forEach((record, index) => {
+    const button = document.createElement('button');
+    button.className = `video-plane-item${record.id === selectedVideoPlaneId ? ' active' : ''}`;
+    button.type = 'button';
+    button.dataset.videoPlaneId = record.id;
+    button.innerHTML = `
+      <span class="video-plane-index">${index + 1}</span>
+      <span class="video-plane-name">${record.name || 'Video'}</span>
+      <span class="video-plane-effect">${String(record.extension || 'video').toUpperCase()}</span>
+    `;
+    button.addEventListener('click', () => selectVideoPlane(record.id));
+    controlsUi.videoPlaneList.append(button);
+  });
+  updateVideoPlaneTransformButtons();
+}
+
+function syncVideoPlaneUi() {
+  const record = getSelectedVideoPlane();
+  const hasRecord = Boolean(record);
+  [
+    controlsUi.duplicateVideoPlane,
+    controlsUi.deleteVideoPlane,
+    controlsUi.moveVideoPlane,
+    controlsUi.rotateVideoPlane,
+    controlsUi.scaleVideoPlane,
+    controlsUi.videoPlaneWidth,
+    controlsUi.videoPlaneHeight,
+    controlsUi.videoPlaneOpacity,
+    controlsUi.videoPlanePlaybackRate,
+    controlsUi.videoPlaneTime,
+    controlsUi.videoPlaneLoop,
+    outputUi.videoPlaneWidth,
+    outputUi.videoPlaneHeight,
+    outputUi.videoPlaneOpacity,
+    outputUi.videoPlanePlaybackRate,
+    outputUi.videoPlaneTime
+  ].forEach((control) => {
+    if (control) {
+      control.disabled = !hasRecord;
+    }
+  });
+  if (!record) {
+    if (controlsUi.videoPlaneStatus) {
+      controlsUi.videoPlaneStatus.value = '未导入视频素材';
+    }
+    return;
+  }
+
+  const duration = getVideoPlaneDuration(record);
+  if (controlsUi.videoPlaneTime) {
+    controlsUi.videoPlaneTime.max = String(Math.max(0.001, duration));
+  }
+  setRangeValue('videoPlaneWidth', record.width);
+  setRangeValue('videoPlaneHeight', record.height);
+  setRangeValue('videoPlaneOpacity', record.opacity);
+  setRangeValue('videoPlanePlaybackRate', record.playbackRate);
+  setRangeValue('videoPlaneTime', record.timeOffset);
+  setValueInput('videoPlaneWidth', record.width);
+  setValueInput('videoPlaneHeight', record.height);
+  setValueInput('videoPlaneOpacity', record.opacity);
+  setValueInput('videoPlanePlaybackRate', record.playbackRate);
+  setValueInput('videoPlaneTime', record.timeOffset);
+  if (controlsUi.videoPlaneLoop) {
+    controlsUi.videoPlaneLoop.checked = record.loop;
+  }
+  if (controlsUi.videoPlaneStatus) {
+    const alphaHint = record.extension === 'mov'
+      ? '；MOV 透明通道会在解码器支持时自动保留'
+      : '';
+    controlsUi.videoPlaneStatus.value = `${record.name || 'Video'} · ${duration.toFixed(2)}s${alphaHint}`;
+  }
+}
+
+function updateSelectedVideoPlaneProperty(key, value) {
+  const record = getSelectedVideoPlane();
+  if (!record) {
+    syncVideoPlaneUi();
+    return;
+  }
+  if (key === 'width') {
+    record.width = THREE.MathUtils.clamp(Number(value) || record.width, 0.01, 100);
+  } else if (key === 'height') {
+    record.height = THREE.MathUtils.clamp(Number(value) || record.height, 0.01, 100);
+  } else if (key === 'opacity') {
+    record.opacity = THREE.MathUtils.clamp(Number(value), 0, 1);
+  } else if (key === 'playbackRate') {
+    record.playbackRate = THREE.MathUtils.clamp(Number(value), 0, 4);
+  } else if (key === 'timeOffset') {
+    const duration = getVideoPlaneDuration(record);
+    record.timeOffset = THREE.MathUtils.clamp(Number(value) || 0, 0, Math.max(0, duration - 0.001));
+    try {
+      record.video.currentTime = record.timeOffset;
+    } catch {
+      // Ignore unsupported seeks.
+    }
+  } else if (key === 'loop') {
+    record.loop = Boolean(value);
+  }
+  updateVideoPlaneVisual(record);
+  syncVideoPlaneUi();
+}
+
+async function duplicateSelectedVideoPlane() {
+  const record = getSelectedVideoPlane();
+  if (!record) {
+    return false;
+  }
+  commitSelectedVideoPlaneTransform();
+  const descriptor = serializeVideoPlaneRecord(record);
+  descriptor.id = crypto.randomUUID();
+  descriptor.name = `${record.name || 'Video'} Copy`;
+  descriptor.url = record.url;
+  descriptor.transform.position[0] += 0.35;
+  const duplicate = await createVideoPlaneRecord(descriptor, { ownsUrl: false });
+  videoPlaneObjects.push(duplicate);
+  selectVideoPlane(duplicate.id);
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
+  return true;
+}
+
+function deleteSelectedVideoPlane() {
+  const record = getSelectedVideoPlane();
+  if (!record) {
+    return false;
+  }
+  const index = videoPlaneObjects.indexOf(record);
+  disposeVideoPlaneRecord(record);
+  videoPlaneObjects.splice(index, 1);
+  selectedVideoPlaneId = videoPlaneObjects[Math.min(index, videoPlaneObjects.length - 1)]?.id || null;
+  if (selectedVideoPlaneId) {
+    selectVideoPlane(selectedVideoPlaneId);
+  } else {
+    transformControls.detach();
+    transformControls.visible = false;
+  }
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
+  return true;
+}
+
+function serializeVideoPlaneRecord(record) {
+  const payload = record.payload || {};
+  return {
+    id: record.id,
+    name: record.name,
+    extension: record.extension || payload.extension,
+    path: payload.path,
+    sourcePath: payload.sourcePath,
+    dataUrl: payload.dataUrl,
+    url: payload.url,
+    size: payload.size,
+    width: record.width,
+    height: record.height,
+    opacity: record.opacity,
+    playbackRate: record.playbackRate,
+    timeOffset: record.timeOffset,
+    loop: record.loop,
+    muted: record.muted,
+    duration: getVideoPlaneDuration(record),
+    transform: record.root ? captureVideoPlaneTransform(record) : normalizeVideoPlaneTransform(record.transform)
+  };
+}
+
+function serializeVideoPlanes() {
+  if (!videoPlaneObjects.length) {
+    return null;
+  }
+  videoPlaneObjects.forEach((record) => {
+    if (record.id === selectedVideoPlaneId) {
+      commitSelectedVideoPlaneTransform();
+    }
+  });
+  return {
+    activeId: selectedVideoPlaneId,
+    items: videoPlaneObjects.map(serializeVideoPlaneRecord)
+  };
+}
+
+async function importVideoPlanes(snapshot = {}, options = {}) {
+  const items = Array.isArray(snapshot?.items)
+    ? snapshot.items
+    : Array.isArray(snapshot)
+      ? snapshot
+      : [];
+  clearVideoPlanes();
+  if (!items.length) {
+    return false;
+  }
+  for (let index = 0; index < items.length; index += 1) {
+    const descriptor = normalizeVideoPlaneDescriptor(items[index], index);
+    const record = await createVideoPlaneRecord(descriptor);
+    videoPlaneObjects.push(record);
+  }
+  const requestedId = options.selectId || snapshot.activeId;
+  selectedVideoPlaneId = videoPlaneObjects.some((record) => record.id === requestedId)
+    ? requestedId
+    : videoPlaneObjects[0]?.id || null;
+  if (selectedVideoPlaneId && !exportSettings.hideUi) {
+    selectVideoPlane(selectedVideoPlaneId);
+  }
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
+  return true;
+}
+
+function findVideoPlaneIdFromPointerHit() {
+  const hit = raycaster
+    .intersectObjects(videoPlaneObjects.map((record) => record.root).filter(Boolean), true)
+    .find((item) => item.object.userData.videoPlanePickTarget || item.object.parent?.userData.videoPlanePickTarget);
+  return hit?.object?.userData?.videoPlaneId || hit?.object?.parent?.userData?.videoPlaneId || null;
+}
+
+function waitForVideoSeek(record, targetTime) {
+  const video = record?.video;
+  if (!video || !Number.isFinite(targetTime)) {
+    return Promise.resolve(false);
+  }
+  const duration = getVideoPlaneDuration(record);
+  const safeTime = THREE.MathUtils.clamp(targetTime, 0, Math.max(0, duration - 0.001));
+  if (Math.abs((video.currentTime || 0) - safeTime) < 0.016 && video.readyState >= 2) {
+    record.texture.needsUpdate = true;
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, 1200);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('loadeddata', onSeeked);
+      video.removeEventListener('error', onError);
+    };
+    const onSeeked = () => {
+      cleanup();
+      record.texture.needsUpdate = true;
+      resolve(true);
+    };
+    const onError = () => {
+      cleanup();
+      resolve(false);
+    };
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('loadeddata', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    try {
+      video.pause();
+      video.currentTime = safeTime;
+    } catch {
+      cleanup();
+      resolve(false);
+    }
+  });
+}
+
+async function syncVideoPlanesForRenderTime(timeSeconds = 0) {
+  if (!videoPlaneObjects.length) {
+    return;
+  }
+  await Promise.all(videoPlaneObjects.map((record) => {
+    const duration = getVideoPlaneDuration(record);
+    const playbackTime = Math.max(0, Number(record.timeOffset) || 0) + Math.max(0, Number(timeSeconds) || 0) * Math.max(0, Number(record.playbackRate) || 0);
+    const targetTime = record.loop && duration > 0.001
+      ? wrapAnimationTime(playbackTime, duration)
+      : THREE.MathUtils.clamp(playbackTime, 0, Math.max(0, duration - 0.001));
+    return waitForVideoSeek(record, targetTime);
+  }));
+}
+
+async function renderStudioFrameAsync(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSeconds) {
+  await syncVideoPlanesForRenderTime(timeSeconds);
+  return renderStudioFrame(timeSeconds, dissolve, cameraTimeSeconds);
 }
 
 async function buildImageSplatObject(source, label, options = {}) {
@@ -6863,6 +7529,11 @@ async function loadAssetFile(file, options = {}) {
     return;
   }
 
+  if (VIDEO_EXTENSIONS.has(extension)) {
+    await loadVideoPlaneFile(file, extension);
+    return;
+  }
+
   await loadModelFile(file, extension, options);
 }
 
@@ -9033,6 +9704,7 @@ function selectImageSplatObject() {
   }
 
   selectedImageSplat = true;
+  selectedVideoPlaneId = null;
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
@@ -9411,6 +10083,7 @@ function selectLightHandle(lightId) {
   }
 
   selectedImageSplat = false;
+  selectedVideoPlaneId = null;
   selectedLightId = light.id;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
@@ -9714,6 +10387,8 @@ function syncUi() {
   controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length);
   syncEffectVisibility();
   renderSceneModelList();
+  renderVideoPlaneList();
+  syncVideoPlaneUi();
   updateParameterKeyframeButtons();
 }
 
@@ -11339,7 +12014,7 @@ function handlePathPointerDown(event) {
     // selection on the gizmo. When another object type is active, let a real
     // model surface hit switch the selection; the gizmo still wins everywhere
     // else and always wins while a model transform is already active.
-    const canSwitchToModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat);
+    const canSwitchToModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || selectedVideoPlaneId);
     const modelIdBehindTransform = canSwitchToModel
       ? findSceneModelIdFromPointerHit({ includeActive: true })
       : null;
@@ -11368,6 +12043,16 @@ function handlePathPointerDown(event) {
     return;
   }
 
+  const videoPlaneIdFromPointer = findVideoPlaneIdFromPointerHit();
+  if (videoPlaneIdFromPointer) {
+    consumePointerEvent(event);
+    cameraAnimation.playing = false;
+    activeCameraQuaternion = null;
+    updatePlayButton();
+    selectVideoPlane(videoPlaneIdFromPointer);
+    return;
+  }
+
   if (state.effectMode === 'image' && imageSplatRoot?.visible) {
     raycaster.params.Points.threshold = Math.max(0.08, state.imageSplatSize * 0.025);
     const imageIntersects = raycaster.intersectObjects(imageSplatRoot.children, true);
@@ -11380,7 +12065,7 @@ function handlePathPointerDown(event) {
     }
   }
 
-  const shouldCheckActiveModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || !selectedSceneModelId);
+  const shouldCheckActiveModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || selectedVideoPlaneId || !selectedSceneModelId);
   const modelRecordIdUnderPointer = findSceneModelIdFromPointerHit({ includeActive: shouldCheckActiveModel });
   if (modelRecordIdUnderPointer) {
     consumePointerEvent(event);
@@ -11772,6 +12457,7 @@ function isSceneModelPickObject(object) {
 function selectCameraKeyframeHandle(keyframeId, options = {}) {
   const { frameIfTooClose = false } = options;
   selectedImageSplat = false;
+  selectedVideoPlaneId = null;
   selectedLightId = null;
   renderLightList();
   syncLightUi();
@@ -12011,6 +12697,7 @@ async function exportMovFromUi() {
       lights: serializeSceneLights(),
       world: serializeWorldEnvironment(),
       imageSplat: serializeImageSplatObject(),
+      videoPlanes: serializeVideoPlanes(),
       sceneModels: serializeSceneModels(),
       morphTarget: serializeMorphTargetModel(),
       model: currentModelPayload
@@ -12110,11 +12797,12 @@ function captureProjectDocument() {
   }
 
   const sceneModels = serializeSceneModels();
+  const videoPlanes = serializeVideoPlanes();
   const exportResolution = getExportResolution();
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.7',
+    appVersion: '1.0.8',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
@@ -12137,6 +12825,7 @@ function captureProjectDocument() {
       lights: serializeSceneLights(),
       world: serializeProjectWorldEnvironment(),
       imageSplat: serializeImageSplatObject(),
+      videoPlanes,
       morphTarget: serializeMorphTargetModel(),
       sceneModels,
       model: sceneModels?.models?.length ? null : currentModelPayload
@@ -12159,6 +12848,12 @@ function prepareDesktopProjectDocument(document) {
   scene.morphTarget = preferLocalPath(sourceScene.morphTarget);
   scene.world = preferLocalPath(sourceScene.world);
   scene.imageSplat = preferLocalPath(sourceScene.imageSplat);
+  if (Array.isArray(sourceScene.videoPlanes?.items)) {
+    scene.videoPlanes = {
+      ...sourceScene.videoPlanes,
+      items: sourceScene.videoPlanes.items.map(preferLocalPath)
+    };
+  }
   if (Array.isArray(sourceScene.sceneModels?.models)) {
     scene.sceneModels = {
       ...sourceScene.sceneModels,
@@ -12308,6 +13003,12 @@ async function applyProjectDocument(document) {
       await removeRealSplatObject();
       currentImageSplatPayload = null;
       currentGaussianSplatPayload = null;
+    }
+
+    if (project.videoPlanes?.items?.length) {
+      await importVideoPlanes(project.videoPlanes);
+    } else {
+      clearVideoPlanes();
     }
 
     if (project.morphTarget?.dataUrl || project.morphTarget?.url) {
@@ -12975,8 +13676,10 @@ function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSe
 
 async function prepareExportFrame(timeSeconds = 0, cameraTimeSeconds = timeSeconds) {
   stabilizeSceneModelTransformsForRender();
+  await syncVideoPlanesForRenderTime(timeSeconds);
   renderStudioFrame(timeSeconds, undefined, cameraTimeSeconds);
   await nextFrame();
+  await syncVideoPlanesForRenderTime(timeSeconds);
   renderStudioFrame(timeSeconds, undefined, cameraTimeSeconds);
   return true;
 }
@@ -13070,6 +13773,7 @@ function getPerformanceStats() {
 window.particleStudio = {
   isReady: isStudioReady,
   renderFrame: renderStudioFrame,
+  renderFrameAsync: renderStudioFrameAsync,
   prepareExportFrame,
   undo: undoLastAction,
   canUndo: () => undoHistory.past.length > 0 && !undoHistory.restoring,
@@ -13257,6 +13961,9 @@ window.particleStudio = {
   setSceneModels: (sceneModels = {}) => importSceneModels(sceneModels),
   getSceneModels: () => serializeSceneModels(),
   selectSceneModel: (id) => activateSceneModel(id),
+  setVideoPlanes: (videoPlanes = {}) => importVideoPlanes(videoPlanes),
+  getVideoPlanes: () => serializeVideoPlanes(),
+  selectVideoPlane: (id) => selectVideoPlane(id),
   getMorphTargetModel: () => ({
     loaded: Boolean(morphTargetSource),
     name: morphTargetLabel,
@@ -13303,7 +14010,18 @@ window.particleStudio = {
           extension: currentGaussianSplatPayload.extension,
           hasDataUrl: Boolean(currentGaussianSplatPayload.dataUrl)
         }
-      : null
+      : null,
+    videoPlanes: videoPlaneObjects.map((record) => ({
+      id: record.id,
+      name: record.name,
+      extension: record.extension,
+      hasPath: Boolean(record.payload?.path),
+      hasDataUrl: Boolean(record.payload?.dataUrl),
+      width: record.width,
+      height: record.height,
+      opacity: record.opacity,
+      duration: getVideoPlaneDuration(record)
+    }))
   }),
   hasTransformHandle: () => transformControls.visible,
   captureViewCamera: () => captureCameraSnapshot(),
@@ -13333,19 +14051,24 @@ window.particleStudio = {
     selectedSceneModelId,
     selectedKeyframeId,
     selectedLightId,
+    selectedVideoPlaneId,
     selectedImageSplat,
     target: selectedImageSplat
       ? 'image'
-      : selectedLightId
-        ? 'light'
-        : selectedKeyframeId
-          ? 'camera'
-          : selectedSceneModelId
-            ? 'model'
-            : 'none',
+      : selectedVideoPlaneId
+        ? 'video'
+        : selectedLightId
+          ? 'light'
+          : selectedKeyframeId
+            ? 'camera'
+            : selectedSceneModelId
+              ? 'model'
+              : 'none',
     proxyPosition: (transformControls.object === activeModelTransformRoot
       ? activeModelTransformRoot.position
-      : selectedTransformProxy.position).toArray(),
+      : selectedVideoPlaneId && transformControls.object
+        ? transformControls.object.position
+        : selectedTransformProxy.position).toArray(),
     activeModelPosition: activeModelTransformRoot.position.toArray(),
     proxyScale: selectedTransformProxy.scale.toArray(),
     cameraMarkerScale: selectedKeyframeObject?.scale?.toArray() || null,
@@ -13353,6 +14076,7 @@ window.particleStudio = {
     keyframeMode: selectedKeyframeMode,
     attachedToProxy: transformControls.object === selectedTransformProxy,
     attachedToModelRoot: transformControls.object === activeModelTransformRoot,
+    attachedToVideoRoot: Boolean(selectedVideoPlaneId && transformControls.object === getSelectedVideoPlane()?.root),
     visible: transformControls.visible
   }),
   captureProject: () => captureProjectDocument(),
@@ -13857,6 +14581,49 @@ controlsUi.scaleSceneModel?.addEventListener('click', () => {
   setSelectedSceneModelMode('scale');
 });
 
+controlsUi.addVideoPlane?.addEventListener('click', () => {
+  modelInput?.click();
+});
+
+controlsUi.duplicateVideoPlane?.addEventListener('click', () => {
+  duplicateSelectedVideoPlane();
+});
+
+controlsUi.deleteVideoPlane?.addEventListener('click', () => {
+  deleteSelectedVideoPlane();
+});
+
+controlsUi.moveVideoPlane?.addEventListener('click', () => {
+  setSelectedVideoPlaneMode('translate');
+});
+
+controlsUi.rotateVideoPlane?.addEventListener('click', () => {
+  setSelectedVideoPlaneMode('rotate');
+});
+
+controlsUi.scaleVideoPlane?.addEventListener('click', () => {
+  setSelectedVideoPlaneMode('scale');
+});
+
+[
+  ['videoPlaneWidth', 'width'],
+  ['videoPlaneHeight', 'height'],
+  ['videoPlaneOpacity', 'opacity'],
+  ['videoPlanePlaybackRate', 'playbackRate'],
+  ['videoPlaneTime', 'timeOffset']
+].forEach(([controlKey, propertyKey]) => {
+  controlsUi[controlKey]?.addEventListener('input', () => {
+    updateSelectedVideoPlaneProperty(propertyKey, Number(controlsUi[controlKey].value));
+  });
+  outputUi[controlKey]?.addEventListener('change', () => {
+    updateSelectedVideoPlaneProperty(propertyKey, Number(outputUi[controlKey].value));
+  });
+});
+
+controlsUi.videoPlaneLoop?.addEventListener('change', () => {
+  updateSelectedVideoPlaneProperty('loop', controlsUi.videoPlaneLoop.checked);
+});
+
 lightsUi.addPoint?.addEventListener('click', () => createSceneLight('point'));
 lightsUi.addSun?.addEventListener('click', () => createSceneLight('sun'));
 lightsUi.addSpot?.addEventListener('click', () => createSceneLight('spot'));
@@ -13890,6 +14657,10 @@ const UNDO_SKIPPED_CONTROL_IDS = new Set([
   'moveSceneModel',
   'rotateSceneModel',
   'scaleSceneModel',
+  'addVideoPlane',
+  'moveVideoPlane',
+  'rotateVideoPlane',
+  'scaleVideoPlane',
   'moveLight',
   'rotateLight',
   'checkLocalSharp',
@@ -13916,6 +14687,8 @@ function getUndoableControl(target) {
         'clearKeyframes',
         'duplicateSceneModel',
         'deleteSceneModel',
+        'duplicateVideoPlane',
+        'deleteVideoPlane',
         'addPointLight',
         'addSunLight',
         'addSpotLight',
@@ -13975,6 +14748,8 @@ window.addEventListener('keydown', (event) => {
   if (event.key.toLowerCase() === 'w') {
     if (selectedImageSplat) {
       setSelectedImageSplatMode('translate');
+    } else if (selectedVideoPlaneId) {
+      setSelectedVideoPlaneMode('translate');
     } else if (selectedLightId) {
       setSelectedLightMode('translate');
     } else if (selectedKeyframeId) {
@@ -13987,6 +14762,8 @@ window.addEventListener('keydown', (event) => {
   if (event.key.toLowerCase() === 'e') {
     if (selectedImageSplat) {
       setSelectedImageSplatMode('rotate');
+    } else if (selectedVideoPlaneId) {
+      setSelectedVideoPlaneMode('rotate');
     } else if (selectedLightId) {
       setSelectedLightMode('rotate');
     } else if (selectedKeyframeId) {
@@ -13999,6 +14776,8 @@ window.addEventListener('keydown', (event) => {
   if (event.key.toLowerCase() === 'r') {
     if (selectedImageSplat) {
       setSelectedImageSplatMode('scale');
+    } else if (selectedVideoPlaneId) {
+      setSelectedVideoPlaneMode('scale');
     } else if (!selectedLightId && !selectedKeyframeId && selectedSceneModelId) {
       setSelectedSceneModelMode('scale');
     }
@@ -14023,12 +14802,12 @@ panelToggle?.addEventListener('click', () => {
 });
 renderer.domElement.addEventListener('pointerdown', handlePathPointerDown, { capture: true });
 
-modelInput.addEventListener('click', () => {
+modelInput.addEventListener('click', (event) => {
   if (!appendModelImportClickArmed) {
     pendingModelImportMode = 'replace';
   }
 
-  if (event.key.toLowerCase() === 's' && selectedKeyframeId) {
+  if (event?.key?.toLowerCase?.() === 's' && selectedKeyframeId) {
     setSelectedKeyframeMode('scale');
   }
 });
@@ -14038,6 +14817,13 @@ modelInput.addEventListener('change', () => {
   const importMode = pendingModelImportMode;
   pendingModelImportMode = 'replace';
   if (file) {
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (VIDEO_EXTENSIONS.has(extension)) {
+      recordUndoStep('导入视频');
+      loadAssetFile(file, { importMode });
+      modelInput.value = '';
+      return;
+    }
     recordUndoStep(importMode === 'append' ? '追加模型' : '导入模型');
     loadAssetFile(file, { importMode });
   }
@@ -14095,6 +14881,13 @@ morphUi.input?.addEventListener('change', () => {
 dropZone.addEventListener('drop', (event) => {
   const [file] = event.dataTransfer.files;
   if (file) {
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (VIDEO_EXTENSIONS.has(extension)) {
+      recordUndoStep('导入视频');
+      pendingModelImportMode = 'replace';
+      loadAssetFile(file, { importMode: 'replace' });
+      return;
+    }
     recordUndoStep('导入模型');
     pendingModelImportMode = 'replace';
     loadAssetFile(file, { importMode: 'replace' });

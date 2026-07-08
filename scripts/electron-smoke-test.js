@@ -16,6 +16,8 @@ const errors = [];
 const projectSmokePath = path.join(rootDir, 'verification', 'electron-project-smoke.pms');
 const streamedProjectSmokePath = path.join(rootDir, 'verification', 'electron-streamed-project-smoke.pms');
 const streamedAssetSmokePath = path.join(rootDir, 'verification', 'electron-streamed-asset-smoke.ply');
+const videoProjectSmokePath = path.join(rootDir, 'verification', 'electron-video-project-smoke.pms');
+const videoAssetSmokePath = path.join(rootDir, 'verification', 'electron-video-asset-smoke.mp4');
 const missingProjectSmokePath = path.join(rootDir, 'verification', 'electron-missing-project-smoke.pms');
 const pathReferenceProjectSmokePath = path.join(rootDir, 'verification', 'electron-path-reference-smoke.pms');
 const uiScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-packaged.png' : 'electron-ui.png');
@@ -29,9 +31,12 @@ try {
   await rm(projectSmokePath, { force: true });
   await rm(streamedProjectSmokePath, { force: true });
   await rm(streamedAssetSmokePath, { force: true });
+  await rm(videoProjectSmokePath, { force: true });
+  await rm(videoAssetSmokePath, { force: true });
   await rm(missingProjectSmokePath, { force: true });
   await rm(pathReferenceProjectSmokePath, { force: true });
   await writeFile(streamedAssetSmokePath, Buffer.alloc(8 * 1024 * 1024, 0x5a));
+  await writeFile(videoAssetSmokePath, Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex'));
   electronApp = await electron.launch({
     executablePath,
     args: packaged ? [] : ['.'],
@@ -52,6 +57,8 @@ try {
       const requestedName = String(options.defaultPath || '');
       const filePath = requestedName.includes('streamed-project')
         ? paths.streamed
+        : requestedName.includes('video-project')
+          ? paths.video
         : requestedName.includes('missing-project')
           ? paths.missing
           : paths.project;
@@ -61,6 +68,7 @@ try {
   }, {
     project: projectSmokePath,
     streamed: streamedProjectSmokePath,
+    video: videoProjectSmokePath,
     missing: missingProjectSmokePath
   });
 
@@ -269,6 +277,58 @@ try {
     embedded: true
   };
 
+  const videoSaveResult = await page.evaluate(async (assetPath) => {
+    const document = window.particleStudio.captureProject();
+    document.scene.sceneModels = null;
+    document.scene.model = null;
+    document.scene.morphTarget = null;
+    document.scene.world = null;
+    document.scene.imageSplat = null;
+    document.scene.videoPlanes = {
+      activeId: 'electron-video-smoke',
+      items: [
+        {
+          id: 'electron-video-smoke',
+          name: 'electron-video-asset-smoke.mp4',
+          extension: 'mp4',
+          path: assetPath,
+          size: 24,
+          width: 2.4,
+          height: 1.35,
+          opacity: 0.85,
+          playbackRate: 1,
+          loop: true,
+          transform: { position: [0, 0.5, 0.25], rotation: [0, 180, 0], scale: [1, 1, 1] }
+        }
+      ]
+    };
+    return window.electronAPI.saveProject({
+      document,
+      suggestedName: 'electron-video-project-smoke',
+      saveAs: true
+    });
+  }, videoAssetSmokePath);
+  const videoProject = JSON.parse(await readFile(videoProjectSmokePath, 'utf8'));
+  const savedVideo = videoProject.scene?.videoPlanes?.items?.[0];
+  if (
+    !videoSaveResult?.ok ||
+    !savedVideo?.dataUrl?.startsWith('data:video/mp4;base64,') ||
+    savedVideo.sourcePath !== videoAssetSmokePath ||
+    Math.abs(savedVideo.opacity - 0.85) > 0.001
+  ) {
+    throw new Error(`Video project asset save failed: ${JSON.stringify({
+      videoSaveResult,
+      hasDataUrl: Boolean(savedVideo?.dataUrl),
+      sourcePath: savedVideo?.sourcePath,
+      opacity: savedVideo?.opacity
+    })}`);
+  }
+  result.videoProject = {
+    bytes: videoSaveResult.bytes,
+    embedded: true,
+    mime: savedVideo.dataUrl.slice(0, 14)
+  };
+
   const missingAssetResult = await page.evaluate(async () => {
     const document = window.particleStudio.captureProject();
     document.scene.sceneModels = null;
@@ -297,6 +357,8 @@ try {
   result.missingAssetError = missingAssetResult.error;
   await rm(streamedProjectSmokePath, { force: true });
   await rm(streamedAssetSmokePath, { force: true });
+  await rm(videoProjectSmokePath, { force: true });
+  await rm(videoAssetSmokePath, { force: true });
 
   const recoveryResult = await page.evaluate(async () => {
     const document = window.particleStudio.captureRecoveryProject();
@@ -477,6 +539,8 @@ try {
   await rm(projectSmokePath, { force: true }).catch(() => {});
   await rm(streamedProjectSmokePath, { force: true }).catch(() => {});
   await rm(streamedAssetSmokePath, { force: true }).catch(() => {});
+  await rm(videoProjectSmokePath, { force: true }).catch(() => {});
+  await rm(videoAssetSmokePath, { force: true }).catch(() => {});
   await rm(missingProjectSmokePath, { force: true }).catch(() => {});
   await rm(pathReferenceProjectSmokePath, { force: true }).catch(() => {});
   if (recoverySmokeOutputPath) {

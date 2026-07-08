@@ -720,6 +720,10 @@ try {
   if (!imageSplatCheck.ok) {
     throw new Error(`Image splat controls are not visibly interactive: ${JSON.stringify(imageSplatCheck)}`);
   }
+  const videoPlaneCheck = await verifyVideoPlaneControls(page);
+  if (!videoPlaneCheck.ok) {
+    throw new Error(`Video plane controls are not rendering/selectable: ${JSON.stringify(videoPlaneCheck)}`);
+  }
   const animationCheck = await verifyAnimatedModel(page);
 
   console.log(
@@ -738,6 +742,7 @@ try {
         cameraFeatures: cameraFeatureCheck,
         cameraDistanceLighting,
         imageSplat: imageSplatCheck,
+        videoPlane: videoPlaneCheck,
         animation: animationCheck,
         mov: movPath,
         panoramaMp4: panoramaMp4Path
@@ -1030,6 +1035,113 @@ async function verifyImageSplatControls(page) {
   return {
     ok: Boolean(check.loaded) && difference.meanDelta > 0.35 && difference.changedRatio > 0.0008,
     object: check,
+    difference
+  };
+}
+
+async function verifyVideoPlaneControls(page) {
+  const setup = await page.evaluate(async () => {
+    if (typeof MediaRecorder === 'undefined') {
+      return { skipped: true, ok: true, reason: 'MediaRecorder unavailable' };
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 160;
+    canvas.height = 90;
+    const context = canvas.getContext('2d');
+    const stream = canvas.captureStream(12);
+    const preferredTypes = [
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data?.size) {
+        chunks.push(event.data);
+      }
+    });
+    const stopped = new Promise((resolve) => recorder.addEventListener('stop', resolve, { once: true }));
+    recorder.start();
+    for (let frame = 0; frame < 16; frame += 1) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = frame % 2 ? 'rgba(255, 72, 24, 0.92)' : 'rgba(32, 230, 255, 0.92)';
+      context.fillRect(18 + frame, 16, 74, 48);
+      context.fillStyle = 'rgba(255, 220, 40, 0.78)';
+      context.beginPath();
+      context.arc(112, 45, 18 + (frame % 4), 0, Math.PI * 2);
+      context.fill();
+      await new Promise((resolve) => setTimeout(resolve, 42));
+    }
+    recorder.stop();
+    await stopped;
+    stream.getTracks().forEach((track) => track.stop());
+    const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+
+    await window.particleStudio.setOptions({ modelVisibility: 0, glowRadius: 0, glowExposure: 0 }, true);
+    await window.particleStudio.setVideoPlanes({
+      activeId: 'smoke-video',
+      items: [
+        {
+          id: 'smoke-video',
+          name: 'smoke-video.webm',
+          extension: 'webm',
+          dataUrl,
+          width: 2.1,
+          height: 1.18,
+          opacity: 0.95,
+          playbackRate: 1,
+          timeOffset: 0,
+          loop: true,
+          transform: { position: [0, 0.32, 0.55], rotation: [0, 180, 0], scale: [1, 1, 1] }
+        }
+      ]
+    });
+    window.particleStudio.selectVideoPlane('smoke-video');
+    window.particleStudio.setCameraSnapshot({ position: [0, 0.35, 3], target: [0, 0.3, 0], fov: 32 });
+    return {
+      ok: true,
+      mimeType: recorder.mimeType,
+      bytes: blob.size,
+      videoPlanes: window.particleStudio.getVideoPlanes(),
+      selection: window.particleStudio.getTransformSelectionDebug(),
+      project: window.particleStudio.captureProject()
+    };
+  });
+
+  if (setup.skipped) {
+    return setup;
+  }
+
+  await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 60000 });
+  const frameA = await page.evaluate(() => window.particleStudio.renderFrameAsync(0, undefined, 0));
+  const frameB = await page.evaluate(() => window.particleStudio.renderFrameAsync(0.42, undefined, 0));
+  const difference = await measureFrameDifference(page, frameA, frameB);
+  const item = setup.videoPlanes?.items?.[0];
+  const projectItem = setup.project?.scene?.videoPlanes?.items?.[0];
+  return {
+    ok:
+      setup.ok &&
+      setup.bytes > 100 &&
+      item?.name === 'smoke-video.webm' &&
+      projectItem?.dataUrl?.startsWith('data:video/webm') &&
+      setup.selection?.target === 'video' &&
+      setup.selection?.attachedToVideoRoot &&
+      difference.meanDelta > 0.03,
+    setup: {
+      mimeType: setup.mimeType,
+      bytes: setup.bytes,
+      item,
+      selection: setup.selection
+    },
     difference
   };
 }

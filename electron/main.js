@@ -276,6 +276,9 @@ function materializeProjectAssetPaths(document) {
   scene.morphTarget = materialize(scene.morphTarget);
   scene.world = materialize(scene.world);
   scene.imageSplat = materialize(scene.imageSplat);
+  if (Array.isArray(scene.videoPlanes?.items)) {
+    scene.videoPlanes.items.forEach(materialize);
+  }
   if (Array.isArray(scene.sceneModels?.models)) {
     scene.sceneModels.models.forEach(materialize);
   }
@@ -306,6 +309,13 @@ async function prepareProjectDocumentForSave(document) {
   }
   if (scene.imageSplat) {
     scene.imageSplat = await prepareProjectAsset(scene.imageSplat, streamedAssets);
+  }
+  if (Array.isArray(scene.videoPlanes?.items)) {
+    const items = [];
+    for (const video of scene.videoPlanes.items) {
+      items.push(await prepareProjectAsset(video, streamedAssets));
+    }
+    scene.videoPlanes = { ...scene.videoPlanes, items };
   }
   if (Array.isArray(scene.sceneModels?.models)) {
     const models = [];
@@ -423,6 +433,10 @@ function projectAssetMime(extension) {
     jpeg: 'image/jpeg',
     png: 'image/png',
     webp: 'image/webp',
+    mp4: 'video/mp4',
+    m4v: 'video/mp4',
+    mov: 'video/quicktime',
+    webm: 'video/webm',
     hdr: 'image/vnd.radiance',
     exr: 'image/x-exr',
     json: 'application/json'
@@ -459,6 +473,7 @@ async function exportMov(payload) {
   let worldUrl = '';
   let imageSplatUrl = '';
   let sceneModelsForRenderer = null;
+  let videoPlanesForRenderer = null;
   let hiddenWindow;
 
   try {
@@ -477,7 +492,7 @@ async function exportMov(payload) {
       const base64 = String(payload.model.dataUrl).replace(/^data:[^;]+;base64,/, '');
       await writeFile(modelPath, Buffer.from(base64, 'base64'));
       modelUrl = `/__export-model/${modelName}`;
-    } else if ((payload.options?.effectMode || 'particles') !== 'image' && !payload.sceneModels?.models?.length) {
+    } else if ((payload.options?.effectMode || 'particles') !== 'image' && !payload.sceneModels?.models?.length && !payload.videoPlanes?.items?.length) {
       throw new Error('当前模型没有可用于导出的文件数据，请重新导入模型后再导出。');
     }
 
@@ -556,6 +571,38 @@ async function exportMov(payload) {
       imageSplatUrl = `/__export-model/${imageSplatName}`;
     }
 
+    if (Array.isArray(payload.videoPlanes?.items) && payload.videoPlanes.items.length) {
+      videoPlanesForRenderer = {
+        activeId: payload.videoPlanes.activeId,
+        items: []
+      };
+
+      for (let index = 0; index < payload.videoPlanes.items.length; index += 1) {
+        const videoPlane = payload.videoPlanes.items[index];
+        if (!videoPlane?.extension) {
+          continue;
+        }
+        const extension = sanitizeVideoExtension(videoPlane.extension);
+        const videoName = `video-plane-${index}.${extension}`;
+        const videoPath = path.join(exportModelDir, videoName);
+        if (videoPlane.path) {
+          await copyFile(String(videoPlane.path), videoPath);
+        } else if (videoPlane.dataUrl) {
+          const base64 = String(videoPlane.dataUrl).replace(/^data:[^;]+;base64,/, '');
+          await writeFile(videoPath, Buffer.from(base64, 'base64'));
+        } else {
+          continue;
+        }
+
+        videoPlanesForRenderer.items.push({
+          ...videoPlane,
+          path: undefined,
+          dataUrl: undefined,
+          url: `/__export-model/${videoName}`
+        });
+      }
+    }
+
     hiddenWindow = new BrowserWindow({
       show: false,
       width,
@@ -631,6 +678,12 @@ async function exportMov(payload) {
       );
     }
 
+    if (videoPlanesForRenderer?.items?.length) {
+      await hiddenWindow.webContents.executeJavaScript(
+        `window.particleStudio.setVideoPlanes(${JSON.stringify(videoPlanesForRenderer)})`
+      );
+    }
+
     if (morphTargetUrl) {
       await hiddenWindow.webContents.executeJavaScript(
         `window.particleStudio.setMorphTargetModel(${JSON.stringify({
@@ -683,7 +736,7 @@ async function exportMov(payload) {
       const effectTime = effectStartTime + frameOffset;
       const cameraTime = cameraStartTime + frameOffset;
       const dataUrl = await hiddenWindow.webContents.executeJavaScript(
-        `window.particleStudio.renderFrame(${JSON.stringify(effectTime)}, undefined, ${JSON.stringify(cameraTime)})`
+        `window.particleStudio.renderFrameAsync(${JSON.stringify(effectTime)}, undefined, ${JSON.stringify(cameraTime)})`
       );
       const png = String(dataUrl).replace(/^data:image\/png;base64,/, '');
       await writeFile(path.join(framesDir, `frame_${String(frame).padStart(5, '0')}.png`), png, 'base64');
@@ -1487,6 +1540,11 @@ function sanitizeWorldExtension(value) {
 function sanitizeImageExtension(value) {
   const extension = String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
   return ['jpg', 'jpeg', 'png', 'webp', 'hdr', 'exr', 'ply', 'splat', 'ksplat', 'spz'].includes(extension) ? extension : 'png';
+}
+
+function sanitizeVideoExtension(value) {
+  const extension = String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return ['mp4', 'mov', 'm4v', 'webm'].includes(extension) ? extension : 'mp4';
 }
 
 function timestampName() {

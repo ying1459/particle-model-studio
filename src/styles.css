@@ -360,14 +360,18 @@ h1 {
 }
 
 .mode-button {
+  min-width: 0;
   min-height: 40px;
-  padding: 0 12px;
+  padding: 0 7px;
   color: var(--text);
   border: 1px solid transparent;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.035);
-  font-size: 13px;
+  overflow: hidden;
+  font-size: 12px;
   font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition:
     border-color 160ms ease,
     background-color 160ms ease,
@@ -378,7 +382,7 @@ h1 {
 .mode-button:hover {
   border-color: var(--line);
   background: var(--surface-hover);
-  transform: translateY(-1px);
+  transform: none;
 }
 
 .mode-button.active {
@@ -918,13 +922,15 @@ select option:checked {
 }
 
 .light-list,
-.scene-model-list {
+.scene-model-list,
+.video-plane-list {
   display: grid;
   gap: 7px;
 }
 
 .light-item,
-.scene-model-item {
+.scene-model-item,
+.video-plane-item {
   display: grid;
   grid-template-columns: 14px 1fr auto;
   align-items: center;
@@ -941,7 +947,8 @@ select option:checked {
 }
 
 .light-item.active,
-.scene-model-item.active {
+.scene-model-item.active,
+.video-plane-item.active {
   color: var(--ink);
   border-color: transparent;
   background: linear-gradient(135deg, var(--cyan), var(--amber));
@@ -954,12 +961,15 @@ select option:checked {
   gap: 8px;
 }
 
-.scene-model-item {
+.scene-model-item,
+.video-plane-item {
   grid-template-columns: auto 1fr auto;
 }
 
 .scene-model-index,
-.scene-model-effect {
+.scene-model-effect,
+.video-plane-index,
+.video-plane-effect {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -974,11 +984,20 @@ select option:checked {
   font-variant-numeric: tabular-nums;
 }
 
-.scene-model-name {
+.scene-model-name,
+.video-plane-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.video-plane-status {
+  display: block;
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .light-swatch {

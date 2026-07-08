@@ -40,7 +40,7 @@
         </div>
 
         <label class="drop-zone" id="dropZone" for="modelInput">
-          <input id="modelInput" type="file" accept=".blend,.glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz" />
+          <input id="modelInput" type="file" accept=".blend,.glb,.gltf,.obj,.stl,.fbx,.jpg,.jpeg,.png,.webp,.hdr,.exr,.ply,.splat,.ksplat,.spz,.mp4,.mov,.m4v,.webm" />
           <span class="drop-title">导入模型 / Blender / 图片 / 360 HDR / Gaussian Splat</span>
           <span class="drop-name" id="modelName">当前：正在加载模型</span>
         </label>
@@ -111,6 +111,73 @@
                 <span>缩放</span>
               </button>
             </div>
+          </div>
+        </details>
+
+        <details class="modifier-section" id="videoPlanesPanel" open>
+          <summary>视频素材</summary>
+          <div class="modifier-body">
+            <div class="scene-model-actions video-plane-actions" aria-label="Video material actions">
+              <button class="small-button" id="addVideoPlane" type="button" title="导入一个视频贴片，不转成粒子">
+                <i data-lucide="film"></i>
+                <span>添加视频</span>
+              </button>
+              <button class="small-button" id="duplicateVideoPlane" type="button" title="复制当前视频素材">
+                <i data-lucide="box"></i>
+                <span>复制</span>
+              </button>
+              <button class="small-button" id="deleteVideoPlane" type="button" title="删除当前视频素材">
+                <i data-lucide="trash-2"></i>
+                <span>删除</span>
+              </button>
+            </div>
+            <div class="scene-model-list video-plane-list" id="videoPlaneList" aria-label="Video materials"></div>
+            <div class="camera-mode-actions video-plane-transform-actions">
+              <button class="small-button active" id="moveVideoPlane" type="button" title="移动选中的视频素材">
+                <i data-lucide="move-3d"></i>
+                <span>位置</span>
+              </button>
+              <button class="small-button" id="rotateVideoPlane" type="button" title="旋转选中的视频素材">
+                <i data-lucide="rotate-3d"></i>
+                <span>旋转</span>
+              </button>
+              <button class="small-button" id="scaleVideoPlane" type="button" title="缩放选中的视频素材">
+                <i data-lucide="box"></i>
+                <span>缩放</span>
+              </button>
+            </div>
+            <div class="control-grid video-plane-controls">
+              <label>
+                <span>宽度</span>
+                <input id="videoPlaneWidth" type="range" min="0.05" max="20" step="0.01" value="3" />
+                <input id="videoPlaneWidthValue" class="value-input" type="number" min="0.01" step="0.01" value="3.00" />
+              </label>
+              <label>
+                <span>高度</span>
+                <input id="videoPlaneHeight" type="range" min="0.05" max="20" step="0.01" value="1.7" />
+                <input id="videoPlaneHeightValue" class="value-input" type="number" min="0.01" step="0.01" value="1.70" />
+              </label>
+              <label>
+                <span>透明度</span>
+                <input id="videoPlaneOpacity" type="range" min="0" max="1" step="0.01" value="1" />
+                <input id="videoPlaneOpacityValue" class="value-input" type="number" min="0" max="1" step="0.01" value="1.00" />
+              </label>
+              <label>
+                <span>播放速度</span>
+                <input id="videoPlanePlaybackRate" type="range" min="0" max="4" step="0.01" value="1" />
+                <input id="videoPlanePlaybackRateValue" class="value-input" type="number" min="0" step="0.01" value="1.00" />
+              </label>
+              <label>
+                <span>时间点</span>
+                <input id="videoPlaneTime" type="range" min="0" max="1" step="0.001" value="0" />
+                <input id="videoPlaneTimeValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+              </label>
+              <label class="wide-toggle">
+                <input id="videoPlaneLoop" type="checkbox" checked />
+                <span>循环播放</span>
+              </label>
+            </div>
+            <output class="video-plane-status" id="videoPlaneStatus">未导入视频素材</output>
           </div>
         </details>
 

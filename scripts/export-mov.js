@@ -38,6 +38,7 @@ const morphTargetUrl = readOption(
 const worldUrl = readOption('world', readOption('worldUrl', readOption('world-url', config.worldUrl ?? '')));
 const options = readJsonOption('options', config.options ?? null);
 const sceneModels = await normalizeSceneModelsForBrowser(config.sceneModels ?? null);
+const videoPlanes = await normalizeVideoPlanesForBrowser(config.videoPlanes ?? null);
 const frameCount = Math.max(2, Math.round(fps * duration));
 const outputExtension = exportFormat === 'mov' ? 'mov' : 'mp4';
 const outputPath = path.resolve(rootDir, readOption('out', config.out ?? `exports/particle-dissolve.${outputExtension}`));
@@ -89,6 +90,9 @@ if (readBoolean('dry-run')) {
         sceneModels: sceneModels
           ? { activeId: sceneModels.activeId, count: sceneModels.models.length }
           : null,
+        videoPlanes: videoPlanes
+          ? { activeId: videoPlanes.activeId, count: videoPlanes.items.length }
+          : null,
         options
       },
       null,
@@ -134,6 +138,10 @@ if (options) {
 
 if (sceneModels?.models?.length) {
   await page.evaluate((models) => window.particleStudio.setSceneModels(models), sceneModels);
+}
+
+if (videoPlanes?.items?.length) {
+  await page.evaluate((videos) => window.particleStudio.setVideoPlanes(videos), videoPlanes);
 }
 
 if (Array.isArray(config.lights)) {
@@ -199,7 +207,7 @@ for (let frame = 0; frame < frameCount; frame += 1) {
     const cameraTime = cameraStartTime + frameOffset;
     const dataUrl = await page.evaluate(
       ({ effectTime: frameEffectTime, cameraTime: frameCameraTime }) =>
-        window.particleStudio.renderFrame(frameEffectTime, undefined, frameCameraTime),
+        window.particleStudio.renderFrameAsync(frameEffectTime, undefined, frameCameraTime),
       { effectTime, cameraTime }
     );
     const png = dataUrl.replace(/^data:image\/png;base64,/, '');
@@ -276,10 +284,56 @@ async function normalizeSceneModelsForBrowser(sceneModels) {
     : null;
 }
 
+async function normalizeVideoPlanesForBrowser(videoPlanes) {
+  const items = Array.isArray(videoPlanes?.items) ? videoPlanes.items : [];
+  if (!items.length) {
+    return null;
+  }
+
+  const normalized = [];
+  for (const item of items) {
+    if (item.dataUrl || item.url) {
+      normalized.push(item);
+      continue;
+    }
+
+    if (!item.path) {
+      continue;
+    }
+
+    const filePath = path.resolve(rootDir, String(item.path));
+    const buffer = await readFile(filePath);
+    normalized.push({
+      ...item,
+      path: undefined,
+      dataUrl: `data:${mimeForVideoExtension(item.extension)};base64,${buffer.toString('base64')}`,
+      size: item.size || buffer.byteLength
+    });
+  }
+
+  return normalized.length
+    ? {
+        activeId: videoPlanes.activeId,
+        items: normalized
+      }
+    : null;
+}
+
 function mimeForModelExtension(extension = '') {
   return extension.toLowerCase() === 'glb'
     ? 'model/gltf-binary'
     : 'application/octet-stream';
+}
+
+function mimeForVideoExtension(extension = '') {
+  const normalized = extension.toLowerCase();
+  if (normalized === 'webm') {
+    return 'video/webm';
+  }
+  if (normalized === 'mov') {
+    return 'video/quicktime';
+  }
+  return 'video/mp4';
 }
 
 function parseArgs(rawArgs) {
