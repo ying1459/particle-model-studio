@@ -1,6 +1,6 @@
 {
   "name": "particle-model-studio",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "private": true,
   "type": "module",
   "main": "electron/main.js",

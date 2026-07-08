@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ffmpegPath from 'ffmpeg-static';
@@ -11,13 +11,27 @@ const packaged = process.argv.includes('--packaged');
 const executablePath = packaged
   ? path.join(rootDir, 'release', 'win-unpacked', 'Particle Model Studio.exe')
   : path.join(rootDir, 'node_modules', 'electron', 'dist', 'electron.exe');
+const expectedVersion = JSON.parse(await readFile(path.join(rootDir, 'package.json'), 'utf8')).version;
 const errors = [];
 const projectSmokePath = path.join(rootDir, 'verification', 'electron-project-smoke.pms');
+const streamedProjectSmokePath = path.join(rootDir, 'verification', 'electron-streamed-project-smoke.pms');
+const streamedAssetSmokePath = path.join(rootDir, 'verification', 'electron-streamed-asset-smoke.ply');
+const missingProjectSmokePath = path.join(rootDir, 'verification', 'electron-missing-project-smoke.pms');
+const pathReferenceProjectSmokePath = path.join(rootDir, 'verification', 'electron-path-reference-smoke.pms');
+const uiScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-packaged.png' : 'electron-ui.png');
+const uiCameraScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-camera-packaged.png' : 'electron-ui-camera.png');
 let electronApp;
+let recoverySmokeOutputPath = '';
+let automaticRecoveryOutputPath = '';
 
 try {
   await mkdir(path.dirname(projectSmokePath), { recursive: true });
   await rm(projectSmokePath, { force: true });
+  await rm(streamedProjectSmokePath, { force: true });
+  await rm(streamedAssetSmokePath, { force: true });
+  await rm(missingProjectSmokePath, { force: true });
+  await rm(pathReferenceProjectSmokePath, { force: true });
+  await writeFile(streamedAssetSmokePath, Buffer.alloc(8 * 1024 * 1024, 0x5a));
   electronApp = await electron.launch({
     executablePath,
     args: packaged ? [] : ['.'],
@@ -28,11 +42,27 @@ try {
     },
     timeout: 60000
   });
+  const appVersion = await electronApp.evaluate(({ app }) => app.getVersion());
+  if (appVersion !== expectedVersion) {
+    throw new Error(`Packaged app version mismatch: expected ${expectedVersion}, got ${appVersion}`);
+  }
 
-  await electronApp.evaluate(async ({ dialog }, filePath) => {
-    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
-    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
-  }, projectSmokePath);
+  await electronApp.evaluate(async ({ dialog }, paths) => {
+    dialog.showSaveDialog = async (_owner, options = {}) => {
+      const requestedName = String(options.defaultPath || '');
+      const filePath = requestedName.includes('streamed-project')
+        ? paths.streamed
+        : requestedName.includes('missing-project')
+          ? paths.missing
+          : paths.project;
+      return { canceled: false, filePath };
+    };
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [paths.project] });
+  }, {
+    project: projectSmokePath,
+    streamed: streamedProjectSmokePath,
+    missing: missingProjectSmokePath
+  });
 
   const page = await electronApp.firstWindow({ timeout: 60000 });
   page.on('console', (message) => {
@@ -45,6 +75,38 @@ try {
   });
 
   await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 90000 });
+  const uiLayout = await page.evaluate(() => {
+    const panel = document.querySelector('.panel');
+    const toolbar = document.querySelector('.toolbar');
+    const modeSwitch = document.querySelector('.mode-switch');
+    const rowCount = (container) => new Set(
+      [...container.children].map((element) => Math.round(element.getBoundingClientRect().top))
+    ).size;
+    return {
+      panelWidth: panel.clientWidth,
+      panelClientHeight: panel.clientHeight,
+      panelScrollWidth: panel.scrollWidth,
+      toolbarRows: rowCount(toolbar),
+      modeRows: rowCount(modeSwitch)
+    };
+  });
+  if (
+    uiLayout.panelWidth < 400 ||
+    uiLayout.panelScrollWidth > uiLayout.panelWidth ||
+    uiLayout.toolbarRows !== 2 ||
+    uiLayout.modeRows !== 2
+  ) {
+    throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);
+  }
+  await page.screenshot({ path: uiScreenshotPath, type: 'png' });
+  await page.evaluate(() => {
+    const panel = document.querySelector('.panel');
+    panel.scrollTop = panel.scrollHeight;
+  });
+  await page.screenshot({ path: uiCameraScreenshotPath, type: 'png' });
+  await page.evaluate(() => {
+    document.querySelector('.panel').scrollTop = 0;
+  });
   const result = await page.evaluate(async () => {
     const hasElectronBridge = Boolean(window.electronAPI?.exportMov);
     const initialCamera = window.particleStudio.getCameraSettings();
@@ -168,6 +230,158 @@ try {
   result.project = projectResult;
   await rm(projectSmokePath, { force: true });
 
+  const streamedSaveResult = await page.evaluate(async (assetPath) => {
+    const document = window.particleStudio.captureProject();
+    document.scene.sceneModels = null;
+    document.scene.model = null;
+    document.scene.morphTarget = null;
+    document.scene.world = null;
+    document.scene.imageSplat = {
+      name: 'electron-streamed-asset-smoke.ply',
+      extension: 'ply',
+      path: assetPath,
+      size: 8 * 1024 * 1024,
+      kind: 'gaussian'
+    };
+    return window.electronAPI.saveProject({
+      document,
+      suggestedName: 'electron-streamed-project-smoke',
+      saveAs: true
+    });
+  }, streamedAssetSmokePath);
+  const streamedProject = JSON.parse(await readFile(streamedProjectSmokePath, 'utf8'));
+  const streamedAsset = streamedProject.scene?.imageSplat;
+  if (
+    !streamedSaveResult?.ok ||
+    streamedSaveResult.bytes < 10 * 1024 * 1024 ||
+    !streamedAsset?.dataUrl?.startsWith('data:application/octet-stream;base64,Wlpa') ||
+    streamedAsset.sourcePath !== streamedAssetSmokePath
+  ) {
+    throw new Error(`Streamed project asset save failed: ${JSON.stringify({
+      streamedSaveResult,
+      hasDataUrl: Boolean(streamedAsset?.dataUrl),
+      sourcePath: streamedAsset?.sourcePath
+    })}`);
+  }
+  result.streamedProject = {
+    bytes: streamedSaveResult.bytes,
+    sourceBytes: 8 * 1024 * 1024,
+    embedded: true
+  };
+
+  const missingAssetResult = await page.evaluate(async () => {
+    const document = window.particleStudio.captureProject();
+    document.scene.sceneModels = null;
+    document.scene.model = null;
+    document.scene.morphTarget = null;
+    document.scene.world = null;
+    document.scene.imageSplat = {
+      name: 'missing-asset.ply',
+      extension: 'ply',
+      path: 'Z:\\particle-model-studio-missing\\missing-asset.ply',
+      kind: 'gaussian'
+    };
+    return window.electronAPI.saveProject({
+      document,
+      suggestedName: 'electron-missing-project-smoke',
+      saveAs: true
+    });
+  });
+  if (
+    missingAssetResult?.ok ||
+    missingAssetResult?.code !== 'PROJECT_ASSET_MISSING' ||
+    !String(missingAssetResult?.error || '').includes('missing-asset.ply')
+  ) {
+    throw new Error(`Missing project asset error was not reported: ${JSON.stringify(missingAssetResult)}`);
+  }
+  result.missingAssetError = missingAssetResult.error;
+  await rm(streamedProjectSmokePath, { force: true });
+  await rm(streamedAssetSmokePath, { force: true });
+
+  const recoveryResult = await page.evaluate(async () => {
+    const document = window.particleStudio.captureRecoveryProject();
+    document.scene.sceneModels = null;
+    document.scene.model = null;
+    document.scene.morphTarget = null;
+    document.scene.world = null;
+    document.scene.imageSplat = null;
+    return window.electronAPI.saveProjectRecovery({
+      document,
+      suggestedName: 'electron-recovery-smoke'
+    });
+  });
+  recoverySmokeOutputPath = recoveryResult?.path || '';
+  if (!recoveryResult?.ok || !recoverySmokeOutputPath) {
+    throw new Error(`Recovery project save failed: ${JSON.stringify(recoveryResult)}`);
+  }
+  const recoveryDocument = JSON.parse(await readFile(recoverySmokeOutputPath, 'utf8'));
+  if (recoveryDocument.format !== 'particle-model-studio-project') {
+    throw new Error(`Recovery project is invalid: ${recoverySmokeOutputPath}`);
+  }
+  result.recoveryProject = {
+    ok: true,
+    name: recoveryResult.name,
+    bytes: recoveryResult.bytes
+  };
+
+  await writeFile(pathReferenceProjectSmokePath, JSON.stringify({
+    format: 'particle-model-studio-project',
+    schemaVersion: 1,
+    appVersion: expectedVersion,
+    scene: {
+      sceneModels: {
+        activeId: 'path-reference-model',
+        models: [{
+          id: 'path-reference-model',
+          name: 'cs.glb',
+          extension: 'glb',
+          path: path.join(rootDir, 'public', 'cs.glb')
+        }]
+      }
+    }
+  }), 'utf8');
+  await electronApp.evaluate(async ({ dialog }, filePath) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+  }, pathReferenceProjectSmokePath);
+  const pathReferenceResult = await page.evaluate(() => window.electronAPI.openProject());
+  const pathReferenceAsset = pathReferenceResult?.document?.scene?.sceneModels?.models?.[0];
+  if (
+    !pathReferenceResult?.ok ||
+    !pathReferenceAsset?.url?.startsWith('/__runtime-asset/') ||
+    pathReferenceAsset.path !== path.join(rootDir, 'public', 'cs.glb')
+  ) {
+    throw new Error(`Path-reference recovery open failed: ${JSON.stringify(pathReferenceResult)}`);
+  }
+  result.pathReferenceRecovery = { ok: true, materialized: true };
+
+  await electronApp.evaluate(async ({ dialog }) => {
+    dialog.showSaveDialog = async () => ({
+      canceled: false,
+      filePath: 'Z:\\particle-model-studio-missing\\automatic-recovery-smoke.pms'
+    });
+  });
+  const automaticRecoveryResult = await page.evaluate(async () => {
+    const result = await window.particleStudio.saveProject(true);
+    return {
+      result,
+      status: document.querySelector('#status')?.textContent || ''
+    };
+  });
+  automaticRecoveryOutputPath = automaticRecoveryResult.result?.recovery?.path || '';
+  if (
+    automaticRecoveryResult.result?.ok ||
+    !automaticRecoveryResult.result?.recovery?.ok ||
+    !automaticRecoveryOutputPath ||
+    !automaticRecoveryResult.status.includes('恢复副本已保存')
+  ) {
+    throw new Error(`Automatic project recovery failed: ${JSON.stringify(automaticRecoveryResult)}`);
+  }
+  result.automaticRecovery = {
+    ok: true,
+    name: automaticRecoveryResult.result.recovery.name,
+    status: automaticRecoveryResult.status
+  };
+
   const exportResult = await page.evaluate(async () => {
     const source = document.createElement('canvas');
     source.width = 64;
@@ -247,10 +461,30 @@ try {
     throw new Error(`Renderer errors: ${errors.join(' | ')}`);
   }
 
-  console.log(JSON.stringify({ ok: true, packaged, executablePath, result, errors }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    packaged,
+    executablePath,
+    appVersion,
+    uiLayout,
+    uiScreenshotPath,
+    uiCameraScreenshotPath,
+    result,
+    errors
+  }, null, 2));
 } finally {
   await electronApp?.close().catch(() => {});
   await rm(projectSmokePath, { force: true }).catch(() => {});
+  await rm(streamedProjectSmokePath, { force: true }).catch(() => {});
+  await rm(streamedAssetSmokePath, { force: true }).catch(() => {});
+  await rm(missingProjectSmokePath, { force: true }).catch(() => {});
+  await rm(pathReferenceProjectSmokePath, { force: true }).catch(() => {});
+  if (recoverySmokeOutputPath) {
+    await rm(recoverySmokeOutputPath, { force: true }).catch(() => {});
+  }
+  if (automaticRecoveryOutputPath) {
+    await rm(automaticRecoveryOutputPath, { force: true }).catch(() => {});
+  }
 }
 
 async function probeMedia(filePath) {

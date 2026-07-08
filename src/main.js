@@ -11335,6 +11335,24 @@ function handlePathPointerDown(event) {
   raycaster.setFromCamera(pointer, camera);
   const transformHit = isTransformControlPointerHit();
   if (transformHit) {
+    // A camera/light gizmo can project across the model and otherwise trap the
+    // selection on the gizmo. When another object type is active, let a real
+    // model surface hit switch the selection; the gizmo still wins everywhere
+    // else and always wins while a model transform is already active.
+    const canSwitchToModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat);
+    const modelIdBehindTransform = canSwitchToModel
+      ? findSceneModelIdFromPointerHit({ includeActive: true })
+      : null;
+    if (modelIdBehindTransform) {
+      consumePointerEvent(event);
+      cameraAnimation.playing = false;
+      activeCameraQuaternion = null;
+      updatePlayButton();
+      activateSceneModel(modelIdBehindTransform).catch((error) => {
+        console.error(error);
+        setStatus('Model select failed');
+      });
+    }
     return;
   }
 
@@ -12039,6 +12057,7 @@ async function exportMovFromDevServer(payload) {
 
 function setStatus(value) {
   statusText.textContent = value;
+  statusText.title = value;
 }
 
 function formatCount(value) {
@@ -12095,7 +12114,7 @@ function captureProjectDocument() {
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.5',
+    appVersion: '1.0.7',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
@@ -12125,18 +12144,54 @@ function captureProjectDocument() {
   };
 }
 
+function prepareDesktopProjectDocument(document) {
+  const sourceScene = document?.scene || {};
+  const scene = { ...sourceScene };
+  const preferLocalPath = (descriptor) => {
+    if (!descriptor?.path || !descriptor.dataUrl) {
+      return descriptor;
+    }
+    const { dataUrl: _inlineData, ...pathBacked } = descriptor;
+    return pathBacked;
+  };
+
+  scene.model = preferLocalPath(sourceScene.model);
+  scene.morphTarget = preferLocalPath(sourceScene.morphTarget);
+  scene.world = preferLocalPath(sourceScene.world);
+  scene.imageSplat = preferLocalPath(sourceScene.imageSplat);
+  if (Array.isArray(sourceScene.sceneModels?.models)) {
+    scene.sceneModels = {
+      ...sourceScene.sceneModels,
+      models: sourceScene.sceneModels.models.map(preferLocalPath)
+    };
+  }
+  return { ...document, scene };
+}
+
+function formatProjectSaveStatus(error) {
+  const message = String(error?.message || error || '工程保存失败。')
+    .replace(/^Error invoking remote method ['"]save-project['"]:\s*/i, '')
+    .trim();
+  return message.length > 120 ? `${message.slice(0, 117)}...` : message;
+}
+
 async function saveProjectFromUi(saveAs = false) {
   if (projectUi.save) {
     projectUi.save.disabled = true;
   }
   setStatus('Saving project');
+  let recoveryDocument = null;
+  let recoverySuggestedName = 'particle-project';
 
   try {
     const document = captureProjectDocument();
     const suggestedName = getProjectSuggestedName();
+    recoverySuggestedName = suggestedName;
     let result;
     if (window.electronAPI?.saveProject) {
-      result = await window.electronAPI.saveProject({ document, suggestedName, saveAs });
+      const desktopDocument = prepareDesktopProjectDocument(document);
+      recoveryDocument = desktopDocument;
+      result = await window.electronAPI.saveProject({ document: desktopDocument, suggestedName, saveAs });
     } else {
       const blob = new Blob([JSON.stringify(document)], { type: 'application/json' });
       const link = documentElement('a');
@@ -12160,9 +12215,25 @@ async function saveProjectFromUi(saveAs = false) {
     setStatus('Project saved');
     return result;
   } catch (error) {
-    console.error(error);
-    setStatus('Project save failed');
-    return { ok: false, error: error.message || String(error) };
+    let recovery = null;
+    if (recoveryDocument && window.electronAPI?.saveProjectRecovery) {
+      try {
+        recovery = await window.electronAPI.saveProjectRecovery({
+          document: recoveryDocument,
+          suggestedName: recoverySuggestedName
+        });
+      } catch (recoveryError) {
+        console.error('Project recovery save failed.', recoveryError);
+      }
+    }
+    if (recovery?.ok) {
+      console.warn('Primary project save failed; recovery copy was saved.', error);
+      setStatus(`原位置保存失败；恢复副本已保存：${recovery.name}`);
+    } else {
+      console.error(error);
+      setStatus(`保存失败：${formatProjectSaveStatus(error)}`);
+    }
+    return { ok: false, error: error.message || String(error), recovery };
   } finally {
     if (projectUi.save) {
       projectUi.save.disabled = false;
@@ -12216,7 +12287,7 @@ async function applyProjectDocument(document) {
   try {
     const sceneModels = project.sceneModels?.models?.length
       ? project.sceneModels
-      : project.model?.dataUrl
+      : project.model?.dataUrl || project.model?.url
         ? {
             activeId: 'project-model',
             models: [{ ...project.model, id: 'project-model', name: project.model.name || 'Project Model' }]
@@ -13285,6 +13356,8 @@ window.particleStudio = {
     visible: transformControls.visible
   }),
   captureProject: () => captureProjectDocument(),
+  captureRecoveryProject: () => prepareDesktopProjectDocument(captureProjectDocument()),
+  saveProject: (saveAs = false) => saveProjectFromUi(Boolean(saveAs)),
   applyProject: (document) => applyProjectDocument(document),
   getSceneHitTestDebug: () => {
     const result = {

@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream, existsSync, readdirSync, statSync } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -119,7 +119,30 @@ function registerIpc() {
   });
 
   ipcMain.handle('save-project', async (event, payload) => {
-    return saveProjectFile(event, payload || {});
+    try {
+      return await saveProjectFile(event, payload || {});
+    } catch (error) {
+      const formatted = formatProjectSaveError(error);
+      console.error('Project save failed.', error);
+      return {
+        ok: false,
+        error: formatted,
+        code: error?.code || 'PROJECT_SAVE_FAILED'
+      };
+    }
+  });
+
+  ipcMain.handle('save-project-recovery', async (event, payload) => {
+    try {
+      return await saveProjectRecoveryFile(event, payload || {});
+    } catch (error) {
+      console.error('Project recovery save failed.', error);
+      return {
+        ok: false,
+        error: formatProjectSaveError(error),
+        code: error?.code || 'PROJECT_RECOVERY_SAVE_FAILED'
+      };
+    }
   });
 
   ipcMain.handle('open-project', async (event) => {
@@ -170,9 +193,8 @@ async function saveProjectFile(event, payload) {
     outputPath = result.filePath.toLowerCase().endsWith('.pms') ? result.filePath : `${result.filePath}.pms`;
   }
 
-  const document = await embedProjectAssets(payload.document || {});
-  const serialized = JSON.stringify(document);
-  await writeFile(outputPath, serialized, 'utf8');
+  const { document, streamedAssets } = await prepareProjectDocumentForSave(payload.document || {});
+  const bytes = await writeProjectDocument(outputPath, document, streamedAssets);
   projectPaths.set(ownerId, outputPath);
   if (owner && !owner.isDestroyed()) {
     owner.setTitle(`${path.basename(outputPath)} - Particle Model Studio`);
@@ -181,7 +203,22 @@ async function saveProjectFile(event, payload) {
     ok: true,
     path: outputPath,
     name: path.basename(outputPath),
-    bytes: Buffer.byteLength(serialized)
+    bytes
+  };
+}
+
+async function saveProjectRecoveryFile(_event, payload) {
+  const recoveryDir = path.join(app.getPath('documents'), 'Particle Model Studio Recovery');
+  await mkdir(recoveryDir, { recursive: true });
+  const suggestedName = sanitizeFilename(payload.suggestedName || 'particle-project');
+  const outputPath = path.join(recoveryDir, `${suggestedName}-recovery-${timestampName()}.pms`);
+  const { document, streamedAssets } = await prepareProjectDocumentForSave(payload.document || {});
+  const bytes = await writeProjectDocument(outputPath, document, streamedAssets);
+  return {
+    ok: true,
+    path: outputPath,
+    name: path.basename(outputPath),
+    bytes
   };
 }
 
@@ -202,6 +239,7 @@ async function openProjectFile(event) {
   const inputPath = result.filePaths[0];
   const document = JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, ''));
   validateProjectDocument(document);
+  materializeProjectAssetPaths(document);
   projectPaths.set(event.sender.id, inputPath);
   if (owner && !owner.isDestroyed()) {
     owner.setTitle(`${path.basename(inputPath)} - Particle Model Studio`);
@@ -214,6 +252,35 @@ async function openProjectFile(event) {
   };
 }
 
+function materializeProjectAssetPaths(document) {
+  const scene = document?.scene || {};
+  const materialize = (descriptor) => {
+    if (!descriptor || typeof descriptor !== 'object') {
+      return descriptor;
+    }
+    const sourcePath = descriptor.path || descriptor.sourcePath;
+    if (!sourcePath || !existsSync(String(sourcePath))) {
+      return descriptor;
+    }
+    const absolutePath = path.resolve(String(sourcePath));
+    descriptor.path = absolutePath;
+    if (!descriptor.dataUrl) {
+      const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      runtimeAssetMap.set(token, absolutePath);
+      descriptor.url = `/__runtime-asset/${token}/${encodeURIComponent(path.basename(absolutePath))}`;
+    }
+    return descriptor;
+  };
+
+  scene.model = materialize(scene.model);
+  scene.morphTarget = materialize(scene.morphTarget);
+  scene.world = materialize(scene.world);
+  scene.imageSplat = materialize(scene.imageSplat);
+  if (Array.isArray(scene.sceneModels?.models)) {
+    scene.sceneModels.models.forEach(materialize);
+  }
+}
+
 function validateProjectDocument(document) {
   if (!document || document.format !== 'particle-model-studio-project' || Number(document.schemaVersion) !== 1) {
     throw new Error('这不是有效的 Particle Model Studio .pms 工程文件。');
@@ -223,45 +290,129 @@ function validateProjectDocument(document) {
   }
 }
 
-async function embedProjectAssets(document) {
-  const embedded = structuredClone(document);
-  const scene = embedded.scene || {};
+async function prepareProjectDocumentForSave(document) {
+  const sourceScene = document?.scene || {};
+  const scene = { ...sourceScene };
+  const embedded = { ...document, scene };
+  const streamedAssets = [];
   if (scene.model) {
-    scene.model = await embedProjectAsset(scene.model);
+    scene.model = await prepareProjectAsset(scene.model, streamedAssets);
   }
   if (scene.morphTarget) {
-    scene.morphTarget = await embedProjectAsset(scene.morphTarget);
+    scene.morphTarget = await prepareProjectAsset(scene.morphTarget, streamedAssets);
   }
   if (scene.world) {
-    scene.world = await embedProjectAsset(scene.world);
+    scene.world = await prepareProjectAsset(scene.world, streamedAssets);
   }
   if (scene.imageSplat) {
-    scene.imageSplat = await embedProjectAsset(scene.imageSplat);
+    scene.imageSplat = await prepareProjectAsset(scene.imageSplat, streamedAssets);
   }
   if (Array.isArray(scene.sceneModels?.models)) {
-    scene.sceneModels.models = await Promise.all(scene.sceneModels.models.map((model) => embedProjectAsset(model)));
+    const models = [];
+    for (const model of scene.sceneModels.models) {
+      models.push(await prepareProjectAsset(model, streamedAssets));
+    }
+    scene.sceneModels = { ...scene.sceneModels, models };
   }
-  return embedded;
+  return { document: embedded, streamedAssets };
 }
 
-async function embedProjectAsset(descriptor) {
+async function prepareProjectAsset(descriptor, streamedAssets) {
   const embedded = { ...descriptor };
   const sourcePath = embedded.path ? path.resolve(String(embedded.path)) : '';
-  if (!embedded.dataUrl && sourcePath && existsSync(sourcePath)) {
-    const buffer = await readFile(sourcePath);
+  if (sourcePath && existsSync(sourcePath)) {
     const extension = String(embedded.extension || path.extname(sourcePath).slice(1)).toLowerCase();
-    embedded.dataUrl = `data:${projectAssetMime(extension)};base64,${buffer.toString('base64')}`;
-    embedded.size = embedded.size || buffer.byteLength;
-  }
-  if (sourcePath) {
+    const token = `__PMS_STREAMED_ASSET_${streamedAssets.length}_${Date.now()}__`;
+    streamedAssets.push({ token, sourcePath, mime: projectAssetMime(extension) });
+    embedded.dataUrl = token;
+    embedded.size = embedded.size || statSync(sourcePath).size;
     embedded.sourcePath = sourcePath;
   }
   if (!embedded.dataUrl) {
-    throw new Error(`无法把素材“${embedded.name || sourcePath || '未命名素材'}”嵌入工程，请重新导入该素材后再保存。`);
+    const missing = new Error(`无法读取素材“${embedded.name || sourcePath || '未命名素材'}”，请重新导入后再保存。`);
+    missing.code = 'PROJECT_ASSET_MISSING';
+    throw missing;
   }
   delete embedded.path;
   delete embedded.url;
   return embedded;
+}
+
+async function writeProjectDocument(outputPath, document, streamedAssets) {
+  const serialized = JSON.stringify(document);
+  const tempPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
+  const output = createWriteStream(tempPath, { encoding: 'utf8' });
+  let cursor = 0;
+
+  try {
+    for (const asset of streamedAssets) {
+      const quotedToken = JSON.stringify(asset.token);
+      const tokenIndex = serialized.indexOf(quotedToken, cursor);
+      if (tokenIndex < 0) {
+        const tokenError = new Error(`工程素材占位符丢失：${path.basename(asset.sourcePath)}`);
+        tokenError.code = 'PROJECT_ASSET_TOKEN_MISSING';
+        throw tokenError;
+      }
+
+      await writeStreamChunk(output, serialized.slice(cursor, tokenIndex));
+      await writeStreamChunk(output, `"data:${asset.mime};base64,`);
+      const input = createReadStream(asset.sourcePath, { encoding: 'base64' });
+      for await (const chunk of input) {
+        await writeStreamChunk(output, chunk);
+      }
+      await writeStreamChunk(output, '"');
+      cursor = tokenIndex + quotedToken.length;
+    }
+
+    await writeStreamChunk(output, serialized.slice(cursor));
+    output.end();
+    await once(output, 'finish');
+    await replaceProjectFile(tempPath, outputPath);
+    return statSync(outputPath).size;
+  } catch (error) {
+    output.destroy();
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function writeStreamChunk(stream, chunk) {
+  if (!chunk || stream.write(chunk)) {
+    return;
+  }
+  await once(stream, 'drain');
+}
+
+async function replaceProjectFile(tempPath, outputPath) {
+  try {
+    await rename(tempPath, outputPath);
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error?.code)) {
+      throw error;
+    }
+    await copyFile(tempPath, outputPath);
+    await rm(tempPath, { force: true });
+  }
+}
+
+function formatProjectSaveError(error) {
+  const code = error?.code || '';
+  if (code === 'ENOSPC') {
+    return '磁盘空间不足，请清理空间或选择其他磁盘。';
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return '没有写入权限，请保存到“文档”或其他可写目录。';
+  }
+  if (code === 'ENOENT') {
+    return '保存目录或工程素材不存在，请重新选择位置或导入素材。';
+  }
+  if (code === 'PROJECT_ASSET_MISSING') {
+    return error.message;
+  }
+  if (/heap|allocation|out of memory|invalid string length/i.test(error?.message || '')) {
+    return '工程素材过大导致内存不足，请关闭其他程序后重试。';
+  }
+  return error?.message || '工程保存失败。';
 }
 
 function projectAssetMime(extension) {
