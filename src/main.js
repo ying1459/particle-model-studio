@@ -4163,6 +4163,7 @@ function normalizeVideoPlaneDescriptor(descriptor = {}, index = 0) {
     url: playbackUrl || payload.url || payload.dataUrl || '',
     proxyUrl: descriptor.proxyUrl || descriptor.payload?.proxyUrl || '',
     proxyPath: descriptor.proxyPath || descriptor.payload?.proxyPath || '',
+    proxyCached: Boolean(descriptor.proxyCached || descriptor.payload?.proxyCached),
     proxyError: '',
     transform: normalizeVideoPlaneTransform(descriptor.transform || createDefaultVideoPlaneTransform(index)),
     width,
@@ -4252,6 +4253,9 @@ async function prepareMovPlaybackProxy(descriptor) {
     return null;
   }
   setStatus('Converting MOV');
+  if (controlsUi.videoPlaneStatus) {
+    controlsUi.videoPlaneStatus.value = 'MOV 正在生成透明预览代理，首次导入可能需要几秒；同一个文件下次会直接使用缓存。';
+  }
   const result = await window.electronAPI.prepareVideoProxy({
     path: descriptor.payload?.path || descriptor.payload?.sourcePath || descriptor.path || descriptor.sourcePath || '',
     dataUrl: descriptor.payload?.dataUrl || descriptor.dataUrl || '',
@@ -4274,6 +4278,7 @@ async function createVideoPlaneRecord(descriptor = {}, options = {}) {
       if (proxy?.url) {
         normalized.proxyUrl = proxy.url;
         normalized.proxyPath = proxy.path || '';
+        normalized.proxyCached = Boolean(proxy.cached);
         normalized.playbackExtension = proxy.extension || 'webm';
         url = proxy.url;
       }
@@ -4283,7 +4288,7 @@ async function createVideoPlaneRecord(descriptor = {}, options = {}) {
     }
   }
   if (!url) {
-    throw new Error('Video has no readable URL.');
+    throw new Error(normalized.proxyError || 'Video has no readable URL.');
   }
 
   const video = document.createElement('video');
@@ -4295,7 +4300,15 @@ async function createVideoPlaneRecord(descriptor = {}, options = {}) {
   video.src = url;
   video.playbackRate = Math.max(0.0625, normalized.playbackRate || 1);
 
-  const metadataLoaded = await waitForVideoMetadata(video);
+  let metadataLoaded;
+  try {
+    metadataLoaded = await waitForVideoMetadata(video);
+  } catch (error) {
+    if (normalized.extension === 'mov' && normalized.proxyError) {
+      throw new Error(`${normalized.proxyError}；直接播放也失败。`);
+    }
+    throw error;
+  }
   const sourceWidth = Math.max(1, video.videoWidth || 16);
   const sourceHeight = Math.max(1, video.videoHeight || 9);
   const aspect = sourceWidth / sourceHeight;
@@ -4347,6 +4360,7 @@ async function createVideoPlaneRecord(descriptor = {}, options = {}) {
     root,
     proxyUrl: normalized.proxyUrl,
     proxyPath: normalized.proxyPath,
+    proxyCached: normalized.proxyCached,
     proxyError: normalized.proxyError,
     playbackExtension: normalized.playbackExtension,
     sourceExtension: normalized.sourceExtension,
@@ -4398,7 +4412,7 @@ async function loadVideoPlaneFile(file, explicitExtension) {
     syncVideoPlaneUi();
     if (controlsUi.videoPlaneStatus && extension === 'mov') {
       controlsUi.videoPlaneStatus.value = record.proxyUrl
-        ? `${file.name} · MOV 已转为兼容代理预览，透明通道会尽量保留`
+        ? `${file.name} · MOV 已转为兼容透明代理预览${record.proxyCached ? '（已使用缓存）' : ''}`
         : `${file.name} · MOV 透明通道会在解码器支持时自动保留`;
     }
     setStatus('Ready');
@@ -4598,7 +4612,7 @@ function syncVideoPlaneUi() {
   if (controlsUi.videoPlaneStatus) {
     const alphaHint = record.extension === 'mov'
       ? record.proxyUrl
-        ? '；MOV 已转为兼容代理预览，透明通道会尽量保留'
+        ? `；MOV 已转为兼容透明代理预览${record.proxyCached ? '（已使用缓存）' : ''}`
         : record.proxyError
           ? `；MOV 代理失败：${record.proxyError}`
           : '；MOV 透明通道会在解码器支持时自动保留'
@@ -14407,6 +14421,7 @@ window.particleStudio = {
       extension: record.extension,
       playbackExtension: record.playbackExtension,
       hasProxy: Boolean(record.proxyUrl),
+      proxyCached: Boolean(record.proxyCached),
       proxyError: record.proxyError || '',
       hasPath: Boolean(record.payload?.path),
       hasDataUrl: Boolean(record.payload?.dataUrl),

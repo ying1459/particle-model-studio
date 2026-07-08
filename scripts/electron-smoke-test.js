@@ -20,6 +20,7 @@ const videoProjectSmokePath = path.join(rootDir, 'verification', 'electron-video
 const videoAssetSmokePath = path.join(rootDir, 'verification', 'electron-video-asset-smoke.mp4');
 const movAssetSmokePath = path.join(rootDir, 'verification', 'electron-video-alpha-smoke.mov');
 const missingProjectSmokePath = path.join(rootDir, 'verification', 'electron-missing-project-smoke.pms');
+const automaticRecoveryFailurePath = path.join(rootDir, 'verification', 'missing-auto-save-dir', 'automatic-recovery-smoke.pms');
 const pathReferenceProjectSmokePath = path.join(rootDir, 'verification', 'electron-path-reference-smoke.pms');
 const uiScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-packaged.png' : 'electron-ui.png');
 const uiCameraScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-camera-packaged.png' : 'electron-ui-camera.png');
@@ -37,6 +38,7 @@ try {
   await rm(movAssetSmokePath, { force: true });
   await rm(missingProjectSmokePath, { force: true });
   await rm(pathReferenceProjectSmokePath, { force: true });
+  await rm(path.dirname(automaticRecoveryFailurePath), { recursive: true, force: true });
   await writeFile(streamedAssetSmokePath, Buffer.alloc(8 * 1024 * 1024, 0x5a));
   await writeFile(videoAssetSmokePath, Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex'));
   await createAlphaMovSmoke(movAssetSmokePath);
@@ -215,7 +217,8 @@ try {
         ok: ipcProxy?.ok,
         extension: ipcProxy?.extension,
         url: ipcProxy?.url,
-        size: ipcProxy?.size
+        size: ipcProxy?.size,
+        cached: Boolean(ipcProxy?.cached)
       },
       asset,
       frameBytes: frame.length,
@@ -228,6 +231,7 @@ try {
     !movProxyResult.ipcProxy.url?.startsWith('/__runtime-asset/') ||
     movProxyResult.ipcProxy.size < 100 ||
     !movProxyResult.asset?.hasProxy ||
+    !movProxyResult.asset?.proxyCached ||
     movProxyResult.asset.playbackExtension !== 'webm' ||
     movProxyResult.frameBytes < 1000
   ) {
@@ -475,12 +479,12 @@ try {
   }
   result.pathReferenceRecovery = { ok: true, materialized: true };
 
-  await electronApp.evaluate(async ({ dialog }) => {
+  await electronApp.evaluate(async ({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({
       canceled: false,
-      filePath: 'Z:\\particle-model-studio-missing\\automatic-recovery-smoke.pms'
+      filePath
     });
-  });
+  }, automaticRecoveryFailurePath);
   const automaticRecoveryResult = await page.evaluate(async () => {
     const result = await window.particleStudio.saveProject(true);
     return {
@@ -603,6 +607,7 @@ try {
   await rm(movAssetSmokePath, { force: true }).catch(() => {});
   await rm(missingProjectSmokePath, { force: true }).catch(() => {});
   await rm(pathReferenceProjectSmokePath, { force: true }).catch(() => {});
+  await rm(path.dirname(automaticRecoveryFailurePath), { recursive: true, force: true }).catch(() => {});
   if (recoverySmokeOutputPath) {
     await rm(recoverySmokeOutputPath, { force: true }).catch(() => {});
   }

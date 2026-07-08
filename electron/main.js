@@ -5,6 +5,7 @@ import { createReadStream, createWriteStream, existsSync, readdirSync, statSync 
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ffmpegStaticPath from 'ffmpeg-static';
 import { injectSphericalMetadata } from './spatial-metadata.js';
@@ -16,6 +17,7 @@ const preloadPath = path.join(__dirname, 'preload.cjs');
 let exportModelDir = '';
 const runtimeAssetDirs = new Set();
 const runtimeAssetMap = new Map();
+const videoProxyCache = new Map();
 const projectPaths = new Map();
 const MIN_SHARP_CHECKPOINT_BYTES = 1024 * 1024 * 1024;
 
@@ -58,6 +60,7 @@ app.on('will-quit', () => {
   }
   runtimeAssetDirs.clear();
   runtimeAssetMap.clear();
+  videoProxyCache.clear();
 });
 
 function createMainWindow() {
@@ -109,7 +112,78 @@ function registerAppProtocol() {
       return new Response('Not found', { status: 404 });
     }
 
+    if (pathname.startsWith('/__runtime-asset/') || pathname.startsWith('/__export-model/')) {
+      return createRangedFileResponse(request, filePath);
+    }
+
     return net.fetch(pathToFileURL(filePath).toString());
+  });
+}
+
+function createRangedFileResponse(request, filePath) {
+  const stats = statSync(filePath);
+  const size = stats.size;
+  const extension = path.extname(filePath).slice(1).toLowerCase();
+  const headers = {
+    'Accept-Ranges': 'bytes',
+    'Content-Type': projectAssetMime(extension),
+    'Content-Length': String(size)
+  };
+
+  if (request.method === 'HEAD') {
+    return new Response(null, { status: 200, headers });
+  }
+
+  const range = request.headers.get('range');
+  if (!range) {
+    return new Response(Readable.toWeb(createReadStream(filePath)), {
+      status: 200,
+      headers
+    });
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(range.trim());
+  if (!match || size <= 0) {
+    return new Response(null, {
+      status: 416,
+      headers: {
+        ...headers,
+        'Content-Range': `bytes */${size}`
+      }
+    });
+  }
+
+  let start;
+  let end;
+  if (match[1] === '' && match[2] !== '') {
+    const suffixLength = Math.max(0, Number.parseInt(match[2], 10) || 0);
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    start = Math.max(0, Number.parseInt(match[1], 10) || 0);
+    end = match[2] === ''
+      ? size - 1
+      : Math.min(size - 1, Number.parseInt(match[2], 10) || size - 1);
+  }
+
+  if (start >= size || end < start) {
+    return new Response(null, {
+      status: 416,
+      headers: {
+        ...headers,
+        'Content-Range': `bytes */${size}`
+      }
+    });
+  }
+
+  const chunkSize = end - start + 1;
+  return new Response(Readable.toWeb(createReadStream(filePath, { start, end })), {
+    status: 206,
+    headers: {
+      ...headers,
+      'Content-Length': String(chunkSize),
+      'Content-Range': `bytes ${start}-${end}/${size}`
+    }
   });
 }
 
@@ -354,8 +428,17 @@ async function prepareProjectAsset(descriptor, streamedAssets) {
 
 async function writeProjectDocument(outputPath, document, streamedAssets) {
   const serialized = JSON.stringify(document);
+  const outputDir = path.dirname(outputPath);
+  if (!existsSync(outputDir)) {
+    const missingDir = new Error(`保存目录不存在：${outputDir}`);
+    missingDir.code = 'ENOENT';
+    throw missingDir;
+  }
   const tempPath = `${outputPath}.${process.pid}.${Date.now()}.tmp`;
   const output = createWriteStream(tempPath, { encoding: 'utf8' });
+  const streamError = once(output, 'error').then(([error]) => {
+    throw error;
+  });
   let cursor = 0;
 
   try {
@@ -380,7 +463,7 @@ async function writeProjectDocument(outputPath, document, streamedAssets) {
 
     await writeStreamChunk(output, serialized.slice(cursor));
     output.end();
-    await once(output, 'finish');
+    await Promise.race([once(output, 'finish'), streamError]);
     await replaceProjectFile(tempPath, outputPath);
     return statSync(outputPath).size;
   } catch (error) {
@@ -394,7 +477,12 @@ async function writeStreamChunk(stream, chunk) {
   if (!chunk || stream.write(chunk)) {
     return;
   }
-  await once(stream, 'drain');
+  await Promise.race([
+    once(stream, 'drain'),
+    once(stream, 'error').then(([error]) => {
+      throw error;
+    })
+  ]);
 }
 
 async function replaceProjectFile(tempPath, outputPath) {
@@ -453,12 +541,50 @@ async function prepareVideoProxy(payload = {}) {
     payload.extension ||
     path.extname(String(payload.path || payload.name || '')).slice(1)
   );
+  const sourcePath = payload.path ? path.resolve(String(payload.path)) : '';
+  const cacheKey = sourcePath && existsSync(sourcePath) ? getVideoProxyCacheKey(sourcePath) : '';
+
+  if (cacheKey) {
+    const cached = videoProxyCache.get(cacheKey);
+    if (cached) {
+      const cachedResult = await Promise.resolve(cached.promise || cached).catch(() => null);
+      if (cachedResult?.ok && isUsableRuntimeAsset(cachedResult.path)) {
+        return {
+          ...cachedResult,
+          cached: true
+        };
+      }
+      videoProxyCache.delete(cacheKey);
+    }
+  }
+
+  const proxyPromise = buildVideoProxy({
+    payload,
+    sourceExtension,
+    sourcePath
+  });
+
+  if (cacheKey) {
+    videoProxyCache.set(cacheKey, { promise: proxyPromise });
+  }
+
+  const result = await proxyPromise;
+  if (cacheKey) {
+    if (result?.ok && isUsableRuntimeAsset(result.path)) {
+      videoProxyCache.set(cacheKey, result);
+    } else {
+      videoProxyCache.delete(cacheKey);
+    }
+  }
+  return result;
+}
+
+async function buildVideoProxy({ payload = {}, sourceExtension = 'mov', sourcePath = '' } = {}) {
   let runtimeDir = '';
   let inputPath = '';
 
   try {
     runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-video-runtime-'));
-    const sourcePath = payload.path ? path.resolve(String(payload.path)) : '';
     if (sourcePath && existsSync(sourcePath)) {
       inputPath = sourcePath;
     } else if (payload.dataUrl) {
@@ -496,6 +622,7 @@ async function prepareVideoProxy(payload = {}) {
       extension: 'webm',
       sourceExtension,
       size: statSync(outputPath).size,
+      cached: false,
       log: log.slice(-5000)
     };
   } catch (error) {
@@ -506,6 +633,24 @@ async function prepareVideoProxy(payload = {}) {
       ok: false,
       error: error?.message || String(error)
     };
+  }
+}
+
+function getVideoProxyCacheKey(inputPath) {
+  try {
+    const absolutePath = path.resolve(String(inputPath));
+    const stats = statSync(absolutePath);
+    return `${absolutePath}|${stats.size}|${stats.mtimeMs}`;
+  } catch {
+    return '';
+  }
+}
+
+function isUsableRuntimeAsset(filePath) {
+  try {
+    return Boolean(filePath && existsSync(filePath) && statSync(filePath).size > 0);
+  } catch {
+    return false;
   }
 }
 
@@ -537,8 +682,15 @@ async function transcodeVideoToWebm(inputPath, outputPath) {
       '-c:v', 'libvpx-vp9',
       '-pix_fmt', 'yuva420p',
       '-auto-alt-ref', '0',
+      '-deadline', 'realtime',
+      '-cpu-used', '8',
+      '-row-mt', '1',
+      '-threads', '0',
+      '-tile-columns', '2',
+      '-frame-parallel', '1',
+      '-lag-in-frames', '0',
       '-b:v', '0',
-      '-crf', '28',
+      '-crf', '32',
       outputPath
     ],
     {
