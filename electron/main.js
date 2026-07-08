@@ -19,6 +19,8 @@ const runtimeAssetDirs = new Set();
 const runtimeAssetMap = new Map();
 const videoProxyCache = new Map();
 const projectPaths = new Map();
+const LARGE_PROJECT_STREAM_THRESHOLD_BYTES = 480 * 1024 * 1024;
+const PROJECT_DATA_URL_PATTERN = Buffer.from('"dataUrl":"data:', 'utf8');
 const MIN_SHARP_CHECKPOINT_BYTES = 1024 * 1024 * 1024;
 
 protocol.registerSchemesAsPrivileged([
@@ -315,7 +317,7 @@ async function openProjectFile(event) {
   }
 
   const inputPath = result.filePaths[0];
-  const document = JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, ''));
+  const { document, largeProject } = await readProjectDocument(inputPath);
   validateProjectDocument(document);
   materializeProjectAssetPaths(document);
   projectPaths.set(event.sender.id, inputPath);
@@ -326,8 +328,270 @@ async function openProjectFile(event) {
     ok: true,
     path: inputPath,
     name: path.basename(inputPath),
-    document
+    document,
+    largeProject
   };
+}
+
+async function readProjectDocument(inputPath) {
+  const size = statSync(inputPath).size;
+  if (size > LARGE_PROJECT_STREAM_THRESHOLD_BYTES) {
+    return streamLargeProjectDocument(inputPath);
+  }
+
+  try {
+    return {
+      document: JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, '')),
+      largeProject: null
+    };
+  } catch (error) {
+    if (isProjectStringTooLargeError(error)) {
+      return streamLargeProjectDocument(inputPath);
+    }
+    throw error;
+  }
+}
+
+function isProjectStringTooLargeError(error) {
+  return error?.code === 'ERR_STRING_TOO_LONG' ||
+    /Cannot create a string longer/i.test(String(error?.message || error));
+}
+
+async function streamLargeProjectDocument(inputPath) {
+  const runtimeDir = await mkdtemp(path.join(tmpdir(), 'particle-project-open-'));
+  const slimPath = path.join(runtimeDir, 'project.slim.pms');
+  const input = createReadStream(inputPath, { highWaterMark: 1024 * 1024 });
+  const output = createWriteStream(slimPath);
+  const extractedAssets = [];
+  let buffer = Buffer.alloc(0);
+  let state = 'scan';
+  let recentText = '';
+  let dataHeader = '';
+  let activeAsset = null;
+
+  const appendRecent = (chunk) => {
+    if (!chunk?.length) {
+      return;
+    }
+    recentText = `${recentText}${chunk.toString('utf8')}`.slice(-16384);
+  };
+
+  const writeRaw = async (chunk) => {
+    if (!chunk?.length) {
+      return;
+    }
+    await writeStreamChunk(output, chunk);
+    appendRecent(chunk);
+  };
+
+  try {
+    for await (const chunk of input) {
+      buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
+
+      while (buffer.length) {
+        if (state === 'scan') {
+          const index = buffer.indexOf(PROJECT_DATA_URL_PATTERN);
+          if (index < 0) {
+            const safeLength = Math.max(0, buffer.length - PROJECT_DATA_URL_PATTERN.length + 1);
+            if (safeLength > 0) {
+              await writeRaw(buffer.subarray(0, safeLength));
+              buffer = buffer.subarray(safeLength);
+            }
+            break;
+          }
+
+          await writeRaw(buffer.subarray(0, index));
+          buffer = buffer.subarray(index + PROJECT_DATA_URL_PATTERN.length);
+          dataHeader = 'data:';
+          state = 'header';
+        }
+
+        if (state === 'header') {
+          const commaIndex = buffer.indexOf(0x2c);
+          if (commaIndex < 0) {
+            dataHeader += buffer.toString('ascii');
+            buffer = Buffer.alloc(0);
+            break;
+          }
+
+          dataHeader += buffer.subarray(0, commaIndex + 1).toString('ascii');
+          buffer = buffer.subarray(commaIndex + 1);
+          activeAsset = createLargeProjectAsset(runtimeDir, dataHeader, recentText, extractedAssets.length);
+          extractedAssets.push(activeAsset.summary);
+          await writeStreamChunk(output, Buffer.from(createLargeProjectAssetReplacement(activeAsset), 'utf8'));
+          state = 'base64';
+        }
+
+        if (state === 'base64') {
+          const quoteIndex = buffer.indexOf(0x22);
+          if (quoteIndex < 0) {
+            await writeBase64AssetChunk(activeAsset, buffer.toString('ascii'));
+            buffer = Buffer.alloc(0);
+            break;
+          }
+
+          await writeBase64AssetChunk(activeAsset, buffer.subarray(0, quoteIndex).toString('ascii'));
+          await finishLargeProjectAsset(activeAsset);
+          activeAsset = null;
+          buffer = buffer.subarray(quoteIndex + 1);
+          state = 'scan';
+        }
+      }
+    }
+
+    if (state !== 'scan') {
+      throw new Error('超大工程中的内嵌素材数据不完整，无法完成流式打开。');
+    }
+
+    await writeRaw(buffer);
+    output.end();
+    await once(output, 'finish');
+    const document = JSON.parse((await readFile(slimPath, 'utf8')).replace(/^\uFEFF/, ''));
+    runtimeAssetDirs.add(runtimeDir);
+    return {
+      document,
+      largeProject: {
+        streamed: true,
+        originalBytes: statSync(inputPath).size,
+        slimBytes: statSync(slimPath).size,
+        extractedAssets: extractedAssets.map((asset) => ({
+          name: asset.name,
+          extension: asset.extension,
+          bytes: asset.bytes,
+          path: asset.path
+        }))
+      }
+    };
+  } catch (error) {
+    if (activeAsset?.stream) {
+      activeAsset.stream.destroy();
+    }
+    output.destroy();
+    await rm(runtimeDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function createLargeProjectAsset(runtimeDir, header, recentText, index) {
+  if (!/;base64,$/i.test(header)) {
+    throw new Error('超大工程包含非 base64 的 dataUrl，暂时无法流式拆包。');
+  }
+
+  const mime = /^data:([^;,]+)?/i.exec(header)?.[1] || 'application/octet-stream';
+  const name = inferRecentProjectString(recentText, 'name') ||
+    inferRecentProjectString(recentText, 'label') ||
+    `asset-${index + 1}`;
+  const extension = inferLargeProjectAssetExtension(recentText, mime, name);
+  const safeName = sanitizeFilename(name);
+  const filename = `${String(index + 1).padStart(3, '0')}-${safeName.toLowerCase().endsWith(`.${extension}`) ? safeName : `${safeName}.${extension}`}`;
+  const filePath = path.join(runtimeDir, filename);
+  const url = registerRuntimeAsset(filePath, filename);
+  const stream = createWriteStream(filePath);
+  const summary = {
+    name,
+    extension,
+    mime,
+    path: filePath,
+    url,
+    bytes: 0
+  };
+  return {
+    stream,
+    summary,
+    base64Remainder: ''
+  };
+}
+
+function createLargeProjectAssetReplacement(asset) {
+  return [
+    '"dataUrl":null',
+    `"path":${JSON.stringify(asset.summary.path)}`,
+    `"sourcePath":${JSON.stringify(asset.summary.path)}`,
+    `"url":${JSON.stringify(asset.summary.url)}`
+  ].join(',');
+}
+
+async function writeBase64AssetChunk(asset, chunk) {
+  if (!asset || !chunk) {
+    return;
+  }
+  const clean = chunk.replace(/\s+/g, '');
+  if (!clean) {
+    return;
+  }
+  const combined = `${asset.base64Remainder}${clean}`;
+  const flushLength = combined.length - (combined.length % 4);
+  if (flushLength > 0) {
+    const bytes = Buffer.from(combined.slice(0, flushLength), 'base64');
+    if (bytes.length) {
+      asset.summary.bytes += bytes.length;
+      await writeStreamChunk(asset.stream, bytes);
+    }
+  }
+  asset.base64Remainder = combined.slice(flushLength);
+}
+
+async function finishLargeProjectAsset(asset) {
+  if (!asset) {
+    return;
+  }
+  if (asset.base64Remainder) {
+    const bytes = Buffer.from(asset.base64Remainder, 'base64');
+    if (bytes.length) {
+      asset.summary.bytes += bytes.length;
+      await writeStreamChunk(asset.stream, bytes);
+    }
+    asset.base64Remainder = '';
+  }
+  asset.stream.end();
+  await once(asset.stream, 'finish');
+}
+
+function registerRuntimeAsset(filePath, filename = path.basename(filePath)) {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  runtimeAssetMap.set(token, filePath);
+  return `/__runtime-asset/${token}/${encodeURIComponent(filename)}`;
+}
+
+function inferRecentProjectString(text, key) {
+  const matches = [...String(text).matchAll(new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'g'))];
+  const raw = matches.at(-1)?.[1];
+  if (!raw) {
+    return '';
+  }
+  try {
+    return JSON.parse(`"${raw}"`);
+  } catch {
+    return raw;
+  }
+}
+
+function inferLargeProjectAssetExtension(recentText, mime, name) {
+  const explicit = inferRecentProjectString(recentText, 'extension');
+  const fromName = String(name || '').split('.').pop();
+  const fromMime = extensionFromMime(mime);
+  return sanitizeProjectAssetExtension(explicit || fromName || fromMime || 'bin');
+}
+
+function extensionFromMime(mime) {
+  const values = {
+    'model/gltf-binary': 'glb',
+    'model/gltf+json': 'gltf',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/vnd.radiance': 'hdr',
+    'image/x-exr': 'exr',
+    'video/mp4': 'mp4',
+    'video/quicktime': 'mov',
+    'video/webm': 'webm'
+  };
+  return values[String(mime || '').toLowerCase()] || '';
+}
+
+function sanitizeProjectAssetExtension(value) {
+  const extension = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return extension || 'bin';
 }
 
 function materializeProjectAssetPaths(document) {
