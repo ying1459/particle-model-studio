@@ -100,6 +100,11 @@ try {
     const rightResizer = document.querySelector('.workspace-resizer-right');
     const timelineResizer = document.querySelector('.workspace-resizer-timeline');
     const sceneRows = document.querySelectorAll('.scene-model-row').length;
+    const frameTicks = [...document.querySelectorAll('.timeline-frame-tick')].map((item) => item.textContent.trim()).filter(Boolean);
+    const timelineValue = document.querySelector('#timelineValue')?.textContent || '';
+    const propertyTabs = [...document.querySelectorAll('.workspace-property-tab')].map((item) => item.dataset.propertyTab);
+    const activePropertyTab = document.querySelector('.workspace-property-tab.active')?.dataset.propertyTab || '';
+    const visiblePropertyPage = document.querySelector('.workspace-property-page:not([hidden])')?.dataset.propertyPage || '';
     const panelRect = panel.getBoundingClientRect();
     const canvasRect = canvas.getBoundingClientRect();
     const topbarRect = topbar.getBoundingClientRect();
@@ -122,6 +127,11 @@ try {
       propertiesHeight: Math.round(properties.getBoundingClientRect().height),
       hasRightResizer: Boolean(rightResizer),
       hasTimelineResizer: Boolean(timelineResizer),
+      frameTicks,
+      timelineValue,
+      propertyTabs,
+      activePropertyTab,
+      visiblePropertyPage,
       sceneRows
     };
   });
@@ -140,6 +150,12 @@ try {
     uiLayout.propertiesHeight < 160 ||
     !uiLayout.hasRightResizer ||
     !uiLayout.hasTimelineResizer ||
+    uiLayout.frameTicks.length < 4 ||
+    !uiLayout.frameTicks.includes('1') ||
+    !/^.+F\d+/.test(uiLayout.timelineValue) ||
+    uiLayout.propertyTabs.length < 8 ||
+    !uiLayout.propertyTabs.includes('camera') ||
+    uiLayout.activePropertyTab !== uiLayout.visiblePropertyPage ||
     uiLayout.sceneRows < 1
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);

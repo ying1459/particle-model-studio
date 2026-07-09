@@ -128,7 +128,8 @@ const PICK_POINT_SAMPLE_LIMIT = 16000;
 const MODEL_PICK_BOX_PADDING_PX = 42;
 const CAMERA_PREVIEW_ORBIT_PAUSE_MS = 160;
 const PANEL_COLLAPSED_STORAGE_KEY = 'particle-studio-panel-collapsed';
-const WORKSPACE_LAYOUT_STORAGE_KEY = 'particle-studio-workspace-layout';
+const WORKSPACE_LAYOUT_STORAGE_KEY = 'particle-studio-workspace-layout-v2';
+const WORKSPACE_PROPERTY_TAB_STORAGE_KEY = 'particle-studio-property-tab-v1';
 const CAMERA_PREVIEW_VISIBLE_STORAGE_KEY = 'particle-studio-camera-preview-visible';
 const requestedPixelRatio = Number.isFinite(exportSettings.pixelRatio) ? exportSettings.pixelRatio : 1;
 const renderPixelRatio = exportSettings.hideUi
@@ -437,7 +438,7 @@ const lightsUi = {
 
 const workspaceLayoutDefaults = {
   rightWidth: 360,
-  timelineHeight: 184,
+  timelineHeight: 156,
   outlinerHeight: 252
 };
 let workspaceLayoutState = { ...workspaceLayoutDefaults };
@@ -452,7 +453,7 @@ function clampWorkspaceLayout(layout = workspaceLayoutState) {
   const viewportWidth = Math.max(760, window.innerWidth || 1280);
   const viewportHeight = Math.max(560, window.innerHeight || 780);
   const rightWidth = clampLayoutValue(layout.rightWidth, 300, viewportWidth - 420);
-  const timelineHeight = clampLayoutValue(layout.timelineHeight, 120, viewportHeight - 220);
+  const timelineHeight = clampLayoutValue(layout.timelineHeight, 112, viewportHeight - 220);
   const outlinerHeight = clampLayoutValue(
     layout.outlinerHeight,
     116,
@@ -572,6 +573,221 @@ function setupWorkspaceDragHandle(handle, onDrag) {
   handle.addEventListener('pointercancel', endDrag);
 }
 
+function createWorkspaceTimelineDock(cameraRow) {
+  const timelineDock = document.createElement('section');
+  timelineDock.className = 'workspace-timeline-dock';
+  timelineDock.setAttribute('aria-label', 'Timeline');
+
+  const timelineWrap = cameraRow.querySelector('.timeline-wrap');
+  const cameraActions = cameraRow.querySelector('.camera-actions');
+  const numberRow = cameraRow.querySelector('.number-row');
+  const timelineValue = document.querySelector('#timelineValue');
+
+  const header = document.createElement('div');
+  header.className = 'workspace-timeline-head';
+  const title = document.createElement('div');
+  title.className = 'workspace-timeline-title';
+  title.innerHTML = '<span>时间轴</span><small>拖动蓝色播放头，拖动菱形关键帧改变时间</small>';
+  const current = document.createElement('div');
+  current.className = 'workspace-current-time';
+  if (timelineValue) {
+    current.append(timelineValue);
+  }
+  header.append(title, current);
+
+  if (timelineWrap) {
+    timelineWrap.classList.add('workspace-timeline-wrap');
+    if (!timelineWrap.querySelector('.timeline-frame-ticks')) {
+      const ticks = document.createElement('div');
+      ticks.className = 'timeline-frame-ticks';
+      ticks.setAttribute('aria-hidden', 'true');
+      timelineWrap.prepend(ticks);
+    }
+  }
+  if (controlsUi.timelineMarkers) {
+    controlsUi.timelineMarkers.classList.add('workspace-keyframe-lane');
+  }
+
+  const controls = document.createElement('div');
+  controls.className = 'workspace-timeline-controls';
+  if (cameraActions) {
+    controls.append(cameraActions);
+  }
+  if (numberRow) {
+    controls.append(numberRow);
+  }
+
+  timelineDock.append(header);
+  if (timelineWrap) {
+    timelineDock.append(timelineWrap);
+  }
+  timelineDock.append(controls);
+  return timelineDock;
+}
+
+function createWorkspaceCameraProperties(cameraRow) {
+  const section = document.createElement('section');
+  section.className = 'workspace-camera-properties modifier-section';
+  section.setAttribute('aria-label', 'Camera properties');
+  section.append(createWorkspacePaneHeader('相机与动画', '镜头、景深、路径、K 帧'));
+  cameraRow.classList.add('workspace-camera-properties-row');
+  section.append(cameraRow);
+  return section;
+}
+
+const workspacePropertyCategories = [
+  { id: 'setup', label: '工程', icon: '文', description: '导入、工程、预设、模式' },
+  { id: 'camera', label: '相机', icon: '相', description: '镜头、景深、路径、K 帧' },
+  { id: 'particle', label: '粒子', icon: '粒', description: '基础粒子、模型转粒子、噪波运动' },
+  { id: 'growth', label: '生长', icon: '生', description: '生长、流丝、边缘破碎' },
+  { id: 'dissolve', label: '消散', icon: '散', description: '消散、边缘、方向' },
+  { id: 'emission', label: '逸散', icon: '发', description: '模型逸散、局部破碎' },
+  { id: 'image', label: '图像', icon: '图', description: '图片粒子、高斯场景' },
+  { id: 'morph', label: '转换', icon: '换', description: '粒子转换' },
+  { id: 'lights', label: '灯光', icon: '灯', description: '灯光列表与参数' },
+  { id: 'world', label: '环境', icon: '环', description: 'HDR / EXR 环境' },
+  { id: 'input', label: '交互', icon: '手', description: '手势控制' },
+  { id: 'export', label: '导出', icon: '出', description: '导出与系统工具' }
+];
+
+function classifyWorkspacePropertyNode(node) {
+  if (!node) {
+    return 'setup';
+  }
+  if (node.classList?.contains('workspace-camera-properties')) {
+    return 'camera';
+  }
+  if (node.id === 'emissionPanel') {
+    return 'emission';
+  }
+  if (node.id === 'imageSplatPanel') {
+    return 'image';
+  }
+  if (node.id === 'morphPanel' || node.querySelector?.('#morphProgress')) {
+    return 'morph';
+  }
+  if (node.id === 'lightsPanel' || node.querySelector?.('#lightList')) {
+    return 'lights';
+  }
+  if (node.id === 'handControlPanel' || node.querySelector?.('#handControlEnabled')) {
+    return 'input';
+  }
+  if (node.classList?.contains('export-row') || node.querySelector?.('#exportFormat') || node.querySelector?.('#checkLocalSharp')) {
+    return 'export';
+  }
+  if (node.querySelector?.('#worldEnabled') || node.querySelector?.('#worldInput')) {
+    return 'world';
+  }
+  if (node.querySelector?.('#growth') || node.querySelector?.('#organicFlow') || node.querySelector?.('#filamentLength')) {
+    return 'growth';
+  }
+  if (node.querySelector?.('#dissolve') || node.querySelector?.('#dissolveSpread') || node.querySelector?.('#dissolveDirectionX')) {
+    return 'dissolve';
+  }
+  if (
+    node.querySelector?.('#particleCount') ||
+    node.querySelector?.('#particleizeProgress') ||
+    node.querySelector?.('#spread') ||
+    node.querySelector?.('#pointSize')
+  ) {
+    return 'particle';
+  }
+  if (
+    node.classList?.contains('brand') ||
+    node.classList?.contains('project-bar') ||
+    node.classList?.contains('drop-zone') ||
+    node.classList?.contains('toolbar') ||
+    node.classList?.contains('mode-switch')
+  ) {
+    return 'setup';
+  }
+  return 'setup';
+}
+
+function setWorkspacePropertyTab(root, pageId, options = {}) {
+  if (!root) {
+    return;
+  }
+  const pages = [...root.querySelectorAll('.workspace-property-page')];
+  const buttons = [...root.querySelectorAll('.workspace-property-tab')];
+  const fallback = pages[0]?.dataset.propertyPage || 'camera';
+  const activeId = pages.some((page) => page.dataset.propertyPage === pageId) ? pageId : fallback;
+  pages.forEach((page) => {
+    page.hidden = page.dataset.propertyPage !== activeId;
+  });
+  buttons.forEach((button) => {
+    const active = button.dataset.propertyTab === activeId;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  if (options.persist !== false) {
+    try {
+      window.localStorage?.setItem(WORKSPACE_PROPERTY_TAB_STORAGE_KEY, activeId);
+    } catch {
+      // ignore storage failures
+    }
+  }
+}
+
+function createWorkspacePropertyBrowser(children = []) {
+  const browser = document.createElement('div');
+  browser.className = 'workspace-property-browser';
+
+  const tabs = document.createElement('nav');
+  tabs.className = 'workspace-property-tabs';
+  tabs.setAttribute('aria-label', '属性分类');
+
+  const pagesRoot = document.createElement('div');
+  pagesRoot.className = 'workspace-property-pages';
+
+  const pageMap = new Map();
+  workspacePropertyCategories.forEach((category) => {
+    const page = document.createElement('section');
+    page.className = 'workspace-property-page';
+    page.dataset.propertyPage = category.id;
+    page.hidden = true;
+    pageMap.set(category.id, { category, page, count: 0 });
+  });
+
+  children.forEach((child) => {
+    const pageId = classifyWorkspacePropertyNode(child);
+    const entry = pageMap.get(pageId) || pageMap.get('setup');
+    entry.page.append(child);
+    entry.count += 1;
+  });
+
+  pageMap.forEach(({ category, page, count }) => {
+    if (!count) {
+      return;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'workspace-property-tab';
+    button.dataset.propertyTab = category.id;
+    button.title = `${category.label} - ${category.description}`;
+    button.setAttribute('role', 'tab');
+    button.setAttribute('aria-selected', 'false');
+    button.innerHTML = `<span class="workspace-property-tab-icon">${category.icon}</span><span class="workspace-property-tab-label">${category.label}</span>`;
+    button.addEventListener('click', () => setWorkspacePropertyTab(browser, category.id));
+    tabs.append(button);
+
+    const pageHeader = createWorkspacePaneHeader(category.label, category.description);
+    page.prepend(pageHeader);
+    pagesRoot.append(page);
+  });
+
+  browser.append(tabs, pagesRoot);
+  const savedTab = (() => {
+    try {
+      return window.localStorage?.getItem(WORKSPACE_PROPERTY_TAB_STORAGE_KEY) || 'camera';
+    } catch {
+      return 'camera';
+    }
+  })();
+  setWorkspacePropertyTab(browser, savedTab, { persist: false });
+  return browser;
+}
+
 function setupWorkspaceLayout() {
   if (exportSettings.hideUi || document.body.classList.contains('workspace-layout')) {
     return;
@@ -619,10 +835,7 @@ function setupWorkspaceLayout() {
     leftToolbar.append(item);
   });
 
-  const timelineDock = document.createElement('section');
-  timelineDock.className = 'workspace-timeline-dock';
-  timelineDock.setAttribute('aria-label', 'Timeline');
-  timelineDock.append(cameraRow);
+  const timelineDock = createWorkspaceTimelineDock(cameraRow);
 
   const rightWidthHandle = document.createElement('div');
   rightWidthHandle.className = 'workspace-resizer workspace-resizer-right';
@@ -654,12 +867,15 @@ function setupWorkspaceLayout() {
   const propertiesPane = document.createElement('section');
   propertiesPane.className = 'workspace-properties-pane';
   propertiesPane.setAttribute('aria-label', 'Properties');
+  const cameraPropertiesSection = createWorkspaceCameraProperties(cameraRow);
   propertiesPane.append(createWorkspacePaneHeader('属性与特效', '粒子、材质、灯光、导出'));
+  const propertyChildren = [cameraPropertiesSection];
   [...panel.children].forEach((child) => {
     if (child !== sceneModelsPanel && child !== videoPlanesPanel && child !== cameraRow) {
-      propertiesPane.append(child);
+      propertyChildren.push(child);
     }
   });
+  propertiesPane.append(createWorkspacePropertyBrowser(propertyChildren));
   panel.replaceChildren(outlinerPane, paneSplitHandle, propertiesPane);
 
   app.prepend(topbar, leftToolbar);
@@ -806,6 +1022,7 @@ const cameraAnimation = {
 };
 const parameterKeyframes = [];
 const parameterKeyframeButtons = new Map();
+let timelineMarkerDrag = null;
 const VALID_CAMERA_PATH_MODES = new Set(['linear', 'bezier', 'smooth']);
 const VALID_CAMERA_CURVES = new Set(['linear', 'easeInOut', 'easeIn', 'easeOut', 'hold']);
 const undoHistory = {
@@ -3022,7 +3239,8 @@ const particleMaterial = new THREE.ShaderMaterial({
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
-      float depthScale = clamp(pow(4.8 / cameraDepth, 0.45), 0.55, 3.0);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
+      float depthScale = clamp(pow(4.8 / cameraDepth, 0.72) * pow(projectionBoost, 0.62), 0.58, 4.8);
       float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
       float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
       float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
@@ -3350,7 +3568,8 @@ const emissionMaterial = new THREE.ShaderMaterial({
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
-      float depthScale = clamp(pow(4.8 / cameraDepth, 0.45), 0.52, 2.8);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
+      float depthScale = clamp(pow(4.8 / cameraDepth, 0.72) * pow(projectionBoost, 0.62), 0.56, 4.6);
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
@@ -3504,7 +3723,8 @@ const imageSplatVertexShader = `
     p += aScatter * uScatter * (0.18 + mist * (0.62 + aSeed * 1.18));
 
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    float perspectiveScale = clamp(pow(3.6 / max(0.8, -mvPosition.z), 0.45), 0.68, 2.0);
+    float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
+    float perspectiveScale = clamp(pow(3.6 / max(0.8, -mvPosition.z), 0.72) * pow(projectionBoost, 0.62), 0.64, 3.6);
     float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
     float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
@@ -3635,7 +3855,8 @@ const realSplatPointMaterial = new THREE.ShaderMaterial({
       p += curl * uTurbulence * (0.018 + seed * 0.035) * (0.35 + stream);
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-      float perspectiveScale = clamp(pow(4.8 / max(0.8, -mvPosition.z), 0.45), 0.7, 2.2);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
+      float perspectiveScale = clamp(pow(4.8 / max(0.8, -mvPosition.z), 0.72) * pow(projectionBoost, 0.62), 0.66, 3.8);
       float glowScale = 1.0 + (1.0 - exp(-max(uGlow, 0.0) * 0.72)) * 0.18;
       gl_PointSize = max(0.85, uPointSize * uPixelRatio * perspectiveScale * aScale * glowScale);
       gl_Position = projectionMatrix * mvPosition;
@@ -4301,7 +4522,9 @@ function saveActiveSceneModel(options = {}) {
   record.transform = captureActiveSceneModelTransform();
   record.effectRotation = modelEffectRoot.rotation.toArray();
   if (options.createSnapshot !== false) {
-    buildSceneModelSnapshotFromActive(record);
+    if (!updateSceneModelSnapshotFromRecord(record)) {
+      buildSceneModelSnapshotFromActive(record);
+    }
   }
   renderSceneModelList();
   return record;
@@ -4388,6 +4611,40 @@ function disposeSceneModelSnapshot(record) {
   });
   scene.remove(record.snapshotRoot);
   record.snapshotRoot = null;
+  record.snapshotFingerprint = '';
+}
+
+function getSceneModelSnapshotFingerprint(record) {
+  if (!record) {
+    return '';
+  }
+  const options = sanitizeSceneModelOptions(record.options);
+  return JSON.stringify({
+    source: record.source?.uuid || record.name || record.id,
+    effectMode: options.effectMode,
+    particleCount: options.particleCount,
+    emissionCount: options.emissionCount,
+    emissionEnabled: Boolean(options.emissionEnabled),
+    modelVisibility: Number(options.modelVisibility ?? 1),
+    particleizeProgress: Number(options.particleizeProgress ?? 1)
+  });
+}
+
+function updateSceneModelSnapshotFromRecord(record) {
+  if (!record?.snapshotRoot) {
+    return false;
+  }
+  const fingerprint = getSceneModelSnapshotFingerprint(record);
+  if (record.snapshotFingerprint && record.snapshotFingerprint !== fingerprint) {
+    return false;
+  }
+  applySceneModelTransformToObject(record.snapshotRoot, record.transform);
+  const effectRoot = record.snapshotRoot.children[0];
+  if (effectRoot) {
+    effectRoot.rotation.fromArray(normalizeVectorArray(record.effectRotation, [0, 0, 0]));
+  }
+  record.snapshotFingerprint = fingerprint;
+  return true;
 }
 
 function buildSceneModelSnapshotFromActive(record) {
@@ -4440,6 +4697,7 @@ function buildSceneModelSnapshotFromActive(record) {
 
   scene.add(root);
   record.snapshotRoot = root;
+  record.snapshotFingerprint = getSceneModelSnapshotFingerprint(record);
 }
 
 function createSceneModelVisibleSnapshot(source, options = {}) {
@@ -4644,7 +4902,9 @@ function updateSceneModelSnapshotUniforms() {
     if (!record.snapshotRoot) {
       return;
     }
-    record.snapshotRoot.visible = !record.hidden && THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
+    record.snapshotRoot.visible = record.id !== selectedSceneModelId &&
+      !record.hidden &&
+      THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
     const solidOpacity = THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) *
       getParticleDissolveSolidOpacity(record.options);
     record.snapshotRoot.traverse((node) => {
@@ -4729,7 +4989,9 @@ function toggleSceneModelHidden(recordId) {
   recordUndoStep(record.hidden ? '显示模型' : '隐藏模型');
   record.hidden = !record.hidden;
   if (record.snapshotRoot) {
-    record.snapshotRoot.visible = !record.hidden && THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
+    record.snapshotRoot.visible = record.id !== selectedSceneModelId &&
+      !record.hidden &&
+      THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
   }
   if (record.id === selectedSceneModelId) {
     syncEffectVisibility();
@@ -4788,7 +5050,9 @@ async function activateSceneModel(recordId, options = {}) {
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
   selectedCameraBezierHandle = null;
-  disposeSceneModelSnapshot(record);
+  if (record.snapshotRoot) {
+    record.snapshotRoot.visible = false;
+  }
   removeImageSplatObject();
   await removeRealSplatObject();
   currentImageSplatPayload = null;
@@ -11292,7 +11556,7 @@ function syncUi() {
 
   setValueInput('particleCount', state.particleCount);
   NUMERIC_KEYFRAME_FIELDS.forEach((field) => setValueInput(field, state[field]));
-  outputUi.timeline.value = `${cameraAnimation.time.toFixed(2)}s`;
+  outputUi.timeline.value = formatTimelineOutput();
   controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length);
   syncEffectVisibility();
   renderSceneModelList();
@@ -12290,7 +12554,7 @@ function clearCameraKeyframes() {
 function setCameraTime(value, applyCamera = true) {
   cameraAnimation.time = THREE.MathUtils.clamp(value, 0, cameraAnimation.duration);
   controlsUi.timeline.value = cameraAnimation.time;
-  outputUi.timeline.value = `${cameraAnimation.time.toFixed(2)}s`;
+  outputUi.timeline.value = formatTimelineOutput();
 
   if (applyCamera && (cameraAnimation.keyframes.length || parameterKeyframes.length)) {
     applyTimelineAtTime(cameraAnimation.time, { updateUi: true });
@@ -12809,25 +13073,205 @@ function catmullRom(p0, p1, p2, p3, t) {
   );
 }
 
+function getTimelineFps() {
+  const fps = Math.round(Number(controlsUi.exportFps?.value) || 30);
+  return THREE.MathUtils.clamp(fps, 1, 120);
+}
+
+function getTimelineTotalFrames() {
+  return Math.max(1, Math.round(cameraAnimation.duration * getTimelineFps()));
+}
+
+function getTimelineFrameAtTime(time = cameraAnimation.time) {
+  const totalFrames = getTimelineTotalFrames();
+  if (totalFrames <= 1 || cameraAnimation.duration <= 0) {
+    return 1;
+  }
+  const ratio = THREE.MathUtils.clamp(Number(time) / cameraAnimation.duration, 0, 1);
+  return THREE.MathUtils.clamp(Math.round(ratio * (totalFrames - 1)) + 1, 1, totalFrames);
+}
+
+function getTimelineTimeAtFrame(frame = 1) {
+  const totalFrames = getTimelineTotalFrames();
+  if (totalFrames <= 1) {
+    return 0;
+  }
+  const safeFrame = THREE.MathUtils.clamp(Math.round(Number(frame) || 1), 1, totalFrames);
+  return ((safeFrame - 1) / (totalFrames - 1)) * cameraAnimation.duration;
+}
+
+function formatTimelineOutput() {
+  return `${cameraAnimation.time.toFixed(2)}s / F${getTimelineFrameAtTime(cameraAnimation.time)}`;
+}
+
+function getNiceFrameStep(rawStep) {
+  const safeStep = Math.max(1, Number(rawStep) || 1);
+  const exponent = Math.floor(Math.log10(safeStep));
+  const base = 10 ** exponent;
+  const normalized = safeStep / base;
+  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return Math.max(1, Math.round(nice * base));
+}
+
+function renderTimelineFrameTicks() {
+  const timelineWrap = controlsUi.timelineMarkers?.closest('.timeline-wrap');
+  const ticks = timelineWrap?.querySelector('.timeline-frame-ticks');
+  if (!timelineWrap || !ticks) {
+    return;
+  }
+
+  const totalFrames = getTimelineTotalFrames();
+  const width = Math.max(360, Math.round(timelineWrap.clientWidth || 0));
+  const labelCount = Math.max(2, Math.floor(width / 72));
+  const step = getNiceFrameStep(totalFrames / Math.max(1, labelCount - 1));
+  const frames = new Set([1, totalFrames]);
+  for (let frame = 1; frame <= totalFrames; frame += step) {
+    frames.add(frame);
+  }
+
+  ticks.innerHTML = '';
+  [...frames].sort((a, b) => a - b).forEach((frame) => {
+    const tick = document.createElement('span');
+    tick.className = 'timeline-frame-tick';
+    tick.style.left = `${totalFrames <= 1 ? 0 : ((frame - 1) / (totalFrames - 1)) * 100}%`;
+    tick.textContent = String(frame);
+    ticks.append(tick);
+  });
+
+  if (controlsUi.timeline) {
+    controlsUi.timeline.step = String(Math.max(0.001, cameraAnimation.duration / Math.max(totalFrames - 1, 1)));
+  }
+}
+
+function getTimelinePointerTime(event) {
+  const timelineElement = controlsUi.timelineMarkers || controlsUi.timeline;
+  const rect = timelineElement?.getBoundingClientRect?.();
+  if (!rect || rect.width <= 0) {
+    return cameraAnimation.time;
+  }
+  const ratio = THREE.MathUtils.clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  const rawTime = THREE.MathUtils.clamp(ratio * cameraAnimation.duration, 0, cameraAnimation.duration);
+  return getTimelineTimeAtFrame(getTimelineFrameAtTime(rawTime));
+}
+
+function createTimelineMarker(type, time, options = {}) {
+  const marker = document.createElement('button');
+  marker.type = 'button';
+  marker.className = `timeline-marker ${type === 'parameter' ? 'parameter-marker' : 'camera-marker'}`;
+  marker.style.left = `${(time / Math.max(cameraAnimation.duration, 0.0001)) * 100}%`;
+  marker.dataset.timelineMarkerType = type;
+  marker.dataset.timelineTime = String(time);
+  if (options.keyframeId) {
+    marker.dataset.keyframeId = options.keyframeId;
+  }
+  if (options.parameterIds?.length) {
+    marker.dataset.parameterIds = options.parameterIds.join(',');
+  }
+  marker.title = type === 'parameter'
+    ? `参数关键帧 ${time.toFixed(2)}s（可拖动）`
+    : `相机关键帧 ${time.toFixed(2)}s（可拖动）`;
+  marker.setAttribute('aria-label', marker.title);
+  marker.addEventListener('pointerdown', beginTimelineMarkerDrag);
+  marker.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (type === 'camera' && options.keyframeId) {
+      const keyframe = cameraAnimation.keyframes.find((item) => item.id === options.keyframeId);
+      if (keyframe) {
+        setCameraTime(keyframe.time, true);
+        selectCameraKeyframeHandle(keyframe.id);
+      }
+    } else {
+      setCameraTime(time, true);
+    }
+  });
+  return marker;
+}
+
+function beginTimelineMarkerDrag(event) {
+  if (event.button !== 0) {
+    return;
+  }
+  const marker = event.currentTarget;
+  if (!marker?.dataset?.timelineMarkerType) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+
+  const type = marker.dataset.timelineMarkerType;
+  const keyframeId = marker.dataset.keyframeId || '';
+  const parameterIds = (marker.dataset.parameterIds || '').split(',').filter(Boolean);
+  const groupTime = Number(marker.dataset.timelineTime) || 0;
+  timelineMarkerDrag = { type, keyframeId, parameterIds, groupTime };
+  recordUndoStep(type === 'camera' ? '移动相机关键帧' : '移动参数关键帧');
+  document.body.classList.add('timeline-marker-dragging');
+  updateTimelineMarkerDrag(event);
+
+  const handleMove = (moveEvent) => updateTimelineMarkerDrag(moveEvent);
+  const handleUp = (upEvent) => {
+    updateTimelineMarkerDrag(upEvent);
+    timelineMarkerDrag = null;
+    document.body.classList.remove('timeline-marker-dragging');
+    window.removeEventListener('pointermove', handleMove);
+    window.removeEventListener('pointerup', handleUp);
+    window.removeEventListener('pointercancel', handleUp);
+    refreshCameraTimeline();
+    setCameraPreviewDirty();
+  };
+  window.addEventListener('pointermove', handleMove);
+  window.addEventListener('pointerup', handleUp, { once: true });
+  window.addEventListener('pointercancel', handleUp, { once: true });
+}
+
+function updateTimelineMarkerDrag(event) {
+  if (!timelineMarkerDrag) {
+    return;
+  }
+  event.preventDefault();
+  const time = getTimelinePointerTime(event);
+  if (timelineMarkerDrag.type === 'camera') {
+    const keyframe = cameraAnimation.keyframes.find((item) => item.id === timelineMarkerDrag.keyframeId);
+    if (!keyframe) {
+      return;
+    }
+    keyframe.time = time;
+    selectedKeyframeId = keyframe.id;
+    cameraAnimation.keyframes.sort((a, b) => a.time - b.time);
+  } else if (timelineMarkerDrag.parameterIds.length) {
+    const ids = new Set(timelineMarkerDrag.parameterIds);
+    parameterKeyframes.forEach((keyframe) => {
+      if (ids.has(keyframe.id)) {
+        keyframe.time = time;
+      }
+    });
+  }
+  setCameraTime(time, true);
+  refreshCameraTimeline();
+}
+
 function refreshCameraTimeline() {
   controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length);
   controlsUi.timelineMarkers.innerHTML = '';
+  renderTimelineFrameTicks();
 
   getSortedCameraKeyframes().forEach((keyframe) => {
-    const marker = document.createElement('span');
-    marker.className = 'timeline-marker';
-    marker.style.left = `${(keyframe.time / cameraAnimation.duration) * 100}%`;
-    controlsUi.timelineMarkers.append(marker);
+    controlsUi.timelineMarkers.append(createTimelineMarker('camera', keyframe.time, { keyframeId: keyframe.id }));
   });
-  [...new Set(parameterKeyframes.map((keyframe) => Number(keyframe.time.toFixed(3))))].forEach((time) => {
+  const parameterGroups = new Map();
+  parameterKeyframes.forEach((keyframe) => {
+    const time = Number(keyframe.time.toFixed(3));
+    if (!parameterGroups.has(time)) {
+      parameterGroups.set(time, []);
+    }
+    parameterGroups.get(time).push(keyframe.id);
+  });
+  parameterGroups.forEach((parameterIds, time) => {
     const nearCameraMarker = cameraAnimation.keyframes.some((keyframe) => Math.abs(keyframe.time - time) < 0.035);
     if (nearCameraMarker) {
       return;
     }
-    const marker = document.createElement('span');
-    marker.className = 'timeline-marker parameter-marker';
-    marker.style.left = `${(time / cameraAnimation.duration) * 100}%`;
-    controlsUi.timelineMarkers.append(marker);
+    controlsUi.timelineMarkers.append(createTimelineMarker('parameter', time, { parameterIds }));
   });
   updateParameterKeyframeButtons();
 
@@ -14518,7 +14962,7 @@ function setSceneModelSnapshotsVisible(visible) {
       return;
     }
     previous.push([record.snapshotRoot, record.snapshotRoot.visible]);
-    record.snapshotRoot.visible = visible && !record.hidden;
+    record.snapshotRoot.visible = visible && record.id !== selectedSceneModelId && !record.hidden;
   });
 
   return () => {
@@ -15800,6 +16244,10 @@ outputUi.cameraDisplaySize?.addEventListener('change', () => {
     updateCameraPreviewLayout(true);
     setCameraPreviewDirty();
   });
+  controlsUi.exportFps?.addEventListener(eventName, () => {
+    renderTimelineFrameTicks();
+    outputUi.timeline.value = formatTimelineOutput();
+  });
 });
 
 controlsUi.timeline.addEventListener('input', () => {
@@ -16303,6 +16751,7 @@ function resizeRenderer() {
   resizePostTargets();
   uniforms.uPixelRatio.value = studioPixelRatio;
   imageSplatUniforms.uPixelRatio.value = studioPixelRatio;
+  renderTimelineFrameTicks();
   updateCameraPreviewLayout(true);
   setCameraPreviewDirty();
 }

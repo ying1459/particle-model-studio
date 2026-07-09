@@ -1110,26 +1110,64 @@ select option:checked {
   position: absolute;
   inset: 14px 0 auto;
   height: 8px;
+  pointer-events: auto;
+}
+
+.timeline-frame-ticks {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 16px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+.timeline-frame-tick {
+  position: absolute;
+  top: 0;
+  min-width: 20px;
+  transform: translateX(-50%);
+  text-align: center;
+}
+
+.timeline-frame-tick::before {
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  width: 1px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .timeline-marker {
   position: absolute;
   top: 0;
-  width: 6px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.55);
   border-radius: 2px;
   background: var(--amber);
-  transform: translateX(-3px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.42);
+  transform: translate(-6px, -2px) rotate(45deg);
+  cursor: ew-resize;
+  pointer-events: auto;
 }
 
 .timeline-marker.parameter-marker {
-  top: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+  top: 1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
   background: var(--cyan);
   opacity: 0.9;
+}
+
+.timeline-marker:hover {
+  filter: brightness(1.2);
+  z-index: 3;
 }
 
 .camera-actions,
@@ -1534,8 +1572,118 @@ body.workspace-layout .workspace-outliner-pane {
 }
 
 body.workspace-layout .workspace-properties-pane {
-  padding: 8px 10px 16px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 8px 8px 10px;
+  overflow: hidden;
   background: #25272c;
+}
+
+body.workspace-layout .workspace-property-browser {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 9px;
+  background: #202226;
+}
+
+body.workspace-layout .workspace-property-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 0;
+  padding: 7px 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-right: 1px solid rgba(0, 0, 0, 0.55);
+  background: #1b1d21;
+  scrollbar-width: thin;
+}
+
+body.workspace-layout .workspace-property-tab {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  min-height: 38px;
+  padding: 3px 0;
+  color: #b8c0c8;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 7px;
+  background: #2d3036;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+body.workspace-layout .workspace-property-tab:hover {
+  color: #eef6ff;
+  border-color: rgba(0, 240, 255, 0.26);
+  background: #343842;
+}
+
+body.workspace-layout .workspace-property-tab.active {
+  color: #fff;
+  border-color: rgba(0, 240, 255, 0.56);
+  background:
+    linear-gradient(135deg, rgba(0, 240, 255, 0.28), rgba(255, 191, 54, 0.18)),
+    #3a404a;
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+body.workspace-layout .workspace-property-tab-icon {
+  font-size: 14px;
+  font-weight: 820;
+  line-height: 1;
+}
+
+body.workspace-layout .workspace-property-tab-label {
+  max-width: 32px;
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.workspace-layout .workspace-property-pages {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.workspace-layout .workspace-property-page {
+  height: 100%;
+  min-height: 0;
+  padding: 7px 8px 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+body.workspace-layout .workspace-property-page[hidden] {
+  display: none;
+}
+
+body.workspace-layout .panel:not(.emission-mode) #emissionPanel,
+body.workspace-layout .panel:not(.image-mode) #imageSplatPanel,
+body.workspace-layout .panel:not(.morph-mode) #morphPanel,
+body.workspace-layout .panel.emission-mode .particle-mode-only,
+body.workspace-layout .panel.image-mode .particle-mode-only,
+body.workspace-layout .panel.morph-mode .particle-mode-only,
+body.workspace-layout .panel.image-mode #emissionPanel,
+body.workspace-layout .panel.image-mode #morphPanel,
+body.workspace-layout .panel.emission-mode #morphPanel,
+body.workspace-layout .panel.morph-mode #emissionPanel,
+body.workspace-layout .panel.morph-mode #imageSplatPanel {
+  display: block;
+}
+
+body.workspace-layout .panel.image-mode .toolbar {
+  display: grid;
 }
 
 .workspace-pane-header {
@@ -1632,57 +1780,148 @@ body.workspace-layout .workspace-timeline-dock {
   bottom: 0;
   left: var(--workspace-left-toolbar-width);
   z-index: 6;
-  display: block;
+  display: grid;
+  grid-template-rows: auto minmax(42px, 1fr) auto;
+  gap: 6px;
   height: var(--workspace-timeline-height);
-  padding: 8px 10px 10px;
-  overflow: auto;
+  padding: 7px 10px 8px;
+  overflow: hidden;
   border-top: 1px solid rgba(0, 0, 0, 0.62);
   background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
     #24262a;
-  background-size: 56px 100%;
+  background-size: 58px 100%;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
-body.workspace-layout .workspace-timeline-dock .camera-row {
-  margin: 0;
-  padding: 10px;
-  border-color: rgba(255, 255, 255, 0.09);
-  border-radius: 9px;
-  background: rgba(0, 0, 0, 0.13);
-  box-shadow: none;
-}
-
-body.workspace-layout .workspace-timeline-dock .camera-control-grid {
-  grid-template-columns: repeat(3, minmax(210px, 1fr));
-  padding: 8px;
-  border-radius: 8px;
-}
-
-body.workspace-layout .workspace-timeline-dock .camera-mode-hint {
-  margin: 0;
-  font-size: 10.5px;
-}
-
-body.workspace-layout .workspace-timeline-dock .camera-actions,
-body.workspace-layout .workspace-timeline-dock .camera-mode-actions,
-body.workspace-layout .workspace-timeline-dock .camera-curve-row,
-body.workspace-layout .workspace-timeline-dock .number-row {
+body.workspace-layout .workspace-timeline-head,
+body.workspace-layout .workspace-timeline-controls {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
 }
 
-body.workspace-layout .workspace-timeline-dock .small-button {
-  min-width: 112px;
+body.workspace-layout .workspace-timeline-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: #d8dbe0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+body.workspace-layout .workspace-timeline-title small {
+  color: #9ca3ad;
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+body.workspace-layout .workspace-current-time {
+  min-width: 72px;
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  text-align: right;
+}
+
+body.workspace-layout .workspace-current-time output {
+  color: #e6ebf1;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 body.workspace-layout .workspace-timeline-dock .timeline-wrap {
-  min-height: 30px;
-  padding: 0 4px;
+  align-self: stretch;
+  min-height: 42px;
+  padding: 20px 8px 0;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 58px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.06));
+}
+
+body.workspace-layout .workspace-timeline-dock .timeline-markers {
+  inset: 24px 8px auto;
+  height: 16px;
+}
+
+body.workspace-layout .workspace-timeline-dock .timeline-frame-ticks {
+  inset: 3px 8px auto;
+  color: #aeb4bd;
 }
 
 body.workspace-layout .workspace-timeline-dock #timeline {
   width: 100%;
+  margin-top: 18px;
+  accent-color: #4a8dff;
+}
+
+body.workspace-layout .workspace-timeline-dock .camera-actions,
+body.workspace-layout .workspace-timeline-dock .number-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+
+body.workspace-layout .workspace-timeline-dock .small-button {
+  min-width: 84px;
+  min-height: 28px;
+  padding: 5px 9px;
+  border-radius: 6px;
+}
+
+body.workspace-layout .workspace-timeline-dock .number-row label {
+  min-width: 94px;
+  grid-template-columns: auto 1fr;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+body.workspace-layout .workspace-camera-properties {
+  padding: 0;
+  overflow: hidden;
+}
+
+body.workspace-layout .workspace-camera-properties-row {
+  margin: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+body.workspace-layout .workspace-camera-properties-row .section-head {
+  display: none;
+}
+
+body.workspace-layout .workspace-camera-properties-row .camera-control-grid,
+body.workspace-layout .workspace-camera-properties-row .camera-curve-row,
+body.workspace-layout .workspace-camera-properties-row .camera-mode-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+
+body.workspace-layout .workspace-camera-properties-row .camera-mode-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+body.workspace-layout .workspace-camera-properties-row .small-button {
+  min-width: 0;
+}
+
+body.workspace-layout .workspace-camera-properties-row .camera-mode-hint {
+  margin: 6px 0;
+  color: #9ca3ad;
+  font-size: 10.5px;
+  line-height: 1.45;
 }
 
 body.workspace-layout .modifier-section {
@@ -1738,6 +1977,21 @@ body.workspace-layout .value-input,
 body.workspace-layout input[type="range"],
 body.workspace-layout select {
   min-height: 30px;
+}
+
+body.workspace-layout .workspace-property-page .control-grid label,
+body.workspace-layout .workspace-property-page .control-grid label.keyable-control {
+  grid-template-columns: minmax(62px, 0.72fr) minmax(68px, 1fr) minmax(48px, 58px) 18px;
+  gap: 6px;
+}
+
+body.workspace-layout .workspace-property-page .control-grid label:not(.keyable-control) {
+  grid-template-columns: minmax(62px, 0.72fr) minmax(68px, 1fr) minmax(48px, 58px);
+}
+
+body.workspace-layout .workspace-property-page .value-input {
+  min-width: 0;
+  width: 100%;
 }
 
 body.workspace-layout .scene-model-list,
