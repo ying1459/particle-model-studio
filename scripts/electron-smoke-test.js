@@ -27,6 +27,8 @@ const uiCameraScreenshotPath = path.join(rootDir, 'verification', packaged ? 'el
 let electronApp;
 let recoverySmokeOutputPath = '';
 let automaticRecoveryOutputPath = '';
+const launchEnv = { ...process.env };
+delete launchEnv.ELECTRON_RUN_AS_NODE;
 
 try {
   await mkdir(path.dirname(projectSmokePath), { recursive: true });
@@ -47,7 +49,7 @@ try {
     args: packaged ? [] : ['.'],
     cwd: rootDir,
     env: {
-      ...process.env,
+      ...launchEnv,
       ELECTRON_ENABLE_LOGGING: '1'
     },
     timeout: 60000
@@ -90,35 +92,131 @@ try {
   await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 90000 });
   const uiLayout = await page.evaluate(() => {
     const panel = document.querySelector('.panel');
-    const toolbar = document.querySelector('.toolbar');
-    const modeSwitch = document.querySelector('.mode-switch');
-    const rowCount = (container) => new Set(
-      [...container.children].map((element) => Math.round(element.getBoundingClientRect().top))
-    ).size;
+    const canvas = document.querySelector('#scene');
+    const topbar = document.querySelector('.workspace-topbar');
+    const timeline = document.querySelector('.workspace-timeline-dock');
+    const outliner = document.querySelector('.workspace-outliner-pane');
+    const properties = document.querySelector('.workspace-properties-pane');
+    const rightResizer = document.querySelector('.workspace-resizer-right');
+    const timelineResizer = document.querySelector('.workspace-resizer-timeline');
+    const sceneRows = document.querySelectorAll('.scene-model-row').length;
+    const panelRect = panel.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const topbarRect = topbar.getBoundingClientRect();
+    const timelineRect = timeline.getBoundingClientRect();
     return {
+      workspace: document.body.classList.contains('workspace-layout'),
       panelWidth: panel.clientWidth,
-      panelClientHeight: panel.clientHeight,
-      panelScrollWidth: panel.scrollWidth,
-      toolbarRows: rowCount(toolbar),
-      modeRows: rowCount(modeSwitch)
+      panelLeft: Math.round(panelRect.left),
+      panelRightGap: Math.round(window.innerWidth - panelRect.right),
+      canvasLeft: Math.round(canvasRect.left),
+      canvasTop: Math.round(canvasRect.top),
+      canvasRightGap: Math.round(window.innerWidth - canvasRect.right),
+      canvasBottomGap: Math.round(window.innerHeight - canvasRect.bottom),
+      canvasWidth: Math.round(canvasRect.width),
+      canvasHeight: Math.round(canvasRect.height),
+      topbarHeight: Math.round(topbarRect.height),
+      timelineHeight: Math.round(timelineRect.height),
+      timelineTop: Math.round(timelineRect.top),
+      outlinerHeight: Math.round(outliner.getBoundingClientRect().height),
+      propertiesHeight: Math.round(properties.getBoundingClientRect().height),
+      hasRightResizer: Boolean(rightResizer),
+      hasTimelineResizer: Boolean(timelineResizer),
+      sceneRows
     };
   });
   if (
-    uiLayout.panelWidth < 400 ||
-    uiLayout.panelScrollWidth > uiLayout.panelWidth ||
-    uiLayout.toolbarRows !== 2 ||
-    uiLayout.modeRows !== 2
+    !uiLayout.workspace ||
+    uiLayout.panelWidth < 300 ||
+    uiLayout.panelRightGap > 2 ||
+    uiLayout.canvasLeft < 40 ||
+    uiLayout.canvasTop < 30 ||
+    uiLayout.canvasRightGap < uiLayout.panelWidth - 4 ||
+    uiLayout.canvasBottomGap < uiLayout.timelineHeight - 4 ||
+    uiLayout.canvasWidth < 480 ||
+    uiLayout.canvasHeight < 280 ||
+    uiLayout.timelineTop < uiLayout.canvasTop + uiLayout.canvasHeight - 2 ||
+    uiLayout.outlinerHeight < 110 ||
+    uiLayout.propertiesHeight < 160 ||
+    !uiLayout.hasRightResizer ||
+    !uiLayout.hasTimelineResizer ||
+    uiLayout.sceneRows < 1
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);
   }
+  const rightResizerStart = await page.evaluate(() => {
+    const handle = document.querySelector('.workspace-resizer-right');
+    const panel = document.querySelector('.panel');
+    const canvas = document.querySelector('#scene');
+    const handleRect = handle.getBoundingClientRect();
+    return {
+      x: handleRect.left + handleRect.width / 2,
+      y: handleRect.top + Math.min(180, handleRect.height / 2),
+      panelWidth: panel.getBoundingClientRect().width,
+      canvasWidth: canvas.getBoundingClientRect().width
+    };
+  });
+  await page.mouse.move(rightResizerStart.x, rightResizerStart.y);
+  await page.mouse.down();
+  await page.mouse.move(rightResizerStart.x - 72, rightResizerStart.y, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const rightResizerEnd = await page.evaluate(() => {
+    const panel = document.querySelector('.panel');
+    const canvas = document.querySelector('#scene');
+    return {
+      panelWidth: panel.getBoundingClientRect().width,
+      canvasWidth: canvas.getBoundingClientRect().width
+    };
+  });
+  if (
+    rightResizerEnd.panelWidth < rightResizerStart.panelWidth + 40 ||
+    rightResizerEnd.canvasWidth > rightResizerStart.canvasWidth - 40
+  ) {
+    throw new Error(`Workspace right resize failed: ${JSON.stringify({ rightResizerStart, rightResizerEnd })}`);
+  }
+  await page.click('.workspace-reset-layout');
+  await page.waitForTimeout(100);
+  const resetLayout = await page.evaluate(() => {
+    const panel = document.querySelector('.panel');
+    const canvas = document.querySelector('#scene');
+    return {
+      panelWidth: Math.round(panel.getBoundingClientRect().width),
+      canvasRightGap: Math.round(window.innerWidth - canvas.getBoundingClientRect().right)
+    };
+  });
+  if (resetLayout.panelWidth < 340 || resetLayout.panelWidth > 380 || resetLayout.canvasRightGap < 340 || resetLayout.canvasRightGap > 380) {
+    throw new Error(`Workspace reset layout failed: ${JSON.stringify(resetLayout)}`);
+  }
+  await page.click('#cameraPreviewHide');
+  await page.waitForTimeout(80);
+  const previewHidden = await page.evaluate(() => ({
+    bodyClass: document.body.classList.contains('camera-preview-hidden'),
+    api: window.particleStudio.getCameraPreviewVisible(),
+    restoreDisplay: getComputedStyle(document.querySelector('#cameraPreviewRestore')).display
+  }));
+  if (!previewHidden.bodyClass || previewHidden.api !== false || previewHidden.restoreDisplay === 'none') {
+    throw new Error(`Camera preview hide failed: ${JSON.stringify(previewHidden)}`);
+  }
+  await page.click('#cameraPreviewRestore');
+  await page.waitForTimeout(80);
+  const previewRestored = await page.evaluate(() => ({
+    bodyClass: document.body.classList.contains('camera-preview-hidden'),
+    api: window.particleStudio.getCameraPreviewVisible(),
+    restoreDisplay: getComputedStyle(document.querySelector('#cameraPreviewRestore')).display
+  }));
+  if (previewRestored.bodyClass || previewRestored.api !== true || previewRestored.restoreDisplay !== 'none') {
+    throw new Error(`Camera preview restore failed: ${JSON.stringify(previewRestored)}`);
+  }
   await page.screenshot({ path: uiScreenshotPath, type: 'png' });
   await page.evaluate(() => {
-    const panel = document.querySelector('.panel');
-    panel.scrollTop = panel.scrollHeight;
+    const properties = document.querySelector('.workspace-properties-pane') || document.querySelector('.panel');
+    properties.scrollTop = properties.scrollHeight;
   });
   await page.screenshot({ path: uiCameraScreenshotPath, type: 'png' });
   await page.evaluate(() => {
-    document.querySelector('.panel').scrollTop = 0;
+    const properties = document.querySelector('.workspace-properties-pane') || document.querySelector('.panel');
+    properties.scrollTop = 0;
   });
   const result = await page.evaluate(async () => {
     const hasElectronBridge = Boolean(window.electronAPI?.exportMov);

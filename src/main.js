@@ -74,7 +74,9 @@ const panelToggle = document.querySelector('#panelToggle');
 const cameraPreviewUi = {
   root: document.querySelector('#cameraPreview'),
   canvas: document.querySelector('#cameraPreviewCanvas'),
-  info: document.querySelector('#cameraPreviewInfo')
+  info: document.querySelector('#cameraPreviewInfo'),
+  hide: document.querySelector('#cameraPreviewHide'),
+  restore: document.querySelector('#cameraPreviewRestore')
 };
 const cameraViewUi = {
   toggle: document.querySelector('#toggleCameraView')
@@ -126,6 +128,8 @@ const PICK_POINT_SAMPLE_LIMIT = 16000;
 const MODEL_PICK_BOX_PADDING_PX = 42;
 const CAMERA_PREVIEW_ORBIT_PAUSE_MS = 160;
 const PANEL_COLLAPSED_STORAGE_KEY = 'particle-studio-panel-collapsed';
+const WORKSPACE_LAYOUT_STORAGE_KEY = 'particle-studio-workspace-layout';
+const CAMERA_PREVIEW_VISIBLE_STORAGE_KEY = 'particle-studio-camera-preview-visible';
 const requestedPixelRatio = Number.isFinite(exportSettings.pixelRatio) ? exportSettings.pixelRatio : 1;
 const renderPixelRatio = exportSettings.hideUi
   ? EXPORT_RENDER_PIXEL_RATIO
@@ -431,6 +435,250 @@ const lightsUi = {
   rotate: document.querySelector('#rotateLight')
 };
 
+const workspaceLayoutDefaults = {
+  rightWidth: 360,
+  timelineHeight: 184,
+  outlinerHeight: 252
+};
+let workspaceLayoutState = { ...workspaceLayoutDefaults };
+let workspaceResizeFrame = 0;
+
+function clampLayoutValue(value, min, max) {
+  const safeMax = Math.max(min, max);
+  return Math.round(THREE.MathUtils.clamp(Number(value) || min, min, safeMax));
+}
+
+function clampWorkspaceLayout(layout = workspaceLayoutState) {
+  const viewportWidth = Math.max(760, window.innerWidth || 1280);
+  const viewportHeight = Math.max(560, window.innerHeight || 780);
+  const rightWidth = clampLayoutValue(layout.rightWidth, 300, viewportWidth - 420);
+  const timelineHeight = clampLayoutValue(layout.timelineHeight, 120, viewportHeight - 220);
+  const outlinerHeight = clampLayoutValue(
+    layout.outlinerHeight,
+    116,
+    viewportHeight - timelineHeight - 170
+  );
+  return { rightWidth, timelineHeight, outlinerHeight };
+}
+
+function readWorkspaceLayout() {
+  try {
+    const stored = JSON.parse(window.localStorage?.getItem(WORKSPACE_LAYOUT_STORAGE_KEY) || 'null');
+    if (stored && typeof stored === 'object') {
+      return clampWorkspaceLayout({ ...workspaceLayoutDefaults, ...stored });
+    }
+  } catch {
+    // Keep defaults when localStorage is blocked or contains older invalid data.
+  }
+  return clampWorkspaceLayout(workspaceLayoutDefaults);
+}
+
+function persistWorkspaceLayout() {
+  try {
+    window.localStorage?.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify(workspaceLayoutState));
+  } catch {
+    // Layout persistence is a convenience only.
+  }
+}
+
+function applyWorkspaceLayout(layout, options = {}) {
+  workspaceLayoutState = clampWorkspaceLayout({ ...workspaceLayoutState, ...layout });
+  const root = document.querySelector('#app');
+  if (root) {
+    root.style.setProperty('--workspace-right-width', `${workspaceLayoutState.rightWidth}px`);
+    root.style.setProperty('--workspace-timeline-height', `${workspaceLayoutState.timelineHeight}px`);
+    root.style.setProperty('--workspace-outliner-height', `${workspaceLayoutState.outlinerHeight}px`);
+  }
+  if (options.persist !== false) {
+    persistWorkspaceLayout();
+  }
+  requestWorkspaceResize();
+}
+
+function requestWorkspaceResize() {
+  if (workspaceResizeFrame) {
+    return;
+  }
+  workspaceResizeFrame = window.requestAnimationFrame(() => {
+    workspaceResizeFrame = 0;
+    if (typeof resizeRenderer === 'function') {
+      resizeRenderer();
+    }
+  });
+}
+
+function getMainCanvasCssSize() {
+  const rect = canvas?.getBoundingClientRect?.();
+  const width = Math.max(2, Math.round(rect?.width || canvas?.clientWidth || window.innerWidth || 2));
+  const height = Math.max(2, Math.round(rect?.height || canvas?.clientHeight || window.innerHeight || 2));
+  return {
+    width,
+    height,
+    aspect: width / Math.max(height, 1)
+  };
+}
+
+function createWorkspacePaneHeader(title, subtitle = '') {
+  const header = document.createElement('div');
+  header.className = 'workspace-pane-header';
+  const copy = document.createElement('div');
+  copy.className = 'workspace-pane-copy';
+  const titleElement = document.createElement('span');
+  titleElement.className = 'workspace-pane-title';
+  titleElement.textContent = title;
+  copy.append(titleElement);
+  if (subtitle) {
+    const subtitleElement = document.createElement('span');
+    subtitleElement.className = 'workspace-pane-subtitle';
+    subtitleElement.textContent = subtitle;
+    copy.append(subtitleElement);
+  }
+  header.append(copy);
+  return header;
+}
+
+function setupWorkspaceDragHandle(handle, onDrag) {
+  if (!handle) {
+    return;
+  }
+
+  let pointerId = null;
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    pointerId = event.pointerId;
+    handle.setPointerCapture?.(pointerId);
+    document.body.classList.add('workspace-resizing');
+  });
+  handle.addEventListener('pointermove', (event) => {
+    if (pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    onDrag(event);
+  });
+  const endDrag = (event) => {
+    if (pointerId !== event.pointerId) {
+      return;
+    }
+    handle.releasePointerCapture?.(pointerId);
+    pointerId = null;
+    document.body.classList.remove('workspace-resizing');
+    persistWorkspaceLayout();
+  };
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
+}
+
+function setupWorkspaceLayout() {
+  if (exportSettings.hideUi || document.body.classList.contains('workspace-layout')) {
+    return;
+  }
+
+  const app = document.querySelector('#app');
+  const cameraRow = document.querySelector('.camera-row');
+  const sceneModelsPanel = document.querySelector('#sceneModelsPanel');
+  const videoPlanesPanel = document.querySelector('#videoPlanesPanel');
+  if (!app || !panel || !cameraRow || !sceneModelsPanel || !videoPlanesPanel) {
+    return;
+  }
+
+  document.body.classList.add('workspace-layout');
+
+  const topbar = document.createElement('header');
+  topbar.className = 'workspace-topbar';
+  topbar.innerHTML = `
+    <div class="workspace-app-mark">Particle Model Studio</div>
+    <nav class="workspace-menu" aria-label="Workspace menus">
+      <span>文件</span>
+      <span>编辑</span>
+      <span>渲染</span>
+      <span>窗口</span>
+      <span>帮助</span>
+    </nav>
+    <div class="workspace-tabs" aria-label="Workspace tabs">
+      <span class="active">布局</span>
+      <span>建模</span>
+      <span>动画</span>
+      <span>渲染</span>
+      <span>合成</span>
+    </div>
+  `;
+
+  const leftToolbar = document.createElement('aside');
+  leftToolbar.className = 'workspace-left-toolbar';
+  leftToolbar.setAttribute('aria-label', 'Viewport tools');
+  ['选择', '移动', '旋转', '缩放', '相机', '灯光'].forEach((label) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'workspace-tool';
+    item.textContent = label.slice(0, 1);
+    item.title = label;
+    leftToolbar.append(item);
+  });
+
+  const timelineDock = document.createElement('section');
+  timelineDock.className = 'workspace-timeline-dock';
+  timelineDock.setAttribute('aria-label', 'Timeline');
+  timelineDock.append(cameraRow);
+
+  const rightWidthHandle = document.createElement('div');
+  rightWidthHandle.className = 'workspace-resizer workspace-resizer-right';
+  rightWidthHandle.setAttribute('role', 'separator');
+  rightWidthHandle.setAttribute('aria-label', '调整右侧面板宽度');
+
+  const timelineHandle = document.createElement('div');
+  timelineHandle.className = 'workspace-resizer workspace-resizer-timeline';
+  timelineHandle.setAttribute('role', 'separator');
+  timelineHandle.setAttribute('aria-label', '调整时间轴高度');
+
+  const outlinerPane = document.createElement('section');
+  outlinerPane.className = 'workspace-outliner-pane';
+  outlinerPane.setAttribute('aria-label', 'Scene outliner');
+  const outlinerHeader = createWorkspacePaneHeader('场景集合', '模型 / 视频素材');
+  const resetLayoutButton = document.createElement('button');
+  resetLayoutButton.type = 'button';
+  resetLayoutButton.className = 'workspace-reset-layout';
+  resetLayoutButton.textContent = '重置布局';
+  resetLayoutButton.addEventListener('click', () => applyWorkspaceLayout(workspaceLayoutDefaults));
+  outlinerHeader.append(resetLayoutButton);
+  outlinerPane.append(outlinerHeader, sceneModelsPanel, videoPlanesPanel);
+
+  const paneSplitHandle = document.createElement('div');
+  paneSplitHandle.className = 'workspace-pane-resizer';
+  paneSplitHandle.setAttribute('role', 'separator');
+  paneSplitHandle.setAttribute('aria-label', '调整模型列表高度');
+
+  const propertiesPane = document.createElement('section');
+  propertiesPane.className = 'workspace-properties-pane';
+  propertiesPane.setAttribute('aria-label', 'Properties');
+  propertiesPane.append(createWorkspacePaneHeader('属性与特效', '粒子、材质、灯光、导出'));
+  [...panel.children].forEach((child) => {
+    if (child !== sceneModelsPanel && child !== videoPlanesPanel && child !== cameraRow) {
+      propertiesPane.append(child);
+    }
+  });
+  panel.replaceChildren(outlinerPane, paneSplitHandle, propertiesPane);
+
+  app.prepend(topbar, leftToolbar);
+  app.append(timelineHandle, timelineDock, rightWidthHandle);
+
+  setupWorkspaceDragHandle(rightWidthHandle, (event) => {
+    applyWorkspaceLayout({ rightWidth: window.innerWidth - event.clientX }, { persist: false });
+  });
+  setupWorkspaceDragHandle(timelineHandle, (event) => {
+    applyWorkspaceLayout({ timelineHeight: window.innerHeight - event.clientY }, { persist: false });
+  });
+  setupWorkspaceDragHandle(paneSplitHandle, (event) => {
+    const topbarHeight = Number.parseFloat(getComputedStyle(app).getPropertyValue('--workspace-topbar-height')) || 34;
+    applyWorkspaceLayout({ outlinerHeight: event.clientY - topbarHeight }, { persist: false });
+  });
+
+  applyWorkspaceLayout(readWorkspaceLayout(), { persist: false });
+}
+
 const state = {
   effectMode: 'particles',
   particleCount: Number(controlsUi.particleCount.value),
@@ -578,7 +826,8 @@ function captureUndoSceneModels() {
     payload: record.payload,
     options: cloneUndoValue(record.options),
     transform: cloneUndoValue(record.transform),
-    effectRotation: cloneUndoValue(record.effectRotation)
+    effectRotation: cloneUndoValue(record.effectRotation),
+    hidden: Boolean(record.hidden)
   }));
 }
 
@@ -627,7 +876,8 @@ function getUndoSnapshotFingerprint(snapshot) {
       name: record.name,
       options: record.options,
       transform: record.transform,
-      effectRotation: record.effectRotation
+      effectRotation: record.effectRotation,
+      hidden: record.hidden
     })),
     activeSceneModelId: snapshot.activeSceneModelId,
     videoPlanes: snapshot.videoPlanes,
@@ -670,6 +920,7 @@ async function restoreUndoSceneModels(models = [], activeId = null) {
       record.options = sanitizeSceneModelOptions(snapshot.options);
       record.transform = normalizeSceneModelTransform(snapshot.transform);
       record.effectRotation = normalizeVectorArray(snapshot.effectRotation, [0, 0, 0]);
+      record.hidden = Boolean(snapshot.hidden);
       if (record.snapshotRoot) {
         applySceneModelTransformToObject(record.snapshotRoot, record.transform);
         const effectRoot = record.snapshotRoot.children[0];
@@ -701,7 +952,8 @@ async function restoreUndoSceneModels(models = [], activeId = null) {
       payload: snapshot.payload,
       options: snapshot.options,
       transform: snapshot.transform,
-      effectRotation: snapshot.effectRotation
+      effectRotation: snapshot.effectRotation,
+      hidden: snapshot.hidden
     }));
   });
 
@@ -1189,6 +1441,9 @@ const presets = {
   }
 };
 
+setupWorkspaceLayout();
+const initialCanvasSize = getMainCanvasCssSize();
+
 const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
@@ -1203,7 +1458,7 @@ renderer.toneMapping = THREE.AgXToneMapping;
 renderer.toneMappingExposure = 1.0;
 renderer.setClearColor(0x090a0c, exportSettings.transparent ? 0 : 1);
 renderer.setPixelRatio(renderPixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(initialCanvasSize.width, initialCanvasSize.height, false);
 
 const cameraPreviewRenderer = !exportSettings.hideUi && cameraPreviewUi.canvas
   ? new THREE.WebGLRenderer({
@@ -1425,7 +1680,7 @@ const lightHandleGroup = new THREE.Group();
 lightHandleGroup.visible = !exportSettings.hideUi;
 scene.add(lightHandleGroup);
 
-const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
+const camera = new THREE.PerspectiveCamera(48, initialCanvasSize.aspect, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
 const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
 const outputFrameCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
 camera.filmGauge = state.cameraSensorWidth;
@@ -1439,6 +1694,7 @@ let cameraPreviewLayoutCache = null;
 let cameraViewLocked = false;
 let orbitInteracting = false;
 let cameraPreviewResumeAt = 0;
+let cameraPreviewVisible = true;
 const mainRendererSize = new THREE.Vector2();
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enableDamping = true;
@@ -3459,6 +3715,7 @@ let rebuildTimer = null;
 let buildToken = 0;
 let initialModelReady = false;
 
+resizeRenderer();
 resetCamera();
 importSceneLights();
 syncUi();
@@ -3468,6 +3725,7 @@ updatePlayButton();
 updateCameraViewButton();
 setupParameterKeyframeButtons();
 restorePanelCollapsedState();
+restoreCameraPreviewVisibility();
 initializeStartupModel();
 animate();
 
@@ -3496,6 +3754,7 @@ function setPanelCollapsed(collapsed, persist = true) {
       // localStorage can be unavailable in some embedded export/test contexts.
     }
   }
+  requestWorkspaceResize();
 }
 
 async function initializeStartupModel() {
@@ -3894,6 +4153,7 @@ function createSceneModelRecord(options = {}) {
     options: sanitizeSceneModelOptions(options.options || captureKeyframeOptions()),
     transform: normalizeSceneModelTransform(options.transform),
     effectRotation: normalizeVectorArray(options.effectRotation, [0, 0, 0]),
+    hidden: Boolean(options.hidden),
     snapshotRoot: null
   };
 }
@@ -4141,6 +4401,7 @@ function buildSceneModelSnapshotFromActive(record) {
   root.name = `${record.name || 'Model'} Scene Snapshot`;
   root.userData.sceneModelId = record.id;
   root.userData.sceneModelPickTarget = true;
+  root.visible = !record.hidden;
   applySceneModelTransformToObject(root, record.transform);
 
   const effectRoot = new THREE.Group();
@@ -4383,7 +4644,7 @@ function updateSceneModelSnapshotUniforms() {
     if (!record.snapshotRoot) {
       return;
     }
-    record.snapshotRoot.visible = THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
+    record.snapshotRoot.visible = !record.hidden && THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
     const solidOpacity = THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) *
       getParticleDissolveSolidOpacity(record.options);
     record.snapshotRoot.traverse((node) => {
@@ -4428,8 +4689,11 @@ function renderSceneModelList() {
 
   controlsUi.sceneModelList.innerHTML = '';
   sceneModelObjects.forEach((record, index) => {
+    const row = document.createElement('div');
+    row.className = `scene-model-row${record.id === selectedSceneModelId ? ' active' : ''}${record.hidden ? ' is-hidden' : ''}`;
+
     const button = document.createElement('button');
-    button.className = `scene-model-item${record.id === selectedSceneModelId ? ' active' : ''}`;
+    button.className = `scene-model-item${record.id === selectedSceneModelId ? ' active' : ''}${record.hidden ? ' is-hidden' : ''}`;
     button.type = 'button';
     button.dataset.sceneModelId = record.id;
     button.innerHTML = `
@@ -4438,9 +4702,42 @@ function renderSceneModelList() {
       <span class="scene-model-effect">${sceneModelEffectLabel(record.options?.effectMode)}</span>
     `;
     button.addEventListener('click', () => activateSceneModel(record.id));
-    controlsUi.sceneModelList.append(button);
+
+    const visibilityButton = document.createElement('button');
+    visibilityButton.className = 'scene-model-visibility';
+    visibilityButton.type = 'button';
+    visibilityButton.title = record.hidden ? '显示模型' : '隐藏模型';
+    visibilityButton.setAttribute('aria-label', record.hidden ? '显示模型' : '隐藏模型');
+    visibilityButton.textContent = record.hidden ? '○' : '●';
+    visibilityButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleSceneModelHidden(record.id);
+    });
+
+    row.append(button, visibilityButton);
+    controlsUi.sceneModelList.append(row);
   });
   updateSceneModelTransformButtons();
+}
+
+function toggleSceneModelHidden(recordId) {
+  const record = sceneModelObjects.find((item) => item.id === recordId);
+  if (!record) {
+    return false;
+  }
+
+  recordUndoStep(record.hidden ? '显示模型' : '隐藏模型');
+  record.hidden = !record.hidden;
+  if (record.snapshotRoot) {
+    record.snapshotRoot.visible = !record.hidden && THREE.MathUtils.clamp(Number(record.options?.modelVisibility ?? 1), 0, 1) > 0.001;
+  }
+  if (record.id === selectedSceneModelId) {
+    syncEffectVisibility();
+  }
+  renderSceneModelList();
+  setCameraPreviewDirty();
+  setStatus(record.hidden ? 'Model hidden' : 'Model visible');
+  return true;
 }
 
 function applySceneModelOptionsToState(options = {}) {
@@ -9247,7 +9544,8 @@ function serializeSceneModels() {
         ...record.payload,
         options: sanitizeSceneModelOptions(record.options),
         transform: normalizeSceneModelTransform(record.transform),
-        effectRotation: normalizeVectorArray(record.effectRotation, [0, 0, 0])
+        effectRotation: normalizeVectorArray(record.effectRotation, [0, 0, 0]),
+        hidden: Boolean(record.hidden)
       }))
   };
 }
@@ -9302,7 +9600,8 @@ async function importSceneModels(snapshot = {}) {
       },
       options: descriptor.options,
       transform: descriptor.transform,
-      effectRotation: descriptor.effectRotation
+      effectRotation: descriptor.effectRotation,
+      hidden: descriptor.hidden
     }));
   }
 
@@ -9528,7 +9827,8 @@ function syncEffectVisibility() {
   const imageMode = state.effectMode === 'image';
   const morphMode = state.effectMode === 'morph';
   const particleizeMode = state.effectMode === 'particles' && state.particleizeProgress < 0.995;
-  const modelVisible = state.modelVisibility > 0.001;
+  const selectedSceneModel = getSelectedSceneModel();
+  const modelVisible = state.modelVisibility > 0.001 && !selectedSceneModel?.hidden;
   panel?.classList.toggle('emission-mode', emissionMode);
   panel?.classList.toggle('image-mode', imageMode);
   panel?.classList.toggle('morph-mode', morphMode);
@@ -11394,6 +11694,45 @@ function setCameraPreviewDirty() {
   cameraPreviewLastRender = -Infinity;
 }
 
+function readCameraPreviewVisible() {
+  try {
+    return window.localStorage?.getItem(CAMERA_PREVIEW_VISIBLE_STORAGE_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function setCameraPreviewVisible(visible, persist = true) {
+  cameraPreviewVisible = Boolean(visible);
+  document.body.classList.toggle('camera-preview-hidden', !cameraPreviewVisible);
+  if (cameraPreviewUi.root) {
+    cameraPreviewUi.root.setAttribute('aria-hidden', cameraPreviewVisible ? 'false' : 'true');
+  }
+  if (cameraPreviewUi.hide) {
+    cameraPreviewUi.hide.textContent = cameraPreviewVisible ? '隐藏' : '已隐藏';
+    cameraPreviewUi.hide.setAttribute('aria-pressed', cameraPreviewVisible ? 'false' : 'true');
+  }
+  if (cameraPreviewUi.restore) {
+    cameraPreviewUi.restore.setAttribute('aria-hidden', cameraPreviewVisible ? 'true' : 'false');
+  }
+  if (persist) {
+    try {
+      window.localStorage?.setItem(CAMERA_PREVIEW_VISIBLE_STORAGE_KEY, cameraPreviewVisible ? '1' : '0');
+    } catch {
+      // Preview visibility is a preference only.
+    }
+  }
+  if (cameraPreviewVisible) {
+    updateCameraPreviewLayout(true);
+    setCameraPreviewDirty();
+    renderCameraPreview(true);
+  }
+}
+
+function restoreCameraPreviewVisibility() {
+  setCameraPreviewVisible(readCameraPreviewVisible(), false);
+}
+
 function updateCameraViewButton() {
   cameraViewUi.toggle?.classList.toggle('active', cameraViewLocked);
   const label = cameraViewUi.toggle?.querySelector('span');
@@ -11496,6 +11835,9 @@ function renderCameraPreview(force = false) {
   if (!cameraPreviewRenderer || !cameraPreviewPostTargets || cameraPreviewContextLost) {
     return false;
   }
+  if (!force && !cameraPreviewVisible) {
+    return false;
+  }
 
   const now = performance.now();
   if (!force && (orbitInteracting || now < cameraPreviewResumeAt)) {
@@ -11549,6 +11891,7 @@ function renderCameraPreview(force = false) {
 
 function captureCameraSnapshot() {
   const drawing = currentDrawingBufferSize();
+  const viewport = getMainCanvasCssSize();
   const exportResolution = getExportResolution();
   const snapshotCamera = configureCameraPreviewCamera(exportResolution.aspect);
   const timelinePose = getTimelineCameraPose(cameraAnimation.time);
@@ -11573,8 +11916,8 @@ function captureCameraSnapshot() {
     near: snapshotCamera.near,
     far: snapshotCamera.far,
     aspect: snapshotCamera.aspect,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
     drawingWidth: drawing.width,
     drawingHeight: drawing.height,
     exportWidth: exportResolution.width,
@@ -11626,7 +11969,7 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
   const sourceZoom = Number(snapshot.zoom);
   const sourceNear = Number(snapshot.near);
   const sourceFar = Number(snapshot.far);
-  const outputAspect = window.innerWidth / Math.max(window.innerHeight, 1);
+  const outputAspect = getMainCanvasCssSize().aspect;
 
   if (Number.isFinite(sourceFilmGauge)) {
     state.cameraSensorWidth = THREE.MathUtils.clamp(sourceFilmGauge, 12, 70);
@@ -12860,6 +13203,20 @@ function handlePathPointerDown(event) {
     }
   }
 
+  const shouldCheckActiveModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || selectedVideoPlaneId || !selectedSceneModelId);
+  const modelRecordIdUnderPointer = findSceneModelIdFromPointerHit({ includeActive: shouldCheckActiveModel });
+  if (modelRecordIdUnderPointer) {
+    consumePointerEvent(event);
+    cameraAnimation.playing = false;
+    activeCameraQuaternion = null;
+    updatePlayButton();
+    activateSceneModel(modelRecordIdUnderPointer).catch((error) => {
+      console.error(error);
+      setStatus('Model select failed');
+    });
+    return;
+  }
+
   const cameraPathHit = findCameraPathPointerHit();
   if (cameraPathHit) {
     consumePointerEvent(event);
@@ -12881,21 +13238,6 @@ function handlePathPointerDown(event) {
     }
     return;
   }
-
-  const shouldCheckActiveModel = Boolean(selectedKeyframeId || selectedLightId || selectedImageSplat || selectedVideoPlaneId || !selectedSceneModelId);
-  const modelRecordIdUnderPointer = findSceneModelIdFromPointerHit({ includeActive: shouldCheckActiveModel });
-  if (modelRecordIdUnderPointer) {
-    consumePointerEvent(event);
-    cameraAnimation.playing = false;
-    activeCameraQuaternion = null;
-    updatePlayButton();
-    activateSceneModel(modelRecordIdUnderPointer).catch((error) => {
-      console.error(error);
-      setStatus('Model select failed');
-    });
-    return;
-  }
-
 }
 
 function consumePointerEvent(event) {
@@ -14176,7 +14518,7 @@ function setSceneModelSnapshotsVisible(visible) {
       return;
     }
     previous.push([record.snapshotRoot, record.snapshotRoot.visible]);
-    record.snapshotRoot.visible = visible;
+    record.snapshotRoot.visible = visible && !record.hidden;
   });
 
   return () => {
@@ -14982,6 +15324,8 @@ window.particleStudio = {
     renderCameraPreview(true);
     return cameraPreviewUi.canvas?.toDataURL('image/png') || '';
   },
+  setCameraPreviewVisible: (value) => setCameraPreviewVisible(value),
+  getCameraPreviewVisible: () => cameraPreviewVisible,
   setCameraViewLocked: (value) => setCameraViewLocked(value),
   getCameraPreviewPose: () => {
     const previewCamera = configureCameraPreviewCamera(getExportResolution().aspect);
@@ -15836,6 +16180,12 @@ resetCameraButton.addEventListener('click', resetCamera);
 panelToggle?.addEventListener('click', () => {
   setPanelCollapsed(!document.body.classList.contains('panel-collapsed'));
 });
+cameraPreviewUi.hide?.addEventListener('click', () => {
+  setCameraPreviewVisible(false);
+});
+cameraPreviewUi.restore?.addEventListener('click', () => {
+  setCameraPreviewVisible(true);
+});
 renderer.domElement.addEventListener('pointerdown', handlePathPointerDown, { capture: true });
 
 modelInput.addEventListener('click', (event) => {
@@ -15944,14 +16294,20 @@ morphUi.dropZone?.addEventListener('drop', (event) => {
   }
 });
 
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+function resizeRenderer() {
+  const size = getMainCanvasCssSize();
+  camera.aspect = size.aspect;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(renderPixelRatio);
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(size.width, size.height, false);
   resizePostTargets();
   uniforms.uPixelRatio.value = studioPixelRatio;
   imageSplatUniforms.uPixelRatio.value = studioPixelRatio;
   updateCameraPreviewLayout(true);
   setCameraPreviewDirty();
+}
+
+window.addEventListener('resize', () => {
+  applyWorkspaceLayout(workspaceLayoutState, { persist: false });
+  resizeRenderer();
 });

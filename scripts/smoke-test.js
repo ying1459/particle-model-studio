@@ -499,8 +499,11 @@ try {
     const minX = rect.left + ((screenBox.min[0] + 1) * rect.width) / 2;
     const maxX = rect.left + ((screenBox.max[0] + 1) * rect.width) / 2;
     const centerY = rect.top + ((1 - screenBox.center[1]) * rect.height) / 2;
-    const panelSafeX = panelRect ? panelRect.right + 36 : rect.left + 36;
-    const x = Math.min(Math.max(panelSafeX, centerX), maxX - 24);
+    const panelIsLeftDock = panelRect && panelRect.right < rect.left + rect.width * 0.5;
+    const panelIsRightDock = panelRect && panelRect.left > rect.left + rect.width * 0.5;
+    const leftSafeX = panelIsLeftDock ? panelRect.right + 36 : rect.left + 36;
+    const rightSafeX = panelIsRightDock ? panelRect.left - 36 : rect.right - 36;
+    const x = Math.min(Math.max(leftSafeX, centerX), rightSafeX, maxX - 24);
     return {
       x,
       y: centerY
