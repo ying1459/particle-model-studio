@@ -541,6 +541,153 @@ try {
     throw new Error(`Model transform axis did not detach from camera axis: ${JSON.stringify(transformSelectionCheck)}`);
   }
 
+  const transformPoint = await page.evaluate(() => {
+    const canvas = document.querySelector('#scene');
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width * 0.58,
+      y: rect.top + rect.height * 0.54
+    };
+  });
+
+  const modalCameraMove = await page.evaluate(() => {
+    window.particleStudio.selectCameraKeyframeForTest(0);
+    document.activeElement?.blur?.();
+    return window.particleStudio.getTransformSelectionDebug();
+  });
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyG');
+  const modalCameraDuringMove = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.move(transformPoint.x + 110, transformPoint.y - 35, { steps: 5 });
+  const modalCameraMoved = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.click(transformPoint.x + 110, transformPoint.y - 35);
+  const modalCameraConfirmed = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyG');
+  await page.keyboard.press('KeyX');
+  await page.mouse.move(transformPoint.x + 120, transformPoint.y + 80, { steps: 5 });
+  const cameraMoveXDuringShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.click(transformPoint.x + 120, transformPoint.y + 80);
+  const cameraMoveXShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyG');
+  await page.keyboard.press('Shift+KeyZ');
+  const lockZStart = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.move(transformPoint.x + 90, transformPoint.y - 70, { steps: 5 });
+  const cameraMoveLockZDuringShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.click(transformPoint.x + 90, transformPoint.y - 70);
+  const cameraMoveLockZShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyR');
+  const rotateStart = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.move(transformPoint.x + 100, transformPoint.y - 20, { steps: 5 });
+  await page.mouse.click(transformPoint.x + 100, transformPoint.y - 20);
+  const cameraRotateShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyS');
+  const scaleStart = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.move(transformPoint.x + 80, transformPoint.y - 80, { steps: 5 });
+  await page.mouse.click(transformPoint.x + 80, transformPoint.y - 80);
+  const cameraScaleShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+
+  const movedDistance = Math.hypot(
+    modalCameraMoved.proxyPosition[0] - modalCameraMove.proxyPosition[0],
+    modalCameraMoved.proxyPosition[1] - modalCameraMove.proxyPosition[1],
+    modalCameraMoved.proxyPosition[2] - modalCameraMove.proxyPosition[2]
+  );
+  const confirmedDistance = Math.hypot(
+    modalCameraConfirmed.proxyPosition[0] - modalCameraMove.proxyPosition[0],
+    modalCameraConfirmed.proxyPosition[1] - modalCameraMove.proxyPosition[1],
+    modalCameraConfirmed.proxyPosition[2] - modalCameraMove.proxyPosition[2]
+  );
+  const xAxisMoved = Math.abs(cameraMoveXShortcut.proxyPosition[0] - modalCameraConfirmed.proxyPosition[0]);
+  const xAxisYDrift = Math.abs(cameraMoveXShortcut.proxyPosition[1] - modalCameraConfirmed.proxyPosition[1]);
+  const xAxisZDrift = Math.abs(cameraMoveXShortcut.proxyPosition[2] - modalCameraConfirmed.proxyPosition[2]);
+  const lockZDrift = Math.abs(cameraMoveLockZShortcut.proxyPosition[2] - lockZStart.proxyPosition[2]);
+  const rotationDelta = Math.hypot(
+    cameraRotateShortcut.proxyQuaternion[0] - rotateStart.proxyQuaternion[0],
+    cameraRotateShortcut.proxyQuaternion[1] - rotateStart.proxyQuaternion[1],
+    cameraRotateShortcut.proxyQuaternion[2] - rotateStart.proxyQuaternion[2],
+    cameraRotateShortcut.proxyQuaternion[3] - rotateStart.proxyQuaternion[3]
+  );
+  if (
+    modalCameraDuringMove.modalTransform?.mode !== 'translate' ||
+    modalCameraDuringMove.modalTransform?.target !== 'camera' ||
+    movedDistance < 0.01 ||
+    confirmedDistance < 0.01 ||
+    cameraMoveXDuringShortcut.axisConstraint?.axis !== 'x' ||
+    cameraMoveXDuringShortcut.axisConstraint?.mode !== 'only' ||
+    xAxisMoved < 0.005 ||
+    xAxisYDrift > 0.001 ||
+    xAxisZDrift > 0.001 ||
+    cameraMoveLockZDuringShortcut.axisConstraint?.axis !== 'z' ||
+    cameraMoveLockZDuringShortcut.axisConstraint?.mode !== 'lock' ||
+    lockZDrift > 0.001 ||
+    cameraRotateShortcut.transformMode !== 'rotate' ||
+    rotationDelta < 0.005 ||
+    cameraScaleShortcut.transformMode !== 'scale' ||
+    Math.abs(cameraScaleShortcut.cameraDisplaySize - scaleStart.cameraDisplaySize) < 0.01
+  ) {
+    throw new Error(`Blender-style modal transform failed: ${JSON.stringify({
+      modalCameraMove,
+      modalCameraDuringMove,
+      modalCameraMoved,
+      modalCameraConfirmed,
+      cameraMoveXDuringShortcut,
+      cameraMoveXShortcut,
+      cameraMoveLockZDuringShortcut,
+      cameraMoveLockZShortcut,
+      cameraRotateShortcut,
+      cameraScaleShortcut,
+      movedDistance,
+      confirmedDistance,
+      xAxisMoved,
+      xAxisYDrift,
+      xAxisZDrift,
+      lockZDrift,
+      rotationDelta
+    })}`);
+  }
+
+  const bezierShortcutSetup = await page.evaluate(() => {
+    window.particleStudio.setCameraPathMode('bezier');
+    window.particleStudio.setCameraKeyframes([
+      { id: 'smoke-bezier-a', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0], handleOut: [1.2, 0.35, 0] },
+      { id: 'smoke-bezier-b', time: 1, position: [1.4, 1.2, 5.4], target: [0, 0.1, 0], handleIn: [-1.1, -0.25, 0] }
+    ]);
+    const selected = window.particleStudio.selectCameraBezierHandleForTest(0, 'out');
+    document.activeElement?.blur?.();
+    return { selected, debug: window.particleStudio.getTransformSelectionDebug() };
+  });
+  await page.mouse.move(transformPoint.x, transformPoint.y);
+  await page.keyboard.press('KeyG');
+  await page.keyboard.press('KeyY');
+  await page.mouse.move(transformPoint.x - 30, transformPoint.y - 120, { steps: 5 });
+  const bezierMoveYDuringShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.click(transformPoint.x - 30, transformPoint.y - 120);
+  const bezierMoveYShortcut = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  if (
+    !bezierShortcutSetup.selected ||
+    bezierShortcutSetup.debug.target !== 'camera-bezier' ||
+    !bezierShortcutSetup.debug.attachedToBezierHandle ||
+    bezierMoveYDuringShortcut.modalTransform?.target !== 'camera-bezier' ||
+    bezierMoveYDuringShortcut.axisConstraint?.axis !== 'y' ||
+    bezierMoveYDuringShortcut.axisConstraint?.mode !== 'only' ||
+    Math.abs(bezierMoveYShortcut.proxyPosition[1] - bezierShortcutSetup.debug.proxyPosition[1]) < 0.005 ||
+    Math.abs(bezierMoveYShortcut.proxyPosition[0] - bezierShortcutSetup.debug.proxyPosition[0]) > 0.001 ||
+    Math.abs(bezierMoveYShortcut.proxyPosition[2] - bezierShortcutSetup.debug.proxyPosition[2]) > 0.001
+  ) {
+    throw new Error(`Bezier handle shortcut/attachment failed: ${JSON.stringify({
+      bezierShortcutSetup,
+      bezierMoveYDuringShortcut,
+      bezierMoveYShortcut
+    })}`);
+  }
+
   const cameraSnapshot = await page.evaluate(() => window.particleStudio.captureViewCamera());
   const cameraTime = cameraSnapshot.time || 0;
   const cameraKeyframes = await page.evaluate(() => window.particleStudio.getCameraKeyframes());

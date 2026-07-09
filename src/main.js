@@ -1543,6 +1543,8 @@ let selectedKeyframeId = null;
 let selectedKeyframeObject = null;
 let selectedKeyframeMode = 'translate';
 let selectedCameraBezierHandle = null;
+let transformAxisConstraint = null;
+let modalTransform = null;
 const sceneLights = [];
 let selectedLightId = null;
 let selectedLightMode = 'translate';
@@ -1557,6 +1559,462 @@ let selectedVideoPlaneId = null;
 let selectedVideoPlaneMode = 'translate';
 let pendingModelImportMode = 'replace';
 let appendModelImportClickArmed = false;
+
+const TRANSFORM_AXIS_LABELS = {
+  x: 'X',
+  y: 'Y',
+  z: 'Z'
+};
+const lastScenePointer = {
+  clientX: null,
+  clientY: null
+};
+
+function getCurrentTransformMode() {
+  return transformControls.mode || 'translate';
+}
+
+function applyTransformAxisConstraint() {
+  const axes = { x: true, y: true, z: true };
+
+  if (transformAxisConstraint) {
+    const axis = transformAxisConstraint.axis;
+    if (transformAxisConstraint.mode === 'lock') {
+      axes[axis] = false;
+    } else {
+      axes.x = false;
+      axes.y = false;
+      axes.z = false;
+      axes[axis] = true;
+    }
+  }
+
+  transformControls.showX = axes.x;
+  transformControls.showY = axes.y;
+  transformControls.showZ = axes.z;
+}
+
+function resetTransformAxisConstraint(showStatus = false) {
+  transformAxisConstraint = null;
+  applyTransformAxisConstraint();
+  if (showStatus) {
+    setStatus('Transform axes reset');
+  }
+}
+
+function setTransformAxisConstraint(axis, mode = 'only') {
+  const normalizedAxis = String(axis || '').toLowerCase();
+  if (!['x', 'y', 'z'].includes(normalizedAxis)) {
+    return false;
+  }
+
+  transformAxisConstraint = {
+    axis: normalizedAxis,
+    mode: mode === 'lock' ? 'lock' : 'only'
+  };
+  applyTransformAxisConstraint();
+
+  const label = TRANSFORM_AXIS_LABELS[normalizedAxis];
+  setStatus(transformAxisConstraint.mode === 'lock'
+    ? `Transform locked ${label}`
+    : `Transform constrained to ${label}`);
+  return true;
+}
+
+function getTransformShortcutTarget() {
+  if (selectedCameraBezierHandle) {
+    return 'camera-bezier';
+  }
+  if (selectedImageSplat) {
+    return 'image';
+  }
+  if (selectedVideoPlaneId) {
+    return 'video';
+  }
+  if (selectedLightId) {
+    return 'light';
+  }
+  if (selectedKeyframeId) {
+    return 'camera';
+  }
+  if (selectedSceneModelId) {
+    return 'model';
+  }
+  return 'none';
+}
+
+function setTransformModeForSelection(mode) {
+  const normalizedMode = ['translate', 'rotate', 'scale'].includes(mode) ? mode : 'translate';
+  const target = getTransformShortcutTarget();
+  if (target === 'none') {
+    return null;
+  }
+
+  resetTransformAxisConstraint(false);
+
+  if (target === 'camera-bezier') {
+    transformControls.setMode('translate');
+    transformControls.setSpace('world');
+    applyTransformAxisConstraint();
+    if (normalizedMode !== 'translate') {
+      setStatus('Bezier handles support move (G)');
+      return null;
+    } else {
+      setStatus('Move');
+    }
+    return 'translate';
+  }
+
+  if (target === 'image') {
+    setSelectedImageSplatMode(normalizedMode);
+  } else if (target === 'video') {
+    setSelectedVideoPlaneMode(normalizedMode);
+  } else if (target === 'light') {
+    if (normalizedMode === 'scale') {
+      setSelectedLightMode('translate');
+      setStatus('Lights support move (G) and rotate (R)');
+      return null;
+    }
+    setSelectedLightMode(normalizedMode);
+  } else if (target === 'camera') {
+    setSelectedKeyframeMode(normalizedMode);
+  } else {
+    setSelectedSceneModelMode(normalizedMode);
+  }
+
+  applyTransformAxisConstraint();
+  setStatus(normalizedMode === 'translate' ? 'Move' : normalizedMode === 'rotate' ? 'Rotate' : 'Scale');
+  return normalizedMode;
+}
+
+function getTransformShortcutObject(target = getTransformShortcutTarget()) {
+  if (target === 'camera-bezier') {
+    return selectedCameraBezierHandle?.object || null;
+  }
+  if (target === 'image' || target === 'light' || target === 'camera') {
+    return selectedTransformProxy;
+  }
+  if (target === 'video') {
+    return getSelectedVideoPlane()?.root || null;
+  }
+  if (target === 'model') {
+    return activeModelTransformRoot;
+  }
+  return null;
+}
+
+function updateLastScenePointer(event) {
+  if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+    return;
+  }
+  lastScenePointer.clientX = event.clientX;
+  lastScenePointer.clientY = event.clientY;
+}
+
+function getScenePointerStart(event) {
+  updateLastScenePointer(event);
+  if (Number.isFinite(lastScenePointer.clientX) && Number.isFinite(lastScenePointer.clientY)) {
+    return {
+      clientX: lastScenePointer.clientX,
+      clientY: lastScenePointer.clientY
+    };
+  }
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  return {
+    clientX: rect.left + rect.width * 0.5,
+    clientY: rect.top + rect.height * 0.5
+  };
+}
+
+function captureObjectTransform(object) {
+  return {
+    position: object.position.clone(),
+    quaternion: object.quaternion.clone(),
+    scale: object.scale.clone()
+  };
+}
+
+function applyObjectTransformSnapshot(object, snapshot) {
+  object.position.copy(snapshot.position);
+  object.quaternion.copy(snapshot.quaternion);
+  object.scale.copy(snapshot.scale);
+  object.updateMatrixWorld(true);
+}
+
+function getWorldAxisVector(axis) {
+  if (axis === 'x') {
+    return new THREE.Vector3(1, 0, 0);
+  }
+  if (axis === 'y') {
+    return new THREE.Vector3(0, 1, 0);
+  }
+  return new THREE.Vector3(0, 0, 1);
+}
+
+function getWorldUnitsPerPixelAt(object) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const height = Math.max(1, rect.height);
+  if (camera.isPerspectiveCamera) {
+    const distance = Math.max(0.05, camera.position.distanceTo(object.position));
+    return (2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5)) / height;
+  }
+  if (camera.isOrthographicCamera) {
+    return Math.abs(camera.top - camera.bottom) / Math.max(1, camera.zoom) / height;
+  }
+  return 0.01;
+}
+
+function getViewPlaneDelta(object, dx, dy) {
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+  const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+  const unitsPerPixel = getWorldUnitsPerPixelAt(object);
+  return right.multiplyScalar(dx * unitsPerPixel).add(up.multiplyScalar(-dy * unitsPerPixel));
+}
+
+function getAxisScreenDelta(object, axis, dx, dy) {
+  const axisVector = getWorldAxisVector(axis);
+  const rect = renderer.domElement.getBoundingClientRect();
+  const origin = object.position.clone();
+  const originScreen = origin.clone().project(camera);
+  const axisScreen = origin.clone().add(axisVector).project(camera);
+  const sx = ((axisScreen.x - originScreen.x) * rect.width) / 2;
+  const sy = (-(axisScreen.y - originScreen.y) * rect.height) / 2;
+  const pixelsPerWorldUnit = Math.hypot(sx, sy);
+
+  if (!Number.isFinite(pixelsPerWorldUnit) || pixelsPerWorldUnit < 0.001) {
+    return getViewPlaneDelta(object, dx, dy).projectOnVector(axisVector);
+  }
+
+  const screenX = sx / pixelsPerWorldUnit;
+  const screenY = sy / pixelsPerWorldUnit;
+  const units = dx * screenX + dy * screenY;
+  return axisVector.multiplyScalar(units / pixelsPerWorldUnit);
+}
+
+function getConstrainedMoveDelta(object, dx, dy) {
+  if (transformAxisConstraint?.mode === 'only') {
+    return getAxisScreenDelta(object, transformAxisConstraint.axis, dx, dy);
+  }
+
+  const delta = getViewPlaneDelta(object, dx, dy);
+  if (transformAxisConstraint?.mode === 'lock') {
+    const axisVector = getWorldAxisVector(transformAxisConstraint.axis);
+    delta.addScaledVector(axisVector, -delta.dot(axisVector));
+  }
+  return delta;
+}
+
+function getModalRotationAxis() {
+  if (transformAxisConstraint?.mode === 'only') {
+    return getWorldAxisVector(transformAxisConstraint.axis);
+  }
+  return camera.getWorldDirection(new THREE.Vector3()).normalize();
+}
+
+function getModalScaleVector(dx, dy) {
+  const factor = THREE.MathUtils.clamp(Math.exp((dx - dy) * 0.006), 0.02, 50);
+  const scale = modalTransform.start.scale.clone();
+
+  if (transformAxisConstraint?.mode === 'only') {
+    scale[transformAxisConstraint.axis] *= factor;
+    return scale;
+  }
+  if (transformAxisConstraint?.mode === 'lock') {
+    ['x', 'y', 'z'].forEach((axis) => {
+      if (axis !== transformAxisConstraint.axis) {
+        scale[axis] *= factor;
+      }
+    });
+    return scale;
+  }
+
+  return scale.multiplyScalar(factor);
+}
+
+function syncModalTransformToSelection({ final = false } = {}) {
+  if (selectedCameraBezierHandle) {
+    commitSelectedBezierHandleTransform();
+    updateCameraPathCurve();
+    setCameraPreviewDirty();
+    return;
+  }
+
+  if (selectedImageSplat) {
+    commitSelectedImageSplatTransform();
+    return;
+  }
+
+  if (selectedVideoPlaneId) {
+    commitSelectedVideoPlaneTransform();
+    if (final) {
+      renderVideoPlaneList();
+    }
+    return;
+  }
+
+  if (selectedLightId) {
+    commitSelectedLightTransform();
+    if (final) {
+      syncLightUi();
+    }
+    return;
+  }
+
+  if (selectedKeyframeId) {
+    const keyframe = commitSelectedKeyframeTransform();
+    if (keyframe) {
+      updateSelectedCameraMarkerFromKeyframe(keyframe);
+      updateCameraPathCurve();
+      setCameraPreviewDirty();
+    }
+    return;
+  }
+
+  if (transformControls.object === activeModelTransformRoot && selectedSceneModelId) {
+    commitSelectedSceneModelTransform();
+    if (final) {
+      renderSceneModelList();
+    }
+  }
+}
+
+function getModalTransformLabel() {
+  const modeLabel = modalTransform?.mode === 'rotate' ? 'Rotate' : modalTransform?.mode === 'scale' ? 'Scale' : 'Move';
+  if (!transformAxisConstraint) {
+    return `${modeLabel}: move mouse, click to confirm, Esc/right-click to cancel`;
+  }
+  const axis = TRANSFORM_AXIS_LABELS[transformAxisConstraint.axis];
+  return transformAxisConstraint.mode === 'lock'
+    ? `${modeLabel}: locked ${axis}`
+    : `${modeLabel}: ${axis} axis`;
+}
+
+function applyModalTransform(clientX, clientY) {
+  if (!modalTransform?.object) {
+    return;
+  }
+
+  const dx = clientX - modalTransform.startClientX;
+  const dy = clientY - modalTransform.startClientY;
+  const object = modalTransform.object;
+  applyObjectTransformSnapshot(object, modalTransform.start);
+
+  if (modalTransform.mode === 'translate') {
+    object.position.copy(modalTransform.start.position).add(getConstrainedMoveDelta(object, dx, dy));
+  } else if (modalTransform.mode === 'rotate') {
+    const axis = getModalRotationAxis();
+    const angle = (dx - dy) * 0.008;
+    const rotation = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+    object.quaternion.copy(rotation.multiply(modalTransform.start.quaternion)).normalize();
+  } else if (modalTransform.mode === 'scale') {
+    object.scale.copy(getModalScaleVector(dx, dy));
+  }
+
+  object.updateMatrixWorld(true);
+  syncModalTransformToSelection();
+  setStatus(getModalTransformLabel());
+}
+
+function beginModalTransform(mode, event = null) {
+  if (modalTransform) {
+    finishModalTransform(true);
+  }
+
+  const target = getTransformShortcutTarget();
+  const actualMode = setTransformModeForSelection(mode);
+  if (!actualMode) {
+    return false;
+  }
+
+  const object = getTransformShortcutObject(target);
+  if (!object) {
+    return false;
+  }
+
+  const startPointer = getScenePointerStart(event);
+  recordUndoStep(actualMode === 'translate' ? 'Move object' : actualMode === 'rotate' ? 'Rotate object' : 'Scale object');
+  modalTransform = {
+    mode: actualMode,
+    target,
+    object,
+    start: captureObjectTransform(object),
+    startClientX: startPointer.clientX,
+    startClientY: startPointer.clientY,
+    previousTransformControlsEnabled: transformControls.enabled,
+    pointerDown: false,
+    pointerMoved: false
+  };
+  orbit.enabled = false;
+  transformControls.enabled = false;
+  setStatus(getModalTransformLabel());
+  return true;
+}
+
+function finishModalTransform(confirm = true) {
+  if (!modalTransform) {
+    return;
+  }
+
+  const activeModal = modalTransform;
+  if (!confirm) {
+    applyObjectTransformSnapshot(activeModal.object, activeModal.start);
+    syncModalTransformToSelection({ final: true });
+  } else {
+    syncModalTransformToSelection({ final: true });
+  }
+
+  modalTransform = null;
+  orbit.enabled = true;
+  transformControls.enabled = activeModal.previousTransformControlsEnabled;
+  resetTransformAxisConstraint(false);
+  setStatus(confirm ? 'Transform applied' : 'Transform cancelled');
+}
+
+function handleModalTransformPointerMove(event) {
+  updateLastScenePointer(event);
+  if (!modalTransform) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const moved = Math.hypot(
+    event.clientX - modalTransform.startClientX,
+    event.clientY - modalTransform.startClientY
+  );
+  modalTransform.pointerMoved = modalTransform.pointerMoved || moved > 1.5;
+  applyModalTransform(event.clientX, event.clientY);
+}
+
+function handleModalTransformPointerDown(event) {
+  updateLastScenePointer(event);
+  if (!modalTransform) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.button === 2) {
+    finishModalTransform(false);
+    return;
+  }
+  if (event.button === 0) {
+    modalTransform.pointerDown = true;
+  }
+}
+
+function handleModalTransformPointerUp(event) {
+  updateLastScenePointer(event);
+  if (!modalTransform) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.button === 0) {
+    finishModalTransform(true);
+  }
+}
 
 function createParticleLightingUniforms() {
   return {
@@ -1763,37 +2221,68 @@ const compositeMaterial = new THREE.ShaderMaterial({
       return (nearValue * farValue) / ((farValue - nearValue) * invClipZ - farValue);
     }
 
+    float viewDistanceAt(vec2 uv) {
+      float depth = texture2D(uDepthTexture, clamp(uv, vec2(0.0), vec2(1.0))).x;
+      if (depth >= 0.999999) {
+        return uCameraFar;
+      }
+      return max(-perspectiveDepthToViewZ(depth, uCameraNear, uCameraFar), 0.001);
+    }
+
+    float depthCircleOfConfusion(float viewDistance) {
+      float focusDistance = max(uFocusDistance, 0.05);
+      float focusError = abs(viewDistance - focusDistance);
+      float focusHold = max(0.035, focusDistance * (0.035 + clamp(uAperture, 1.2, 22.0) * 0.006));
+      float normalizedError = max(focusError - focusHold, 0.0) / max(focusDistance, 0.1);
+      float apertureStrength = clamp(1.65 / max(uAperture, 1.2), 0.075, 1.35);
+      float focalStrength = clamp(uFocalLength / 45.0, 0.28, 4.2);
+      return clamp(normalizedError * apertureStrength * focalStrength * 3.0, 0.0, 1.0);
+    }
+
     vec4 sampleDepthOfField(vec2 uv) {
       vec4 center = texture2D(uBaseTexture, uv);
       if (uDofEnabled < 0.5) {
         return center;
       }
 
-      float depth = texture2D(uDepthTexture, uv).x;
-      float viewDistance = max(-perspectiveDepthToViewZ(depth, uCameraNear, uCameraFar), 0.001);
-      float apertureScale = clamp(5.6 / max(uAperture, 1.2), 0.25, 4.7);
-      float focalScale = clamp(uFocalLength / 50.0, 0.18, 6.0);
-      float coc = clamp(abs(viewDistance - uFocusDistance) / max(viewDistance, 0.1) * apertureScale * focalScale, 0.0, 1.0);
+      float viewDistance = viewDistanceAt(uv);
+      float coc = depthCircleOfConfusion(viewDistance);
       vec2 texel = 1.0 / max(uResolution, vec2(2.0));
-      vec2 radius = texel * mix(0.0, 14.0, coc);
-      if (coc < 0.002) {
+      float focusBlend = smoothstep(0.018, 0.32, coc);
+      if (focusBlend <= 0.001) {
         return center;
       }
 
-      vec4 color = center * 0.18;
-      color += texture2D(uBaseTexture, uv + vec2(1.0, 0.0) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(-1.0, 0.0) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(0.0, 1.0) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(0.0, -1.0) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(0.707, 0.707) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(-0.707, 0.707) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(0.707, -0.707) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(-0.707, -0.707) * radius) * 0.082;
-      color += texture2D(uBaseTexture, uv + vec2(1.65, 0.0) * radius) * 0.041;
-      color += texture2D(uBaseTexture, uv + vec2(-1.65, 0.0) * radius) * 0.041;
-      color += texture2D(uBaseTexture, uv + vec2(0.0, 1.65) * radius) * 0.041;
-      color += texture2D(uBaseTexture, uv + vec2(0.0, -1.65) * radius) * 0.041;
-      return color;
+      float maxRadiusPixels = clamp(min(uResolution.x, uResolution.y) * 0.045, 4.0, 22.0);
+      vec2 radius = texel * (maxRadiusPixels * smoothstep(0.0, 1.0, coc));
+      vec4 accum = center * 1.15;
+      float totalWeight = 1.15;
+      const float GOLDEN_ANGLE = 2.39996323;
+
+      for (int i = 0; i < 24; i++) {
+        float fi = float(i) + 0.5;
+        float ring = sqrt(fi / 24.0);
+        float angle = fi * GOLDEN_ANGLE;
+        vec2 disk = vec2(cos(angle), sin(angle)) * ring;
+        vec2 sampleUv = clamp(uv + disk * radius, texel * 0.5, vec2(1.0) - texel * 0.5);
+        float sampleDistance = viewDistanceAt(sampleUv);
+        float sampleCoc = depthCircleOfConfusion(sampleDistance);
+        float sampleBlur = max(coc, sampleCoc);
+        float focusWeight = smoothstep(0.025, 0.34, sampleBlur);
+        float foregroundGuard = sampleDistance + 0.025 < viewDistance
+          ? smoothstep(0.04, 0.55, sampleCoc + coc * 0.55)
+          : 1.0;
+        float edgeWeight = mix(1.08, 0.72, ring);
+        float weight = mix(0.26, 1.0, focusWeight) * foregroundGuard * edgeWeight;
+        vec4 sampleColor = texture2D(uBaseTexture, sampleUv);
+        float highlight = smoothstep(0.58, 1.35, max(max(sampleColor.r, sampleColor.g), sampleColor.b));
+        sampleColor.rgb *= 1.0 + highlight * coc * 0.08;
+        accum += sampleColor * weight;
+        totalWeight += weight;
+      }
+
+      vec4 blurred = accum / max(totalWeight, 0.0001);
+      return mix(center, blurred, focusBlend);
     }
 
     void main() {
@@ -2276,7 +2765,8 @@ const particleMaterial = new THREE.ShaderMaterial({
       p = mix(surfacePosition, p, particleizeMotion);
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-      float depthScale = clamp(4.8 / -mvPosition.z, 0.22, 5.6);
+      float cameraDepth = max(-mvPosition.z, 0.001);
+      float depthScale = clamp(pow(4.8 / cameraDepth, 0.45), 0.55, 3.0);
       float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
       float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
       float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
@@ -2285,7 +2775,7 @@ const particleMaterial = new THREE.ShaderMaterial({
       corePointSize *= mix(1.0, 0.56 + growHead * 0.32 + sheetMask * 0.22 + dissolveMistMask * 0.12, strandMask);
       corePointSize *= 1.0 + sheetMask * (0.08 + uDissolveMist * 0.12);
       corePointSize *= mix(1.0, 0.92 + morphRibbon * (0.18 + uMorphFlow * 0.06), morphMode);
-      corePointSize = max(corePointSize, 0.95 * uPixelRatio);
+      corePointSize = max(corePointSize, 1.05 * uPixelRatio);
       float glowSourceSize = corePointSize * 1.08 + min(uGlowRadius, 1400.0) * uPixelRatio * 0.018;
       gl_PointSize = mix(corePointSize, max(corePointSize, glowSourceSize), step(0.5, uGlowPass));
       vCoreRadius = clamp((corePointSize / max(gl_PointSize, 0.001)) * 0.48, 0.025, 0.48);
@@ -2603,11 +3093,12 @@ const emissionMaterial = new THREE.ShaderMaterial({
       p += breakFlow * breakMask * uBreakProgress * (0.08 + uEmissionTurbulence * 0.16);
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-      float depthScale = clamp(4.8 / -mvPosition.z, 0.18, 5.2);
+      float cameraDepth = max(-mvPosition.z, 0.001);
+      float depthScale = clamp(pow(4.8 / cameraDepth, 0.45), 0.52, 2.8);
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
-      baseSize = max(baseSize, 0.95 * uPixelRatio);
+      baseSize = max(baseSize, 1.05 * uPixelRatio);
       float glowSize = baseSize * (1.55 + clamp(uEmissionGlow, 0.0, 4.0) * 1.12);
       gl_PointSize = mix(baseSize, max(baseSize, glowSize), step(0.5, uGlowPass));
       gl_Position = projectionMatrix * mvPosition;
@@ -2757,7 +3248,7 @@ const imageSplatVertexShader = `
     p += aScatter * uScatter * (0.18 + mist * (0.62 + aSeed * 1.18));
 
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    float perspectiveScale = clamp(3.6 / max(1.0, -mvPosition.z), 0.58, 2.4);
+    float perspectiveScale = clamp(pow(3.6 / max(0.8, -mvPosition.z), 0.45), 0.68, 2.0);
     float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
     float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
@@ -2888,7 +3379,7 @@ const realSplatPointMaterial = new THREE.ShaderMaterial({
       p += curl * uTurbulence * (0.018 + seed * 0.035) * (0.35 + stream);
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-      float perspectiveScale = clamp(4.8 / max(0.8, -mvPosition.z), 0.62, 3.2);
+      float perspectiveScale = clamp(pow(4.8 / max(0.8, -mvPosition.z), 0.45), 0.7, 2.2);
       float glowScale = 1.0 + (1.0 - exp(-max(uGlow, 0.0) * 0.72)) * 0.18;
       gl_PointSize = max(0.85, uPointSize * uPixelRatio * perspectiveScale * aScale * glowScale);
       gl_Position = projectionMatrix * mvPosition;
@@ -4050,9 +4541,12 @@ function selectSceneModelTransform() {
   }
 
   selectedImageSplat = false;
+  selectedVideoPlaneId = null;
   selectedLightId = null;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
+  selectedCameraBezierHandle = null;
+  resetTransformAxisConstraint(false);
   renderLightList();
   syncLightUi();
   transformControls.setMode(selectedSceneModelMode);
@@ -4060,6 +4554,7 @@ function selectSceneModelTransform() {
   transformControls.attach(activeModelTransformRoot);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   updateSceneModelTransformButtons();
 }
 
@@ -4511,6 +5006,7 @@ function selectVideoPlane(recordId) {
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
   selectedCameraBezierHandle = null;
+  resetTransformAxisConstraint(false);
   renderSceneModelList();
   renderLightList();
   syncLightUi();
@@ -4519,6 +5015,7 @@ function selectVideoPlane(recordId) {
   transformControls.attach(record.root);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   renderVideoPlaneList();
   syncVideoPlaneUi();
   return true;
@@ -9813,6 +10310,7 @@ function selectImageSplatObject() {
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
   selectedCameraBezierHandle = null;
+  resetTransformAxisConstraint(false);
   renderLightList();
   syncLightUi();
   syncTransformProxyFromImageSplat();
@@ -9821,6 +10319,7 @@ function selectImageSplatObject() {
   transformControls.attach(selectedTransformProxy);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   syncImageSplatTransformButtons();
 }
 
@@ -10193,6 +10692,7 @@ function selectLightHandle(lightId) {
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
   selectedCameraBezierHandle = null;
+  resetTransformAxisConstraint(false);
   activeCameraQuaternion = null;
   rebuildCameraPath();
   syncTransformProxyFromLight(light);
@@ -10201,6 +10701,7 @@ function selectLightHandle(lightId) {
   transformControls.attach(selectedTransformProxy);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   renderLightList();
   syncLightUi();
   updateLightModeButtons();
@@ -10314,10 +10815,12 @@ function deleteSelectedLight() {
 function setSelectedLightMode(mode) {
   selectedLightMode = mode === 'rotate' ? 'rotate' : 'translate';
   if (selectedLightId) {
+    resetTransformAxisConstraint(false);
     transformControls.setMode(selectedLightMode);
     transformControls.setSpace(selectedLightMode === 'rotate' ? 'local' : 'world');
     transformControls.attach(selectedTransformProxy);
     transformControls.visible = true;
+    applyTransformAxisConstraint();
   }
   updateLightModeButtons();
 }
@@ -10963,6 +11466,14 @@ function configureCameraPreviewCamera(aspect) {
   return configureOutputCamera(cameraPreviewCamera, aspect, cameraAnimation.time);
 }
 
+function getCurrentCameraFocusDistance() {
+  const timelinePose = getTimelineCameraPose(cameraAnimation.time);
+  if (timelinePose?.distance && Number.isFinite(timelinePose.distance)) {
+    return THREE.MathUtils.clamp(timelinePose.distance, 0.05, CAMERA_FOCUS_DISTANCE_MAX);
+  }
+  return THREE.MathUtils.clamp(camera.position.distanceTo(orbit.target), 0.05, CAMERA_FOCUS_DISTANCE_MAX);
+}
+
 function setEditorHelpersVisible(visible) {
   const previous = {
     path: cameraPathGroup.visible,
@@ -11023,7 +11534,7 @@ function renderCameraPreview(force = false) {
         cameraPreviewRenderer,
         previewCamera,
         cameraPreviewPostTargets,
-        { outputTarget: null, transparent: false }
+        { outputTarget: null, transparent: false, dofEnabled: true }
       );
     }
   } finally {
@@ -11147,6 +11658,10 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
   }
   if (Number.isFinite(Number(snapshot.focusDistance))) {
     state.cameraFocusDistance = Number(snapshot.focusDistance);
+  } else if (Array.isArray(snapshot.position) && snapshot.position.length >= 3 && Array.isArray(snapshot.target) && snapshot.target.length >= 3) {
+    const focusPosition = new THREE.Vector3().fromArray(snapshot.position.map(Number).slice(0, 3));
+    const focusTarget = new THREE.Vector3().fromArray(snapshot.target.map(Number).slice(0, 3));
+    state.cameraFocusDistance = focusPosition.distanceTo(focusTarget);
   }
   if (Number.isFinite(Number(snapshot.displaySize ?? snapshot.cameraDisplaySize))) {
     state.cameraDisplaySize = Number(snapshot.displaySize ?? snapshot.cameraDisplaySize);
@@ -12217,7 +12732,7 @@ function createCameraBezierHandle(keyframe, position, offset, type) {
       dashSize: 0.08,
       gapSize: 0.06,
       transparent: true,
-      opacity: selected ? 0.98 : 0.62,
+      opacity: selected ? 0.98 : 0.74,
       depthTest: false
     })
   );
@@ -12228,7 +12743,7 @@ function createCameraBezierHandle(keyframe, position, offset, type) {
   group.add(line);
 
   const handle = new THREE.Mesh(
-    new THREE.SphereGeometry(selected ? 0.14 : 0.11, 18, 12),
+    new THREE.SphereGeometry(selected ? 0.2 : 0.16, 24, 16),
     new THREE.MeshBasicMaterial({
       color: selected ? 0xffffff : color,
       transparent: true,
@@ -12241,6 +12756,24 @@ function createCameraBezierHandle(keyframe, position, offset, type) {
   handle.userData.keyframeId = keyframe.id;
   handle.userData.handleType = type;
   group.add(handle);
+
+  const pickProxy = new THREE.Mesh(
+    new THREE.SphereGeometry(selected ? 0.52 : 0.44, 16, 12),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+      depthWrite: false
+    })
+  );
+  pickProxy.position.copy(world);
+  pickProxy.renderOrder = 999;
+  pickProxy.userData.cameraBezierHandle = true;
+  pickProxy.userData.cameraBezierPickProxy = true;
+  pickProxy.userData.keyframeId = keyframe.id;
+  pickProxy.userData.handleType = type;
+  group.add(pickProxy);
 
   return group;
 }
@@ -12404,7 +12937,7 @@ function findCameraPathPointerHit() {
 
   const previousLineThreshold = raycaster.params.Line?.threshold ?? 1;
   raycaster.params.Line = raycaster.params.Line || {};
-  raycaster.params.Line.threshold = 0.14;
+  raycaster.params.Line.threshold = 0.24;
   const hit = raycaster
     .intersectObjects(cameraPathGroup.children, true)
     .find((item) => item.object.userData.cameraBezierHandle || item.object.userData.keyframeHandle);
@@ -12773,6 +13306,7 @@ function selectCameraBezierHandle(keyframeId, type, options = {}) {
   selectedKeyframeId = keyframe.id;
   selectedKeyframeObject = findCameraMarkerObject(keyframe.id);
   selectedCameraBezierHandle = { keyframeId: keyframe.id, type, object: handle };
+  resetTransformAxisConstraint(false);
   renderLightList();
   syncLightUi();
   transformControls.setMode('translate');
@@ -12780,6 +13314,7 @@ function selectCameraBezierHandle(keyframeId, type, options = {}) {
   transformControls.attach(handle);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   updateKeyframeModeButtons();
   syncCameraCurveUi();
 
@@ -12795,6 +13330,7 @@ function findCameraBezierHandleObject(keyframeId, type) {
     if (
       !found &&
       child.userData?.cameraBezierHandle &&
+      !child.userData.cameraBezierPickProxy &&
       child.userData.keyframeId === keyframeId &&
       child.userData.handleType === type
     ) {
@@ -12850,6 +13386,7 @@ function selectCameraKeyframeHandle(keyframeId, options = {}) {
   selectedVideoPlaneId = null;
   selectedLightId = null;
   selectedCameraBezierHandle = null;
+  resetTransformAxisConstraint(false);
   renderLightList();
   syncLightUi();
   selectedKeyframeId = keyframeId;
@@ -12868,6 +13405,7 @@ function selectCameraKeyframeHandle(keyframeId, options = {}) {
   transformControls.attach(selectedTransformProxy);
   transformControls.visible = true;
   transformControls.enabled = true;
+  applyTransformAxisConstraint();
   updateKeyframeModeButtons();
   syncCameraCurveUi();
 
@@ -13648,9 +14186,9 @@ function setSceneModelSnapshotsVisible(visible) {
   };
 }
 
-function configureCompositeCameraUniforms(renderCamera, targets) {
+function configureCompositeCameraUniforms(renderCamera, targets, options = {}) {
   compositeMaterial.uniforms.uDepthTexture.value = targets.sceneTarget.depthTexture;
-  compositeMaterial.uniforms.uDofEnabled.value = state.cameraDofEnabled && state.cameraType === 'perspective' ? 1 : 0;
+  compositeMaterial.uniforms.uDofEnabled.value = options.dofEnabled ? 1 : 0;
   compositeMaterial.uniforms.uCameraNear.value = renderCamera.near;
   compositeMaterial.uniforms.uCameraFar.value = renderCamera.far;
   compositeMaterial.uniforms.uFocusDistance.value = state.cameraFocusDistance;
@@ -13674,7 +14212,12 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   const previousScissor = new THREE.Vector4();
   const previousScissorTest = targetRenderer.getScissorTest?.() || false;
   const forceOutputComposite = Boolean(options.forceOutputComposite && finalViewport && targets?.sceneTarget);
-  const depthOfFieldEnabled = Boolean(state.cameraDofEnabled && state.cameraType === 'perspective' && targets?.sceneTarget?.depthTexture);
+  const depthOfFieldEnabled = Boolean(
+    options.dofEnabled &&
+    state.cameraDofEnabled &&
+    state.cameraType === 'perspective' &&
+    targets?.sceneTarget?.depthTexture
+  );
   const requiresOutputComposite = forceOutputComposite || depthOfFieldEnabled;
   targetRenderer.getViewport(previousViewport);
   targetRenderer.getScissor(previousScissor);
@@ -13728,7 +14271,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
       compositeMaterial.uniforms.uBloomStrength.value = 0;
       compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
       compositeMaterial.uniforms.uBloomAlpha.value = 0;
-      configureCompositeCameraUniforms(renderCamera, targets);
+      configureCompositeCameraUniforms(renderCamera, targets, { dofEnabled: depthOfFieldEnabled });
       targetRenderer.setRenderTarget(outputTarget);
       applyOutputViewport();
       targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
@@ -13863,7 +14406,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     : state.effectMode === 'image'
       ? THREE.MathUtils.clamp(0.015 + bloomShape * 0.23, 0.015, 0.245)
     : THREE.MathUtils.clamp(0.02 + bloomShape * 0.28, 0.02, 0.3);
-  configureCompositeCameraUniforms(renderCamera, targets);
+  configureCompositeCameraUniforms(renderCamera, targets, { dofEnabled: depthOfFieldEnabled });
 
   targetRenderer.setRenderTarget(outputTarget);
   applyOutputViewport();
@@ -13907,7 +14450,8 @@ function renderSceneWithGlow() {
             outputTarget: null,
             transparent: false,
             viewport: layout,
-            forceOutputComposite: true
+            forceOutputComposite: true,
+            dofEnabled: true
           }
         );
       }
@@ -13920,7 +14464,7 @@ function renderSceneWithGlow() {
   renderer.getSize(mainRendererSize);
   renderer.setViewport(0, 0, mainRendererSize.x, mainRendererSize.y);
   renderer.setScissorTest(false);
-  renderSceneWithGlowFor(renderer, camera, { sceneTarget, glowTarget, blurTargetA, blurTargetB });
+  renderSceneWithGlowFor(renderer, camera, { sceneTarget, glowTarget, blurTargetA, blurTargetB }, { dofEnabled: false });
 }
 
 function animate() {
@@ -14062,7 +14606,8 @@ function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSe
       renderSceneWithGlowFor(
         renderer,
         renderCamera,
-        { sceneTarget, glowTarget, blurTargetA, blurTargetB }
+        { sceneTarget, glowTarget, blurTargetA, blurTargetB },
+        { dofEnabled: true }
       );
     }
     return canvas.toDataURL('image/png');
@@ -14455,6 +15000,19 @@ window.particleStudio = {
     selectCameraKeyframeHandle(keyframe.id);
     return keyframe.id;
   },
+  selectCameraBezierHandleForTest: (index = 0, type = 'out') => {
+    const keyframes = getSortedCameraKeyframes();
+    const keyframe = keyframes[Math.max(0, Math.round(Number(index) || 0))];
+    const handleType = type === 'in' ? 'in' : 'out';
+    if (!keyframe) {
+      return null;
+    }
+    if (normalizeCameraPathMode(cameraAnimation.pathMode) !== 'bezier') {
+      setCameraPathMode('bezier');
+    }
+    rebuildCameraPath();
+    return selectCameraBezierHandle(keyframe.id, handleType) ? keyframe.id : null;
+  },
   getTransformSelectionDebug: () => ({
     selectedSceneModelId,
     selectedKeyframeId,
@@ -14481,11 +15039,32 @@ window.particleStudio = {
       : selectedVideoPlaneId && transformControls.object
         ? transformControls.object.position
         : selectedTransformProxy.position).toArray(),
+    proxyQuaternion: (transformControls.object === activeModelTransformRoot
+      ? activeModelTransformRoot.quaternion
+      : selectedCameraBezierHandle && transformControls.object
+        ? transformControls.object.quaternion
+      : selectedVideoPlaneId && transformControls.object
+        ? transformControls.object.quaternion
+        : selectedTransformProxy.quaternion).toArray(),
+    targetScale: (transformControls.object === activeModelTransformRoot
+      ? activeModelTransformRoot.scale
+      : selectedCameraBezierHandle && transformControls.object
+        ? transformControls.object.scale
+      : selectedVideoPlaneId && transformControls.object
+        ? transformControls.object.scale
+        : selectedTransformProxy.scale).toArray(),
     activeModelPosition: activeModelTransformRoot.position.toArray(),
     proxyScale: selectedTransformProxy.scale.toArray(),
     cameraMarkerScale: selectedKeyframeObject?.scale?.toArray() || null,
     cameraDisplaySize: state.cameraDisplaySize,
     keyframeMode: selectedKeyframeMode,
+    transformMode: getCurrentTransformMode(),
+    transformAxes: {
+      x: transformControls.showX,
+      y: transformControls.showY,
+      z: transformControls.showZ
+    },
+    axisConstraint: transformAxisConstraint ? { ...transformAxisConstraint } : null,
     bezierHandle: selectedCameraBezierHandle
       ? { keyframeId: selectedCameraBezierHandle.keyframeId, type: selectedCameraBezierHandle.type }
       : null,
@@ -14493,6 +15072,13 @@ window.particleStudio = {
     attachedToBezierHandle: Boolean(selectedCameraBezierHandle && transformControls.object === selectedCameraBezierHandle.object),
     attachedToModelRoot: transformControls.object === activeModelTransformRoot,
     attachedToVideoRoot: Boolean(selectedVideoPlaneId && transformControls.object === getSelectedVideoPlane()?.root),
+    modalTransform: modalTransform
+      ? {
+          mode: modalTransform.mode,
+          target: modalTransform.target,
+          active: true
+        }
+      : null,
     visible: transformControls.visible
   }),
   captureProject: () => captureProjectDocument(),
@@ -14845,6 +15431,9 @@ syncExportFormatUi();
 
 controlsUi.cameraDofEnabled?.addEventListener('change', () => {
   state.cameraDofEnabled = controlsUi.cameraDofEnabled.checked;
+  if (state.cameraDofEnabled) {
+    state.cameraFocusDistance = getCurrentCameraFocusDistance();
+  }
   syncCameraSettingsFromState(true);
 });
 
@@ -15127,6 +15716,16 @@ document.addEventListener('pointerdown', (event) => {
   }
 }, true);
 
+window.addEventListener('pointermove', handleModalTransformPointerMove, { capture: true });
+window.addEventListener('pointerdown', handleModalTransformPointerDown, { capture: true });
+window.addEventListener('pointerup', handleModalTransformPointerUp, { capture: true });
+window.addEventListener('contextmenu', (event) => {
+  if (modalTransform) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, { capture: true });
+
 document.addEventListener('focusin', (event) => {
   const control = getUndoableControl(event.target);
   if (control && control.tagName !== 'BUTTON') {
@@ -15135,6 +15734,8 @@ document.addEventListener('focusin', (event) => {
 }, true);
 
 window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase();
+
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     event.stopPropagation();
@@ -15161,45 +15762,60 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (!selectedKeyframeId && !selectedLightId && !selectedImageSplat && !selectedSceneModelId) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
     return;
   }
 
-  if (event.key.toLowerCase() === 'w') {
-    if (selectedImageSplat) {
-      setSelectedImageSplatMode('translate');
-    } else if (selectedVideoPlaneId) {
-      setSelectedVideoPlaneMode('translate');
-    } else if (selectedLightId) {
-      setSelectedLightMode('translate');
-    } else if (selectedKeyframeId) {
-      setSelectedKeyframeMode('translate');
-    } else {
-      setSelectedSceneModelMode('translate');
-    }
+  const hasTransformSelection = getTransformShortcutTarget() !== 'none';
+  if (!hasTransformSelection) {
+    return;
   }
 
-  if (event.key.toLowerCase() === 'e') {
-    if (selectedImageSplat) {
-      setSelectedImageSplatMode('rotate');
-    } else if (selectedVideoPlaneId) {
-      setSelectedVideoPlaneMode('rotate');
-    } else if (selectedLightId) {
-      setSelectedLightMode('rotate');
-    } else if (selectedKeyframeId) {
-      setSelectedKeyframeMode('rotate');
+  if (key === 'escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    if (modalTransform) {
+      finishModalTransform(false);
     } else {
-      setSelectedSceneModelMode('rotate');
+      resetTransformAxisConstraint(true);
     }
+    return;
   }
 
-  if (event.key.toLowerCase() === 'r') {
-    if (selectedImageSplat) {
-      setSelectedImageSplatMode('scale');
-    } else if (selectedVideoPlaneId) {
-      setSelectedVideoPlaneMode('scale');
-    } else if (!selectedLightId && !selectedKeyframeId && selectedSceneModelId) {
-      setSelectedSceneModelMode('scale');
+  if (key === 'enter' && modalTransform) {
+    event.preventDefault();
+    event.stopPropagation();
+    finishModalTransform(true);
+    return;
+  }
+
+  if (key === 'g' || key === 'w') {
+    event.preventDefault();
+    event.stopPropagation();
+    beginModalTransform('translate', event);
+    return;
+  }
+
+  if (key === 'r' || key === 'e') {
+    event.preventDefault();
+    event.stopPropagation();
+    beginModalTransform('rotate', event);
+    return;
+  }
+
+  if (key === 's') {
+    event.preventDefault();
+    event.stopPropagation();
+    beginModalTransform('scale', event);
+    return;
+  }
+
+  if (['x', 'y', 'z'].includes(key) && transformControls.visible) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTransformAxisConstraint(key, event.shiftKey ? 'lock' : 'only');
+    if (modalTransform && Number.isFinite(lastScenePointer.clientX) && Number.isFinite(lastScenePointer.clientY)) {
+      applyModalTransform(lastScenePointer.clientX, lastScenePointer.clientY);
     }
   }
 });

@@ -187,6 +187,53 @@ try {
     throw new Error(`Undo failed: ${JSON.stringify(result)}`);
   }
 
+  const modalPoint = await page.evaluate(() => {
+    const canvas = document.querySelector('#scene');
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width * 0.58,
+      y: rect.top + rect.height * 0.52
+    };
+  });
+  const packagedModalStart = await page.evaluate(() => {
+    window.particleStudio.setCameraKeyframes([
+      { id: 'electron-modal-camera', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0] }
+    ]);
+    window.particleStudio.selectCameraKeyframeForTest(0);
+    document.activeElement?.blur?.();
+    return window.particleStudio.getTransformSelectionDebug();
+  });
+  await page.mouse.move(modalPoint.x, modalPoint.y);
+  await page.keyboard.press('KeyG');
+  const packagedModalDuring = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.keyboard.press('KeyX');
+  await page.mouse.move(modalPoint.x + 100, modalPoint.y + 40, { steps: 4 });
+  const packagedModalConstrained = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  await page.mouse.click(modalPoint.x + 100, modalPoint.y + 40);
+  const packagedModalEnd = await page.evaluate(() => window.particleStudio.getTransformSelectionDebug());
+  const packagedXMove = Math.abs(packagedModalEnd.proxyPosition[0] - packagedModalStart.proxyPosition[0]);
+  const packagedYDrift = Math.abs(packagedModalEnd.proxyPosition[1] - packagedModalStart.proxyPosition[1]);
+  const packagedZDrift = Math.abs(packagedModalEnd.proxyPosition[2] - packagedModalStart.proxyPosition[2]);
+  if (
+    packagedModalDuring.modalTransform?.mode !== 'translate' ||
+    packagedModalDuring.modalTransform?.target !== 'camera' ||
+    packagedModalConstrained.axisConstraint?.axis !== 'x' ||
+    packagedModalConstrained.axisConstraint?.mode !== 'only' ||
+    packagedXMove < 0.005 ||
+    packagedYDrift > 0.001 ||
+    packagedZDrift > 0.001
+  ) {
+    throw new Error(`Packaged modal transform failed: ${JSON.stringify({
+      packagedModalStart,
+      packagedModalDuring,
+      packagedModalConstrained,
+      packagedModalEnd,
+      packagedXMove,
+      packagedYDrift,
+      packagedZDrift
+    })}`);
+  }
+
   const movProxyResult = await page.evaluate(async (assetPath) => {
     const ipcProxy = await window.electronAPI.prepareVideoProxy({
       path: assetPath,
