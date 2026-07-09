@@ -90,6 +90,8 @@ try {
   });
 
   await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 90000 });
+  await page.evaluate(() => window.particleStudio?.setCameraPreviewVisible?.(true));
+  await page.waitForTimeout(60);
   const uiLayout = await page.evaluate(() => {
     const panel = document.querySelector('.panel');
     const canvas = document.querySelector('#scene');
@@ -100,6 +102,10 @@ try {
     const rightResizer = document.querySelector('.workspace-resizer-right');
     const timelineResizer = document.querySelector('.workspace-resizer-timeline');
     const sceneRows = document.querySelectorAll('.scene-model-row').length;
+    const sceneCameraPanel = document.querySelector('#sceneCamerasPanel');
+    const sceneCameraRows = document.querySelectorAll('.scene-camera-row').length;
+    const sceneCameraEnabled = document.querySelectorAll('.scene-camera-row.enabled').length;
+    const videoKeyButtons = document.querySelectorAll('.video-keyframe-dot, .video-transform-key').length;
     const frameTicks = [...document.querySelectorAll('.timeline-frame-tick')].map((item) => item.textContent.trim()).filter(Boolean);
     const timelineValue = document.querySelector('#timelineValue')?.textContent || '';
     const propertyTabs = [...document.querySelectorAll('.workspace-property-tab')].map((item) => item.dataset.propertyTab);
@@ -132,7 +138,11 @@ try {
       propertyTabs,
       activePropertyTab,
       visiblePropertyPage,
-      sceneRows
+      sceneRows,
+      sceneCameraPanel: Boolean(sceneCameraPanel),
+      sceneCameraRows,
+      sceneCameraEnabled,
+      videoKeyButtons
     };
   });
   if (
@@ -156,7 +166,11 @@ try {
     uiLayout.propertyTabs.length < 8 ||
     !uiLayout.propertyTabs.includes('camera') ||
     uiLayout.activePropertyTab !== uiLayout.visiblePropertyPage ||
-    uiLayout.sceneRows < 1
+    uiLayout.sceneRows < 1 ||
+    !uiLayout.sceneCameraPanel ||
+    uiLayout.sceneCameraRows < 1 ||
+    uiLayout.sceneCameraEnabled !== 1 ||
+    uiLayout.videoKeyButtons < 8
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);
   }
@@ -237,6 +251,20 @@ try {
   const result = await page.evaluate(async () => {
     const hasElectronBridge = Boolean(window.electronAPI?.exportMov);
     const initialCamera = window.particleStudio.getCameraSettings();
+    const camerasBefore = window.particleStudio.getSceneCameras();
+    const addedCamera = window.particleStudio.addSceneCamera();
+    const camerasAfterAdd = window.particleStudio.getSceneCameras();
+    window.particleStudio.toggleSceneCameraHidden(addedCamera.id);
+    const camerasAfterHide = window.particleStudio.getSceneCameras();
+    const sceneModelsBefore = window.particleStudio.getSceneModels();
+    const firstModelId = sceneModelsBefore?.models?.[0]?.id;
+    let collectionResult = null;
+    if (firstModelId) {
+      window.particleStudio.selectSceneModelIdsForTest([firstModelId]);
+      const collection = window.particleStudio.addSceneModelCollectionForTest('Smoke Collection');
+      window.particleStudio.assignSelectedSceneModelsToCollectionForTest(collection.id);
+      collectionResult = window.particleStudio.getSceneModels();
+    }
 
     window.particleStudio.setCameraSettings({ displaySize: 2.5 });
     document.querySelector('#addKeyframe')?.click();
@@ -272,6 +300,12 @@ try {
       href: location.href,
       hasElectronBridge,
       initialCamera,
+      camerasBefore: camerasBefore.items.length,
+      camerasAfterAdd: camerasAfterAdd.items.length,
+      addedCameraActive: camerasAfterAdd.activeId === addedCamera.id,
+      addedCameraHidden: camerasAfterHide.items.find((item) => item.id === addedCamera.id)?.hidden,
+      collectionCount: collectionResult?.collections?.length || 0,
+      groupedModelId: collectionResult?.models?.find((item) => item.id === firstModelId)?.collectionId || '',
       cameraSize,
       panoramaSize,
       panoramaBytes: panoramaFrame.length,
@@ -289,6 +323,16 @@ try {
   }
   if (result.dofFrameBytes < 1000) {
     throw new Error(`Depth-of-field frame failed: ${JSON.stringify(result)}`);
+  }
+  if (
+    result.camerasBefore < 1 ||
+    result.camerasAfterAdd < result.camerasBefore + 1 ||
+    !result.addedCameraActive ||
+    result.addedCameraHidden !== true ||
+    result.collectionCount < 1 ||
+    !result.groupedModelId
+  ) {
+    throw new Error(`Scene cameras / collections failed: ${JSON.stringify(result)}`);
   }
   if (
     Math.abs(result.cameraSize?.cameraDisplaySize - 2.5) > 0.01 ||
@@ -371,6 +415,9 @@ try {
         }
       ]
     });
+    window.particleStudio.addVideoPlaneKeyframe('width');
+    window.particleStudio.addVideoPlaneKeyframe('position');
+    const videoKeyframes = window.particleStudio.getVideoPlaneKeyframes();
     const asset = window.particleStudio.getCurrentAsset().videoPlanes.find((item) => item.id === 'electron-mov-proxy-smoke');
     const frame = await window.particleStudio.renderFrameAsync(0, undefined, 0);
     return {
@@ -382,6 +429,7 @@ try {
         cached: Boolean(ipcProxy?.cached)
       },
       asset,
+      videoKeyframes,
       frameBytes: frame.length,
       status: document.querySelector('#videoPlaneStatus')?.value || ''
     };
@@ -394,6 +442,7 @@ try {
     !movProxyResult.asset?.hasProxy ||
     !movProxyResult.asset?.proxyCached ||
     movProxyResult.asset.playbackExtension !== 'webm' ||
+    movProxyResult.videoKeyframes?.length < 2 ||
     movProxyResult.frameBytes < 1000
   ) {
     throw new Error(`MOV proxy import failed: ${JSON.stringify(movProxyResult)}`);

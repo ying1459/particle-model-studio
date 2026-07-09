@@ -443,6 +443,13 @@ const workspaceLayoutDefaults = {
 };
 let workspaceLayoutState = { ...workspaceLayoutDefaults };
 let workspaceResizeFrame = 0;
+let workspaceCameraUi = {
+  panel: null,
+  list: null,
+  add: null,
+  duplicate: null,
+  delete: null
+};
 
 function clampLayoutValue(value, min, max) {
   const safeMax = Math.max(min, max);
@@ -633,6 +640,43 @@ function createWorkspaceCameraProperties(cameraRow) {
   cameraRow.classList.add('workspace-camera-properties-row');
   section.append(cameraRow);
   return section;
+}
+
+function createWorkspaceSceneCamerasPanel() {
+  const panelElement = document.createElement('details');
+  panelElement.className = 'modifier-section workspace-scene-cameras-panel';
+  panelElement.id = 'sceneCamerasPanel';
+  panelElement.open = true;
+  panelElement.innerHTML = `
+    <summary>场景摄像机</summary>
+    <div class="modifier-body">
+      <div class="scene-model-actions scene-camera-actions" aria-label="Scene camera actions">
+        <button class="small-button" id="addSceneCamera" type="button" title="添加一个新的摄像机">
+          <span>＋ 添加相机</span>
+        </button>
+        <button class="small-button" id="duplicateSceneCamera" type="button" title="复制当前摄像机">
+          <span>复制</span>
+        </button>
+        <button class="small-button" id="deleteSceneCamera" type="button" title="删除当前摄像机">
+          <span>删除</span>
+        </button>
+      </div>
+      <div class="scene-camera-list" id="sceneCameraList" aria-label="Scene cameras"></div>
+      <p class="scene-camera-hint">摄像机图标表示渲染启用；眼睛控制视图里是否显示相机路径和手柄。</p>
+    </div>
+  `;
+
+  workspaceCameraUi = {
+    panel: panelElement,
+    list: panelElement.querySelector('#sceneCameraList'),
+    add: panelElement.querySelector('#addSceneCamera'),
+    duplicate: panelElement.querySelector('#duplicateSceneCamera'),
+    delete: panelElement.querySelector('#deleteSceneCamera')
+  };
+  workspaceCameraUi.add?.addEventListener('click', () => addSceneCamera());
+  workspaceCameraUi.duplicate?.addEventListener('click', () => duplicateSceneCamera());
+  workspaceCameraUi.delete?.addEventListener('click', () => deleteSceneCamera());
+  return panelElement;
 }
 
 const workspacePropertyCategories = [
@@ -857,7 +901,8 @@ function setupWorkspaceLayout() {
   resetLayoutButton.textContent = '重置布局';
   resetLayoutButton.addEventListener('click', () => applyWorkspaceLayout(workspaceLayoutDefaults));
   outlinerHeader.append(resetLayoutButton);
-  outlinerPane.append(outlinerHeader, sceneModelsPanel, videoPlanesPanel);
+  const sceneCamerasPanel = createWorkspaceSceneCamerasPanel();
+  outlinerPane.append(outlinerHeader, sceneModelsPanel, videoPlanesPanel, sceneCamerasPanel);
 
   const paneSplitHandle = document.createElement('div');
   paneSplitHandle.className = 'workspace-pane-resizer';
@@ -871,7 +916,7 @@ function setupWorkspaceLayout() {
   propertiesPane.append(createWorkspacePaneHeader('属性与特效', '粒子、材质、灯光、导出'));
   const propertyChildren = [cameraPropertiesSection];
   [...panel.children].forEach((child) => {
-    if (child !== sceneModelsPanel && child !== videoPlanesPanel && child !== cameraRow) {
+    if (child !== sceneModelsPanel && child !== videoPlanesPanel && child !== sceneCamerasPanel && child !== cameraRow) {
       propertyChildren.push(child);
     }
   });
@@ -1020,8 +1065,15 @@ const cameraAnimation = {
   curveStrength: Number(controlsUi.cameraCurveStrength?.value || 2),
   keyframes: []
 };
+const sceneCameras = [];
+let selectedSceneCameraId = null;
+let activeSceneCameraId = null;
+let sceneCameraSyncSuspended = false;
+let sceneCameraCounter = 1;
 const parameterKeyframes = [];
+const videoPlaneKeyframes = [];
 const parameterKeyframeButtons = new Map();
+const videoPlaneKeyframeButtons = new Map();
 let timelineMarkerDrag = null;
 const VALID_CAMERA_PATH_MODES = new Set(['linear', 'bezier', 'smooth']);
 const VALID_CAMERA_CURVES = new Set(['linear', 'easeInOut', 'easeIn', 'easeOut', 'hold']);
@@ -1044,6 +1096,7 @@ function captureUndoSceneModels() {
     options: cloneUndoValue(record.options),
     transform: cloneUndoValue(record.transform),
     effectRotation: cloneUndoValue(record.effectRotation),
+    collectionId: record.collectionId || '',
     hidden: Boolean(record.hidden)
   }));
 }
@@ -1067,9 +1120,13 @@ function captureUndoSnapshot(label = '编辑') {
     },
     cameraKeyframes: cloneUndoValue(getSortedCameraKeyframes()),
     parameterKeyframes: cloneUndoValue(serializeParameterKeyframes()),
+    videoPlaneKeyframes: cloneUndoValue(serializeVideoPlaneKeyframes()),
+    sceneCameras: cloneUndoValue(serializeSceneCameras()),
     lights: cloneUndoValue(serializeSceneLights()),
     worldExport: state.worldExport,
     sceneModels: captureUndoSceneModels(),
+    sceneModelCollections: cloneUndoValue(sceneModelCollections),
+    selectedSceneModelIds: [...selectedSceneModelIds],
     activeSceneModelId: selectedSceneModelId,
     videoPlanes: cloneUndoValue(serializeVideoPlanes()),
     activeVideoPlaneId: selectedVideoPlaneId,
@@ -1086,6 +1143,8 @@ function getUndoSnapshotFingerprint(snapshot) {
     cameraAnimation: snapshot.cameraAnimation,
     cameraKeyframes: snapshot.cameraKeyframes,
     parameterKeyframes: snapshot.parameterKeyframes,
+    videoPlaneKeyframes: snapshot.videoPlaneKeyframes,
+    sceneCameras: snapshot.sceneCameras,
     lights: snapshot.lights,
     worldExport: snapshot.worldExport,
     sceneModels: snapshot.sceneModels.map((record) => ({
@@ -1094,8 +1153,11 @@ function getUndoSnapshotFingerprint(snapshot) {
       options: record.options,
       transform: record.transform,
       effectRotation: record.effectRotation,
+      collectionId: record.collectionId,
       hidden: record.hidden
     })),
+    sceneModelCollections: snapshot.sceneModelCollections,
+    selectedSceneModelIds: snapshot.selectedSceneModelIds,
     activeSceneModelId: snapshot.activeSceneModelId,
     videoPlanes: snapshot.videoPlanes,
     activeVideoPlaneId: snapshot.activeVideoPlaneId,
@@ -1120,9 +1182,26 @@ function recordUndoStep(label = '编辑') {
   return true;
 }
 
-async function restoreUndoSceneModels(models = [], activeId = null) {
+async function restoreUndoSceneModels(models = [], activeId = null, collections = [], selectedIds = []) {
   if (!models.length) {
     return;
+  }
+  sceneModelCollections.length = 0;
+  if (Array.isArray(collections)) {
+    collections.forEach((collection, index) => {
+      if (!collection?.id) {
+        return;
+      }
+      sceneModelCollections.push({
+        id: collection.id,
+        name: collection.name || `Collection ${index + 1}`,
+        collapsed: Boolean(collection.collapsed)
+      });
+    });
+  }
+  selectedSceneModelIds.clear();
+  if (Array.isArray(selectedIds)) {
+    selectedIds.forEach((id) => selectedSceneModelIds.add(id));
   }
   const structureChanged = models.length !== sceneModelObjects.length || models.some((snapshot, index) => {
     const current = sceneModelObjects[index];
@@ -1137,6 +1216,7 @@ async function restoreUndoSceneModels(models = [], activeId = null) {
       record.options = sanitizeSceneModelOptions(snapshot.options);
       record.transform = normalizeSceneModelTransform(snapshot.transform);
       record.effectRotation = normalizeVectorArray(snapshot.effectRotation, [0, 0, 0]);
+      record.collectionId = snapshot.collectionId || '';
       record.hidden = Boolean(snapshot.hidden);
       if (record.snapshotRoot) {
         applySceneModelTransformToObject(record.snapshotRoot, record.transform);
@@ -1170,6 +1250,7 @@ async function restoreUndoSceneModels(models = [], activeId = null) {
       options: snapshot.options,
       transform: snapshot.transform,
       effectRotation: snapshot.effectRotation,
+      collectionId: snapshot.collectionId,
       hidden: snapshot.hidden
     }));
   });
@@ -1214,7 +1295,12 @@ async function undoLastAction() {
   updatePlayButton();
   setStatus(`Undo: ${entry.snapshot.label}`);
   try {
-    await restoreUndoSceneModels(entry.snapshot.sceneModels, entry.snapshot.activeSceneModelId);
+    await restoreUndoSceneModels(
+      entry.snapshot.sceneModels,
+      entry.snapshot.activeSceneModelId,
+      entry.snapshot.sceneModelCollections,
+      entry.snapshot.selectedSceneModelIds
+    );
     await importVideoPlanes(entry.snapshot.videoPlanes, { selectId: entry.snapshot.activeVideoPlaneId });
     await applyOptionsSnapshot(entry.snapshot.options, true);
     state.worldExport = Boolean(entry.snapshot.worldExport);
@@ -1225,8 +1311,12 @@ async function undoLastAction() {
     cameraAnimation.curveStrength = entry.snapshot.cameraAnimation.curveStrength;
     controlsUi.duration.value = cameraAnimation.duration;
     controlsUi.timeline.max = cameraAnimation.duration;
+    if (entry.snapshot.sceneCameras?.items?.length) {
+      importSceneCameras(entry.snapshot.sceneCameras);
+    }
     importCameraKeyframes(entry.snapshot.cameraKeyframes);
     importParameterKeyframes(entry.snapshot.parameterKeyframes);
+    importVideoPlaneKeyframes(entry.snapshot.videoPlaneKeyframes);
     applySceneLightSnapshots(entry.snapshot.lights, { updateUi: true });
     setCameraSettings(entry.snapshot.cameraSettings, true);
     setExportResolution(
@@ -2025,6 +2115,10 @@ let selectedImageSplat = false;
 let selectedImageSplatMode = 'translate';
 const sceneModelObjects = [];
 let selectedSceneModelId = null;
+const selectedSceneModelIds = new Set();
+const sceneModelCollections = [];
+let sceneModelCollectionCounter = 1;
+let sceneModelContextMenu = null;
 let selectedSceneModelMode = 'translate';
 let sceneModelSaveSuspended = false;
 const videoPlaneObjects = [];
@@ -3239,8 +3333,8 @@ const particleMaterial = new THREE.ShaderMaterial({
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
-      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
-      float depthScale = clamp(pow(4.8 / cameraDepth, 0.72) * pow(projectionBoost, 0.62), 0.58, 4.8);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
+      float depthScale = clamp(pow(6.2 / cameraDepth, 1.08) * pow(projectionBoost, 0.86), 0.24, 8.0);
       float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
       float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
       float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
@@ -3568,8 +3662,8 @@ const emissionMaterial = new THREE.ShaderMaterial({
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
-      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
-      float depthScale = clamp(pow(4.8 / cameraDepth, 0.72) * pow(projectionBoost, 0.62), 0.56, 4.6);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
+      float depthScale = clamp(pow(6.0 / cameraDepth, 1.04) * pow(projectionBoost, 0.84), 0.24, 7.5);
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
@@ -3723,8 +3817,8 @@ const imageSplatVertexShader = `
     p += aScatter * uScatter * (0.18 + mist * (0.62 + aSeed * 1.18));
 
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
-    float perspectiveScale = clamp(pow(3.6 / max(0.8, -mvPosition.z), 0.72) * pow(projectionBoost, 0.62), 0.64, 3.6);
+    float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
+    float perspectiveScale = clamp(pow(4.8 / max(0.45, -mvPosition.z), 1.02) * pow(projectionBoost, 0.84), 0.26, 6.0);
     float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
     float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
@@ -3855,8 +3949,8 @@ const realSplatPointMaterial = new THREE.ShaderMaterial({
       p += curl * uTurbulence * (0.018 + seed * 0.035) * (0.35 + stream);
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.72, 2.85);
-      float perspectiveScale = clamp(pow(4.8 / max(0.8, -mvPosition.z), 0.72) * pow(projectionBoost, 0.62), 0.66, 3.8);
+      float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
+      float perspectiveScale = clamp(pow(6.0 / max(0.45, -mvPosition.z), 1.04) * pow(projectionBoost, 0.84), 0.26, 6.4);
       float glowScale = 1.0 + (1.0 - exp(-max(uGlow, 0.0) * 0.72)) * 0.18;
       gl_PointSize = max(0.85, uPointSize * uPixelRatio * perspectiveScale * aScale * glowScale);
       gl_Position = projectionMatrix * mvPosition;
@@ -3938,6 +4032,7 @@ let initialModelReady = false;
 
 resizeRenderer();
 resetCamera();
+ensureSceneCamerasInitialized();
 importSceneLights();
 syncUi();
 syncUniforms();
@@ -3945,6 +4040,7 @@ refreshCameraTimeline();
 updatePlayButton();
 updateCameraViewButton();
 setupParameterKeyframeButtons();
+setupVideoPlaneKeyframeControls();
 restorePanelCollapsedState();
 restoreCameraPreviewVisibility();
 initializeStartupModel();
@@ -4374,6 +4470,7 @@ function createSceneModelRecord(options = {}) {
     options: sanitizeSceneModelOptions(options.options || captureKeyframeOptions()),
     transform: normalizeSceneModelTransform(options.transform),
     effectRotation: normalizeVectorArray(options.effectRotation, [0, 0, 0]),
+    collectionId: typeof options.collectionId === 'string' ? options.collectionId : '',
     hidden: Boolean(options.hidden),
     snapshotRoot: null
   };
@@ -4496,6 +4593,7 @@ function syncActiveSceneModelAfterBuild(source, label) {
     });
     sceneModelObjects.push(record);
     selectedSceneModelId = record.id;
+    ensureSceneModelSelection(record.id);
   } else {
     record.name = label || record.name;
     record.source = source || record.source;
@@ -4556,6 +4654,8 @@ function disposeAllSceneModels() {
   sceneModelObjects.forEach((record) => disposeSceneModelSnapshot(record));
   sceneModelObjects.length = 0;
   selectedSceneModelId = null;
+  selectedSceneModelIds.clear();
+  sceneModelCollections.length = 0;
 }
 
 function createImportedSceneModelRecord(source, label, payload, options = {}) {
@@ -4576,6 +4676,7 @@ function createImportedSceneModelRecord(source, label, payload, options = {}) {
   });
   sceneModelObjects.push(record);
   selectedSceneModelId = record.id;
+  ensureSceneModelSelection(record.id);
   return record;
 }
 
@@ -4942,12 +5043,189 @@ function sceneModelEffectLabel(mode) {
   return '粒子';
 }
 
+function ensureSceneModelSelection(recordId = selectedSceneModelId) {
+  selectedSceneModelIds.clear();
+  if (recordId) {
+    selectedSceneModelIds.add(recordId);
+  }
+}
+
+function getSelectedSceneModelRecords() {
+  if (!selectedSceneModelIds.size && selectedSceneModelId) {
+    selectedSceneModelIds.add(selectedSceneModelId);
+  }
+  return sceneModelObjects.filter((record) => selectedSceneModelIds.has(record.id));
+}
+
+function getSceneModelCollection(collectionId) {
+  return sceneModelCollections.find((collection) => collection.id === collectionId) || null;
+}
+
+function createSceneModelCollection(name = '') {
+  const safeName = String(name || '').trim() || `Collection ${sceneModelCollectionCounter++}`;
+  const collection = {
+    id: crypto.randomUUID(),
+    name: safeName,
+    collapsed: false
+  };
+  sceneModelCollections.push(collection);
+  return collection;
+}
+
+function assignSelectedSceneModelsToCollection(collectionId) {
+  const records = getSelectedSceneModelRecords();
+  if (!records.length) {
+    return false;
+  }
+  records.forEach((record) => {
+    record.collectionId = collectionId || '';
+  });
+  renderSceneModelList();
+  setStatus(collectionId ? 'Models added to collection' : 'Models removed from collection');
+  return true;
+}
+
+function closeSceneModelContextMenu() {
+  sceneModelContextMenu?.remove();
+  sceneModelContextMenu = null;
+  window.removeEventListener('pointerdown', closeSceneModelContextMenu, true);
+}
+
+function showSceneModelContextMenu(event, record) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!selectedSceneModelIds.has(record.id)) {
+    selectedSceneModelIds.clear();
+    selectedSceneModelIds.add(record.id);
+  }
+  closeSceneModelContextMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'scene-model-context-menu';
+  menu.style.left = `${event.clientX}px`;
+  menu.style.top = `${event.clientY}px`;
+
+  const makeItem = (label, onClick) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.textContent = label;
+    item.addEventListener('click', () => {
+      closeSceneModelContextMenu();
+      onClick();
+    });
+    menu.append(item);
+  };
+
+  makeItem('新建集合并加入…', () => {
+    const name = window.prompt('集合名称', `Collection ${sceneModelCollections.length + 1}`);
+    if (name === null) {
+      return;
+    }
+    const collection = createSceneModelCollection(name);
+    assignSelectedSceneModelsToCollection(collection.id);
+  });
+
+  sceneModelCollections.forEach((collection) => {
+    makeItem(`加入：${collection.name}`, () => assignSelectedSceneModelsToCollection(collection.id));
+  });
+
+  if (record.collectionId) {
+    makeItem('移出当前集合', () => assignSelectedSceneModelsToCollection(''));
+  }
+
+  document.body.append(menu);
+  sceneModelContextMenu = menu;
+  window.addEventListener('pointerdown', closeSceneModelContextMenu, true);
+}
+
+function handleSceneModelListClick(event, record) {
+  if (event.shiftKey) {
+    if (selectedSceneModelIds.has(record.id)) {
+      selectedSceneModelIds.delete(record.id);
+    } else {
+      selectedSceneModelIds.add(record.id);
+    }
+    if (!selectedSceneModelIds.size) {
+      selectedSceneModelIds.add(record.id);
+    }
+    selectedSceneModelId ||= record.id;
+    renderSceneModelList();
+    return;
+  }
+
+  selectedSceneModelIds.clear();
+  selectedSceneModelIds.add(record.id);
+  void activateSceneModel(record.id);
+}
+
+function appendSceneModelRow(parent, record, index) {
+  const selected = selectedSceneModelIds.has(record.id) || record.id === selectedSceneModelId;
+  const row = document.createElement('div');
+  row.className = `scene-model-row${record.id === selectedSceneModelId ? ' active' : ''}${selected ? ' selected' : ''}${record.hidden ? ' is-hidden' : ''}`;
+
+  const button = document.createElement('button');
+  button.className = `scene-model-item${record.id === selectedSceneModelId ? ' active' : ''}${selected ? ' selected' : ''}${record.hidden ? ' is-hidden' : ''}`;
+  button.type = 'button';
+  button.dataset.sceneModelId = record.id;
+  button.innerHTML = `
+    <span class="scene-model-index">${index + 1}</span>
+    <span class="scene-model-name">${record.name || 'Model'}</span>
+    <span class="scene-model-effect">${sceneModelEffectLabel(record.options?.effectMode)}</span>
+  `;
+  button.addEventListener('click', (event) => handleSceneModelListClick(event, record));
+  button.addEventListener('contextmenu', (event) => showSceneModelContextMenu(event, record));
+
+  const visibilityButton = document.createElement('button');
+  visibilityButton.className = 'scene-model-visibility';
+  visibilityButton.type = 'button';
+  visibilityButton.title = record.hidden ? '显示模型' : '隐藏模型';
+  visibilityButton.setAttribute('aria-label', record.hidden ? '显示模型' : '隐藏模型');
+  visibilityButton.textContent = record.hidden ? '—' : '👁';
+  visibilityButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleSceneModelHidden(record.id);
+  });
+
+  row.append(button, visibilityButton);
+  parent.append(row);
+}
+
 function renderSceneModelList() {
   if (!controlsUi.sceneModelList) {
     return;
   }
 
   controlsUi.sceneModelList.innerHTML = '';
+  if (!selectedSceneModelIds.size && selectedSceneModelId) {
+    selectedSceneModelIds.add(selectedSceneModelId);
+  }
+
+  const ungrouped = sceneModelObjects.filter((record) => !record.collectionId || !getSceneModelCollection(record.collectionId));
+  ungrouped.forEach((record, index) => appendSceneModelRow(controlsUi.sceneModelList, record, index));
+
+  sceneModelCollections.forEach((collection) => {
+    const records = sceneModelObjects.filter((record) => record.collectionId === collection.id);
+    if (!records.length) {
+      return;
+    }
+    const group = document.createElement('div');
+    group.className = `scene-model-collection${collection.collapsed ? ' collapsed' : ''}`;
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'scene-model-collection-header';
+    header.innerHTML = `<span>${collection.collapsed ? '▸' : '▾'}</span><strong>${collection.name}</strong><em>${records.length}</em>`;
+    header.addEventListener('click', () => {
+      collection.collapsed = !collection.collapsed;
+      renderSceneModelList();
+    });
+    group.append(header);
+    if (!collection.collapsed) {
+      records.forEach((record) => appendSceneModelRow(group, record, sceneModelObjects.indexOf(record)));
+    }
+    controlsUi.sceneModelList.append(group);
+  });
+  updateSceneModelTransformButtons();
+  return;
   sceneModelObjects.forEach((record, index) => {
     const row = document.createElement('div');
     row.className = `scene-model-row${record.id === selectedSceneModelId ? ' active' : ''}${record.hidden ? ' is-hidden' : ''}`;
@@ -5044,6 +5322,7 @@ async function activateSceneModel(recordId, options = {}) {
   }
 
   selectedSceneModelId = record.id;
+  ensureSceneModelSelection(record.id);
   selectedImageSplat = false;
   selectedVideoPlaneId = null;
   selectedLightId = null;
@@ -5148,7 +5427,8 @@ async function duplicateSelectedSceneModel() {
     payload: sourceRecord.payload,
     options: { ...sourceRecord.options },
     transform,
-    effectRotation: [...sourceRecord.effectRotation]
+    effectRotation: [...sourceRecord.effectRotation],
+    collectionId: sourceRecord.collectionId || ''
   });
   sceneModelObjects.push(duplicate);
   await activateSceneModel(duplicate.id);
@@ -5509,6 +5789,7 @@ function disposeVideoPlaneRecord(record) {
 function clearVideoPlanes() {
   videoPlaneObjects.forEach(disposeVideoPlaneRecord);
   videoPlaneObjects.length = 0;
+  videoPlaneKeyframes.length = 0;
   selectedVideoPlaneId = null;
   if (!selectedKeyframeId && !selectedLightId && !selectedImageSplat && !selectedVideoPlaneId && !selectedSceneModelId) {
     transformControls.detach();
@@ -5647,6 +5928,7 @@ function syncVideoPlaneUi() {
     if (controlsUi.videoPlaneStatus) {
       controlsUi.videoPlaneStatus.value = '未导入视频素材';
     }
+    updateVideoPlaneKeyframeButtons();
     return;
   }
 
@@ -5677,6 +5959,7 @@ function syncVideoPlaneUi() {
       : '';
     controlsUi.videoPlaneStatus.value = `${record.name || 'Video'} · ${duration.toFixed(2)}s${alphaHint}`;
   }
+  updateVideoPlaneKeyframeButtons();
 }
 
 function updateSelectedVideoPlaneProperty(key, value) {
@@ -5708,6 +5991,269 @@ function updateSelectedVideoPlaneProperty(key, value) {
   syncVideoPlaneUi();
 }
 
+const VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS = new Set(['width', 'height', 'opacity', 'playbackRate', 'timeOffset']);
+const VIDEO_PLANE_VECTOR_KEYFRAME_TRACKS = new Set(['position', 'scale']);
+const VIDEO_PLANE_QUATERNION_KEYFRAME_TRACKS = new Set(['rotation']);
+const VIDEO_PLANE_KEYFRAME_TRACKS = new Set([
+  ...VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS,
+  ...VIDEO_PLANE_VECTOR_KEYFRAME_TRACKS,
+  ...VIDEO_PLANE_QUATERNION_KEYFRAME_TRACKS
+]);
+
+function cloneVideoPlaneKeyframeValue(value) {
+  return Array.isArray(value) ? value.map(Number) : value;
+}
+
+function captureVideoPlaneKeyframeValue(record, track) {
+  if (!record) {
+    return undefined;
+  }
+  if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
+    return Number(record[track]);
+  }
+  if (track === 'position') {
+    return (record.root?.position || new THREE.Vector3()).toArray();
+  }
+  if (track === 'scale') {
+    return (record.root?.scale || new THREE.Vector3(1, 1, 1)).toArray();
+  }
+  if (track === 'rotation') {
+    return (record.root?.quaternion || new THREE.Quaternion()).normalize().toArray();
+  }
+  return undefined;
+}
+
+function normalizeVideoPlaneKeyframe(keyframe = {}, index = 0) {
+  const track = keyframe.track || keyframe.field;
+  if (!VIDEO_PLANE_KEYFRAME_TRACKS.has(track) || !keyframe.videoPlaneId) {
+    return null;
+  }
+  const time = THREE.MathUtils.clamp(Number(keyframe.time) || 0, 0, cameraAnimation.duration);
+  let value = keyframe.value;
+  if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
+    value = Number(value);
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+  } else if (VIDEO_PLANE_VECTOR_KEYFRAME_TRACKS.has(track)) {
+    if (!Array.isArray(value) || value.length < 3) {
+      return null;
+    }
+    value = value.map(Number).slice(0, 3);
+    if (!value.every(Number.isFinite)) {
+      return null;
+    }
+  } else if (VIDEO_PLANE_QUATERNION_KEYFRAME_TRACKS.has(track)) {
+    if (!Array.isArray(value) || value.length < 4) {
+      return null;
+    }
+    value = normalizeQuaternionArray(value, [0, 0, 0]);
+  }
+  return {
+    id: keyframe.id || `video-key-${index}`,
+    videoPlaneId: keyframe.videoPlaneId,
+    track,
+    time,
+    value: cloneVideoPlaneKeyframeValue(value)
+  };
+}
+
+function serializeVideoPlaneKeyframes() {
+  return videoPlaneKeyframes.map((keyframe) => ({
+    id: keyframe.id,
+    videoPlaneId: keyframe.videoPlaneId,
+    track: keyframe.track,
+    time: keyframe.time,
+    value: cloneVideoPlaneKeyframeValue(keyframe.value)
+  }));
+}
+
+function importVideoPlaneKeyframes(keyframes = []) {
+  videoPlaneKeyframes.length = 0;
+  keyframes
+    .map((keyframe, index) => normalizeVideoPlaneKeyframe(keyframe, index))
+    .filter(Boolean)
+    .sort((a, b) => a.time - b.time)
+    .forEach((keyframe) => videoPlaneKeyframes.push(keyframe));
+  refreshCameraTimeline();
+  updateVideoPlaneKeyframeButtons();
+}
+
+function addVideoPlaneKeyframe(track) {
+  const record = getSelectedVideoPlane();
+  if (!record || !VIDEO_PLANE_KEYFRAME_TRACKS.has(track)) {
+    return false;
+  }
+  commitSelectedVideoPlaneTransform();
+  const value = captureVideoPlaneKeyframeValue(record, track);
+  if (value === undefined || (Array.isArray(value) && !value.every(Number.isFinite))) {
+    return false;
+  }
+  const time = Number(cameraAnimation.time.toFixed(3));
+  const existingIndex = videoPlaneKeyframes.findIndex(
+    (keyframe) => keyframe.videoPlaneId === record.id && keyframe.track === track && Math.abs(keyframe.time - time) < 0.035
+  );
+  const keyframe = {
+    id: crypto.randomUUID(),
+    videoPlaneId: record.id,
+    track,
+    time,
+    value: cloneVideoPlaneKeyframeValue(value)
+  };
+  if (existingIndex >= 0) {
+    videoPlaneKeyframes[existingIndex] = { ...videoPlaneKeyframes[existingIndex], ...keyframe };
+  } else {
+    videoPlaneKeyframes.push(keyframe);
+  }
+  videoPlaneKeyframes.sort((a, b) => a.time - b.time);
+  refreshCameraTimeline();
+  updateVideoPlaneKeyframeButtons();
+  setStatus('Video keyed');
+  return true;
+}
+
+function getSortedVideoPlaneKeyframes(videoPlaneId = '', track = '') {
+  return videoPlaneKeyframes
+    .filter((keyframe) => (!videoPlaneId || keyframe.videoPlaneId === videoPlaneId) && (!track || keyframe.track === track))
+    .sort((a, b) => a.time - b.time);
+}
+
+function interpolateVideoPlaneNumericKeyframes(keyframes, time) {
+  if (time <= keyframes[0].time) {
+    return Number(keyframes[0].value);
+  }
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return Number(last.value);
+  }
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = THREE.MathUtils.smoothstep((time - start.time) / Math.max(end.time - start.time, 0.0001), 0, 1);
+  return THREE.MathUtils.lerp(Number(start.value), Number(end.value), t);
+}
+
+function interpolateVideoPlaneVectorKeyframes(keyframes, time) {
+  if (time <= keyframes[0].time) {
+    return keyframes[0].value;
+  }
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return last.value;
+  }
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = THREE.MathUtils.smoothstep((time - start.time) / Math.max(end.time - start.time, 0.0001), 0, 1);
+  return new THREE.Vector3().fromArray(start.value)
+    .lerp(new THREE.Vector3().fromArray(end.value), t)
+    .toArray();
+}
+
+function interpolateVideoPlaneQuaternionKeyframes(keyframes, time) {
+  if (time <= keyframes[0].time) {
+    return keyframes[0].value;
+  }
+  const last = keyframes[keyframes.length - 1];
+  if (time >= last.time) {
+    return last.value;
+  }
+  const [start, end] = getOptionSegment(keyframes, time);
+  const t = THREE.MathUtils.smoothstep((time - start.time) / Math.max(end.time - start.time, 0.0001), 0, 1);
+  return new THREE.Quaternion()
+    .fromArray(start.value)
+    .slerp(new THREE.Quaternion().fromArray(end.value).normalize(), t)
+    .normalize()
+    .toArray();
+}
+
+function applyVideoPlaneKeyframesAtTime(time, updateUi = false) {
+  if (!videoPlaneKeyframes.length) {
+    return;
+  }
+  videoPlaneObjects.forEach((record) => {
+    VIDEO_PLANE_KEYFRAME_TRACKS.forEach((track) => {
+      const keyframes = getSortedVideoPlaneKeyframes(record.id, track);
+      if (!keyframes.length) {
+        return;
+      }
+      if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
+        record[track] = interpolateVideoPlaneNumericKeyframes(keyframes, time);
+      } else if (track === 'position') {
+        record.root?.position.fromArray(interpolateVideoPlaneVectorKeyframes(keyframes, time));
+      } else if (track === 'scale') {
+        record.root?.scale.fromArray(interpolateVideoPlaneVectorKeyframes(keyframes, time));
+      } else if (track === 'rotation') {
+        record.root?.quaternion.fromArray(interpolateVideoPlaneQuaternionKeyframes(keyframes, time)).normalize();
+      }
+    });
+    updateVideoPlaneVisual(record);
+    record.root?.updateMatrixWorld(true);
+  });
+  if (updateUi) {
+    syncVideoPlaneUi();
+  }
+}
+
+function setupVideoPlaneKeyframeControls() {
+  [
+    ['videoPlaneWidth', 'width'],
+    ['videoPlaneHeight', 'height'],
+    ['videoPlaneOpacity', 'opacity'],
+    ['videoPlanePlaybackRate', 'playbackRate'],
+    ['videoPlaneTime', 'timeOffset']
+  ].forEach(([controlKey, track]) => {
+    const control = controlsUi[controlKey];
+    const label = control?.closest('label');
+    if (!label || videoPlaneKeyframeButtons.has(track)) {
+      return;
+    }
+    label.classList.add('keyable-control');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'keyframe-dot video-keyframe-dot';
+    button.title = '添加/更新视频参数关键帧';
+    button.dataset.videoKeyframeTrack = track;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      addVideoPlaneKeyframe(track);
+    });
+    label.append(button);
+    videoPlaneKeyframeButtons.set(track, button);
+  });
+
+  const actionRow = document.querySelector('.video-plane-transform-actions');
+  if (actionRow && !document.querySelector('.video-plane-keyframe-actions')) {
+    const keyRow = document.createElement('div');
+    keyRow.className = 'video-plane-keyframe-actions';
+    [
+      ['position', '位置 K帧'],
+      ['rotation', '旋转 K帧'],
+      ['scale', '缩放 K帧']
+    ].forEach(([track, label]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'small-button video-transform-key';
+      button.textContent = label;
+      button.dataset.videoKeyframeTrack = track;
+      button.addEventListener('click', () => addVideoPlaneKeyframe(track));
+      keyRow.append(button);
+      videoPlaneKeyframeButtons.set(track, button);
+    });
+    actionRow.after(keyRow);
+  }
+  updateVideoPlaneKeyframeButtons();
+}
+
+function updateVideoPlaneKeyframeButtons() {
+  const record = getSelectedVideoPlane();
+  const currentTime = Number(cameraAnimation.time) || 0;
+  videoPlaneKeyframeButtons.forEach((button, track) => {
+    const keyframes = record ? getSortedVideoPlaneKeyframes(record.id, track) : [];
+    const atCurrentTime = keyframes.some((keyframe) => Math.abs(keyframe.time - currentTime) < 0.035);
+    button.disabled = !record;
+    button.classList.toggle('has-keyframe', keyframes.length > 0);
+    button.classList.toggle('at-keyframe', atCurrentTime);
+  });
+}
+
 async function duplicateSelectedVideoPlane() {
   const record = getSelectedVideoPlane();
   if (!record) {
@@ -5735,6 +6281,11 @@ function deleteSelectedVideoPlane() {
   const index = videoPlaneObjects.indexOf(record);
   disposeVideoPlaneRecord(record);
   videoPlaneObjects.splice(index, 1);
+  for (let i = videoPlaneKeyframes.length - 1; i >= 0; i -= 1) {
+    if (videoPlaneKeyframes[i].videoPlaneId === record.id) {
+      videoPlaneKeyframes.splice(i, 1);
+    }
+  }
   selectedVideoPlaneId = videoPlaneObjects[Math.min(index, videoPlaneObjects.length - 1)]?.id || null;
   if (selectedVideoPlaneId) {
     selectVideoPlane(selectedVideoPlaneId);
@@ -5868,6 +6419,7 @@ async function syncVideoPlanesForRenderTime(timeSeconds = 0) {
   if (!videoPlaneObjects.length) {
     return;
   }
+  applyVideoPlaneKeyframesAtTime(THREE.MathUtils.clamp(Number(timeSeconds) || 0, 0, cameraAnimation.duration), false);
   await Promise.all(videoPlaneObjects.map((record) => {
     const duration = getVideoPlaneDuration(record);
     const playbackTime = Math.max(0, Number(record.timeOffset) || 0) + Math.max(0, Number(timeSeconds) || 0) * Math.max(0, Number(record.playbackRate) || 0);
@@ -9799,6 +10351,12 @@ function serializeSceneModels() {
 
   return {
     activeId: selectedSceneModelId,
+    selectedIds: [...selectedSceneModelIds],
+    collections: sceneModelCollections.map((collection) => ({
+      id: collection.id,
+      name: collection.name,
+      collapsed: Boolean(collection.collapsed)
+    })),
     models: sceneModelObjects
       .filter((record) => record.payload?.extension && (record.payload.path || record.payload.dataUrl))
       .map((record) => ({
@@ -9809,6 +10367,7 @@ function serializeSceneModels() {
         options: sanitizeSceneModelOptions(record.options),
         transform: normalizeSceneModelTransform(record.transform),
         effectRotation: normalizeVectorArray(record.effectRotation, [0, 0, 0]),
+        collectionId: record.collectionId || '',
         hidden: Boolean(record.hidden)
       }))
   };
@@ -9848,6 +10407,20 @@ async function importSceneModels(snapshot = {}) {
   sceneModelObjects.forEach((record) => disposeSceneModelSnapshot(record));
   sceneModelObjects.length = 0;
   selectedSceneModelId = null;
+  selectedSceneModelIds.clear();
+  sceneModelCollections.length = 0;
+  if (Array.isArray(snapshot.collections)) {
+    snapshot.collections.forEach((collection, index) => {
+      if (!collection?.id) {
+        return;
+      }
+      sceneModelCollections.push({
+        id: collection.id,
+        name: collection.name || `Collection ${index + 1}`,
+        collapsed: Boolean(collection.collapsed)
+      });
+    });
+  }
 
   for (const descriptor of models) {
     const source = await loadSceneModelSourceFromDescriptor(descriptor);
@@ -9865,6 +10438,7 @@ async function importSceneModels(snapshot = {}) {
       options: descriptor.options,
       transform: descriptor.transform,
       effectRotation: descriptor.effectRotation,
+      collectionId: descriptor.collectionId,
       hidden: descriptor.hidden
     }));
   }
@@ -9872,6 +10446,10 @@ async function importSceneModels(snapshot = {}) {
   const activeId = snapshot.activeId && sceneModelObjects.some((record) => record.id === snapshot.activeId)
     ? snapshot.activeId
     : sceneModelObjects[0].id;
+  const selectedIds = Array.isArray(snapshot.selectedIds)
+    ? snapshot.selectedIds.filter((id) => sceneModelObjects.some((record) => record.id === id))
+    : [activeId];
+  selectedIds.forEach((id) => selectedSceneModelIds.add(id));
 
   sceneModelSaveSuspended = true;
   try {
@@ -9887,6 +10465,7 @@ async function importSceneModels(snapshot = {}) {
 
     const activeRecord = sceneModelObjects.find((record) => record.id === activeId) || sceneModelObjects[0];
     selectedSceneModelId = activeRecord.id;
+    selectedSceneModelIds.add(activeRecord.id);
     disposeSceneModelSnapshot(activeRecord);
     currentModelPayload = activeRecord.payload || null;
     applySceneModelOptionsToState(activeRecord.options);
@@ -11557,12 +12136,14 @@ function syncUi() {
   setValueInput('particleCount', state.particleCount);
   NUMERIC_KEYFRAME_FIELDS.forEach((field) => setValueInput(field, state[field]));
   outputUi.timeline.value = formatTimelineOutput();
-  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length);
+  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length + videoPlaneKeyframes.length);
   syncEffectVisibility();
   renderSceneModelList();
   renderVideoPlaneList();
+  renderSceneCameraList();
   syncVideoPlaneUi();
   updateParameterKeyframeButtons();
+  updateVideoPlaneKeyframeButtons();
 }
 
 function setRangeValue(key, value) {
@@ -12278,6 +12859,308 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
   syncCameraSettingsFromState(true);
 }
 
+function cloneCameraKeyframe(keyframe = {}) {
+  return {
+    ...keyframe,
+    position: Array.isArray(keyframe.position) ? keyframe.position.map(Number).slice(0, 3) : undefined,
+    target: Array.isArray(keyframe.target) ? keyframe.target.map(Number).slice(0, 3) : undefined,
+    quaternion: Array.isArray(keyframe.quaternion) ? keyframe.quaternion.map(Number).slice(0, 4) : undefined,
+    handleIn: Array.isArray(keyframe.handleIn) ? keyframe.handleIn.map(Number).slice(0, 3) : undefined,
+    handleOut: Array.isArray(keyframe.handleOut) ? keyframe.handleOut.map(Number).slice(0, 3) : undefined,
+    lights: Array.isArray(keyframe.lights) ? keyframe.lights.map(cloneLightSnapshot).filter(Boolean) : undefined
+  };
+}
+
+function captureSceneCameraAnimation() {
+  return {
+    duration: cameraAnimation.duration,
+    time: cameraAnimation.time,
+    pathMode: cameraAnimation.pathMode,
+    curve: cameraAnimation.curve,
+    curveStrength: cameraAnimation.curveStrength
+  };
+}
+
+function normalizeSceneCameraAnimation(animation = {}) {
+  return {
+    duration: THREE.MathUtils.clamp(Number(animation.duration) || cameraAnimation.duration || 5, 0.25, 120),
+    time: THREE.MathUtils.clamp(Number(animation.time) || 0, 0, Math.max(0.25, Number(animation.duration) || cameraAnimation.duration || 5)),
+    pathMode: normalizeCameraPathMode(animation.pathMode),
+    curve: normalizeCameraCurve(animation.curve),
+    curveStrength: normalizeCameraCurveStrength(animation.curveStrength)
+  };
+}
+
+function createSceneCameraRecord(options = {}) {
+  const animation = normalizeSceneCameraAnimation(options.animation || captureSceneCameraAnimation());
+  return {
+    id: options.id || crypto.randomUUID(),
+    name: options.name || `Camera ${sceneCameraCounter++}`,
+    hidden: Boolean(options.hidden),
+    settings: {
+      ...getCameraSettings(),
+      ...(options.settings || {})
+    },
+    snapshot: {
+      ...captureCameraSnapshot(),
+      ...(options.snapshot || {})
+    },
+    animation,
+    keyframes: Array.isArray(options.keyframes)
+      ? options.keyframes.map(cloneCameraKeyframe).filter((keyframe) => Array.isArray(keyframe.position) && Array.isArray(keyframe.target))
+      : getSortedCameraKeyframes().map(cloneCameraKeyframe)
+  };
+}
+
+function ensureSceneCamerasInitialized(options = {}) {
+  if (sceneCameras.length && !options.replace) {
+    return sceneCameras;
+  }
+  sceneCameras.length = 0;
+  const record = createSceneCameraRecord({ name: 'Camera 1' });
+  sceneCameras.push(record);
+  selectedSceneCameraId = record.id;
+  activeSceneCameraId = record.id;
+  return sceneCameras;
+}
+
+function getActiveSceneCameraRecord() {
+  return sceneCameras.find((record) => record.id === activeSceneCameraId) ||
+    sceneCameras.find((record) => record.id === selectedSceneCameraId) ||
+    sceneCameras[0] ||
+    null;
+}
+
+function getSelectedSceneCameraRecord() {
+  return sceneCameras.find((record) => record.id === selectedSceneCameraId) || getActiveSceneCameraRecord();
+}
+
+function saveActiveSceneCamera(options = {}) {
+  if (sceneCameraSyncSuspended) {
+    return getActiveSceneCameraRecord();
+  }
+  const record = getActiveSceneCameraRecord();
+  if (!record) {
+    return null;
+  }
+  const committed = commitSelectedKeyframeTransform();
+  if (committed) {
+    updateSelectedCameraMarkerFromKeyframe(committed);
+  }
+  record.settings = getCameraSettings();
+  record.snapshot = captureCameraSnapshot();
+  record.animation = captureSceneCameraAnimation();
+  record.keyframes = getSortedCameraKeyframes().map(cloneCameraKeyframe);
+  if (options.renderList) {
+    renderSceneCameraList();
+  }
+  return record;
+}
+
+function applySceneCameraRecord(record, options = {}) {
+  if (!record) {
+    return false;
+  }
+  sceneCameraSyncSuspended = true;
+  try {
+    selectedSceneCameraId = record.id;
+    if (options.activate !== false) {
+      activeSceneCameraId = record.id;
+    }
+    const animation = normalizeSceneCameraAnimation(record.animation);
+    setCameraDuration(animation.duration);
+    cameraAnimation.pathMode = normalizeCameraPathMode(animation.pathMode);
+    cameraAnimation.curve = normalizeCameraCurve(animation.curve);
+    cameraAnimation.curveStrength = normalizeCameraCurveStrength(animation.curveStrength);
+    setCameraSettings(record.settings || {}, false);
+    applyCameraSnapshot(record.snapshot || {}, { pose: true });
+    importCameraKeyframes(Array.isArray(record.keyframes) ? record.keyframes : []);
+    setCameraTime(animation.time, true);
+    syncCameraCurveUi();
+    syncCameraSettingsFromState(true);
+  } finally {
+    sceneCameraSyncSuspended = false;
+  }
+  renderSceneCameraList();
+  refreshCameraTimeline();
+  updateCameraPathVisibility();
+  setCameraPreviewDirty();
+  return true;
+}
+
+function setActiveSceneCamera(recordId) {
+  const record = sceneCameras.find((item) => item.id === recordId);
+  if (!record) {
+    return false;
+  }
+  saveActiveSceneCamera();
+  applySceneCameraRecord(record, { activate: true });
+  setStatus(`${record.name || 'Camera'} enabled`);
+  return true;
+}
+
+function addSceneCamera() {
+  saveActiveSceneCamera();
+  const record = createSceneCameraRecord({ name: `Camera ${sceneCameras.length + 1}` });
+  sceneCameras.push(record);
+  applySceneCameraRecord(record, { activate: true });
+  return record;
+}
+
+function duplicateSceneCamera() {
+  const source = saveActiveSceneCamera() || getSelectedSceneCameraRecord();
+  if (!source) {
+    return null;
+  }
+  const snapshot = {
+    ...source.snapshot,
+    position: Array.isArray(source.snapshot?.position)
+      ? [source.snapshot.position[0] + 0.35, source.snapshot.position[1], source.snapshot.position[2]]
+      : undefined,
+    target: Array.isArray(source.snapshot?.target)
+      ? [source.snapshot.target[0] + 0.35, source.snapshot.target[1], source.snapshot.target[2]]
+      : undefined
+  };
+  const keyframes = (source.keyframes || []).map((keyframe) => ({
+    ...cloneCameraKeyframe(keyframe),
+    id: crypto.randomUUID(),
+    position: Array.isArray(keyframe.position) ? [keyframe.position[0] + 0.35, keyframe.position[1], keyframe.position[2]] : keyframe.position,
+    target: Array.isArray(keyframe.target) ? [keyframe.target[0] + 0.35, keyframe.target[1], keyframe.target[2]] : keyframe.target
+  }));
+  const duplicate = createSceneCameraRecord({
+    name: `${source.name || 'Camera'} Copy`,
+    hidden: source.hidden,
+    settings: { ...source.settings },
+    snapshot,
+    animation: { ...source.animation },
+    keyframes
+  });
+  sceneCameras.push(duplicate);
+  applySceneCameraRecord(duplicate, { activate: true });
+  return duplicate;
+}
+
+function deleteSceneCamera() {
+  if (sceneCameras.length <= 1) {
+    setStatus('Keep at least one camera');
+    return false;
+  }
+  const record = getSelectedSceneCameraRecord();
+  if (!record) {
+    return false;
+  }
+  const index = sceneCameras.indexOf(record);
+  sceneCameras.splice(index, 1);
+  const next = sceneCameras[Math.min(index, sceneCameras.length - 1)] || sceneCameras[0];
+  applySceneCameraRecord(next, { activate: true });
+  return true;
+}
+
+function toggleSceneCameraHidden(recordId) {
+  const record = sceneCameras.find((item) => item.id === recordId);
+  if (!record) {
+    return false;
+  }
+  record.hidden = !record.hidden;
+  renderSceneCameraList();
+  updateCameraPathVisibility();
+  setCameraPreviewDirty();
+  return true;
+}
+
+function renderSceneCameraList() {
+  if (!workspaceCameraUi.list) {
+    return;
+  }
+  workspaceCameraUi.list.innerHTML = '';
+  ensureSceneCamerasInitialized();
+  sceneCameras.forEach((record, index) => {
+    const row = document.createElement('div');
+    row.className = `scene-camera-row${record.id === selectedSceneCameraId ? ' selected' : ''}${record.id === activeSceneCameraId ? ' enabled' : ''}${record.hidden ? ' is-hidden' : ''}`;
+
+    const selectButton = document.createElement('button');
+    selectButton.type = 'button';
+    selectButton.className = 'scene-camera-item';
+    selectButton.innerHTML = `
+      <span class="scene-camera-index">${index + 1}</span>
+      <span class="scene-camera-name">${record.name || `Camera ${index + 1}`}</span>
+    `;
+    selectButton.addEventListener('click', () => setActiveSceneCamera(record.id));
+
+    const enableButton = document.createElement('button');
+    enableButton.type = 'button';
+    enableButton.className = 'scene-camera-enable';
+    enableButton.title = record.id === activeSceneCameraId ? '当前渲染摄像机' : '设为渲染摄像机';
+    enableButton.setAttribute('aria-label', enableButton.title);
+    enableButton.textContent = record.id === activeSceneCameraId ? '📷' : '○';
+    enableButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setActiveSceneCamera(record.id);
+    });
+
+    const visibilityButton = document.createElement('button');
+    visibilityButton.type = 'button';
+    visibilityButton.className = 'scene-camera-visibility';
+    visibilityButton.title = record.hidden ? '显示摄像机路径' : '隐藏摄像机路径';
+    visibilityButton.setAttribute('aria-label', visibilityButton.title);
+    visibilityButton.textContent = record.hidden ? '—' : '👁';
+    visibilityButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleSceneCameraHidden(record.id);
+    });
+
+    row.append(selectButton, enableButton, visibilityButton);
+    workspaceCameraUi.list.append(row);
+  });
+  if (workspaceCameraUi.delete) {
+    workspaceCameraUi.delete.disabled = sceneCameras.length <= 1;
+  }
+}
+
+function serializeSceneCameras() {
+  ensureSceneCamerasInitialized();
+  saveActiveSceneCamera();
+  return {
+    activeId: activeSceneCameraId,
+    selectedId: selectedSceneCameraId,
+    items: sceneCameras.map((record) => ({
+      id: record.id,
+      name: record.name,
+      hidden: Boolean(record.hidden),
+      settings: record.settings,
+      snapshot: record.snapshot,
+      animation: normalizeSceneCameraAnimation(record.animation),
+      keyframes: (record.keyframes || []).map(cloneCameraKeyframe)
+    }))
+  };
+}
+
+function importSceneCameras(snapshot = {}) {
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  if (!items.length) {
+    ensureSceneCamerasInitialized({ replace: true });
+    return false;
+  }
+  sceneCameras.length = 0;
+  items.forEach((item, index) => {
+    sceneCameras.push(createSceneCameraRecord({
+      id: item.id,
+      name: item.name || `Camera ${index + 1}`,
+      hidden: item.hidden,
+      settings: item.settings,
+      snapshot: item.snapshot,
+      animation: item.animation,
+      keyframes: item.keyframes
+    }));
+  });
+  const activeId = snapshot.activeId && sceneCameras.some((record) => record.id === snapshot.activeId)
+    ? snapshot.activeId
+    : sceneCameras[0].id;
+  const activeRecord = sceneCameras.find((record) => record.id === activeId) || sceneCameras[0];
+  applySceneCameraRecord(activeRecord, { activate: true });
+  return true;
+}
+
 function addCameraKeyframe() {
   commitSelectedImageSplatTransform();
   commitSelectedLightTransform();
@@ -12534,6 +13417,7 @@ async function applyOptionsSnapshot(options = {}, updateUi = false) {
 function clearCameraKeyframes() {
   cameraAnimation.keyframes = [];
   parameterKeyframes.length = 0;
+  videoPlaneKeyframes.length = 0;
   selectedKeyframeId = null;
   selectedKeyframeObject = null;
   selectedCameraBezierHandle = null;
@@ -12561,6 +13445,7 @@ function setCameraTime(value, applyCamera = true) {
   }
   setCameraPreviewDirty();
   updateParameterKeyframeButtons();
+  updateVideoPlaneKeyframeButtons();
 }
 
 function setCameraDuration(value) {
@@ -12652,6 +13537,7 @@ function applyTimelineAtTime(time, options = {}) {
   applyCameraAtTime(time);
   applyKeyframedOptionsAtTime(time, updateUi);
   applyKeyframedLightsAtTime(time, updateUi);
+  applyVideoPlaneKeyframesAtTime(time, updateUi);
 }
 
 function applyCameraAtTime(time) {
@@ -13157,7 +14043,7 @@ function getTimelinePointerTime(event) {
 function createTimelineMarker(type, time, options = {}) {
   const marker = document.createElement('button');
   marker.type = 'button';
-  marker.className = `timeline-marker ${type === 'parameter' ? 'parameter-marker' : 'camera-marker'}`;
+  marker.className = `timeline-marker ${type === 'parameter' ? 'parameter-marker' : type === 'video' ? 'video-marker' : 'camera-marker'}`;
   marker.style.left = `${(time / Math.max(cameraAnimation.duration, 0.0001)) * 100}%`;
   marker.dataset.timelineMarkerType = type;
   marker.dataset.timelineTime = String(time);
@@ -13167,9 +14053,15 @@ function createTimelineMarker(type, time, options = {}) {
   if (options.parameterIds?.length) {
     marker.dataset.parameterIds = options.parameterIds.join(',');
   }
+  if (options.videoIds?.length) {
+    marker.dataset.videoIds = options.videoIds.join(',');
+  }
   marker.title = type === 'parameter'
     ? `参数关键帧 ${time.toFixed(2)}s（可拖动）`
     : `相机关键帧 ${time.toFixed(2)}s（可拖动）`;
+  if (type === 'video') {
+    marker.title = `视频关键帧 ${time.toFixed(2)}s（可拖动）`;
+  }
   marker.setAttribute('aria-label', marker.title);
   marker.addEventListener('pointerdown', beginTimelineMarkerDrag);
   marker.addEventListener('click', (event) => {
@@ -13202,8 +14094,9 @@ function beginTimelineMarkerDrag(event) {
   const type = marker.dataset.timelineMarkerType;
   const keyframeId = marker.dataset.keyframeId || '';
   const parameterIds = (marker.dataset.parameterIds || '').split(',').filter(Boolean);
+  const videoIds = (marker.dataset.videoIds || '').split(',').filter(Boolean);
   const groupTime = Number(marker.dataset.timelineTime) || 0;
-  timelineMarkerDrag = { type, keyframeId, parameterIds, groupTime };
+  timelineMarkerDrag = { type, keyframeId, parameterIds, videoIds, groupTime };
   recordUndoStep(type === 'camera' ? '移动相机关键帧' : '移动参数关键帧');
   document.body.classList.add('timeline-marker-dragging');
   updateTimelineMarkerDrag(event);
@@ -13245,13 +14138,20 @@ function updateTimelineMarkerDrag(event) {
         keyframe.time = time;
       }
     });
+  } else if (timelineMarkerDrag.videoIds?.length) {
+    const ids = new Set(timelineMarkerDrag.videoIds);
+    videoPlaneKeyframes.forEach((keyframe) => {
+      if (ids.has(keyframe.id)) {
+        keyframe.time = time;
+      }
+    });
   }
   setCameraTime(time, true);
   refreshCameraTimeline();
 }
 
 function refreshCameraTimeline() {
-  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length);
+  controlsUi.keyframeCount.value = String(cameraAnimation.keyframes.length + parameterKeyframes.length + videoPlaneKeyframes.length);
   controlsUi.timelineMarkers.innerHTML = '';
   renderTimelineFrameTicks();
 
@@ -13273,7 +14173,23 @@ function refreshCameraTimeline() {
     }
     controlsUi.timelineMarkers.append(createTimelineMarker('parameter', time, { parameterIds }));
   });
+  const videoGroups = new Map();
+  videoPlaneKeyframes.forEach((keyframe) => {
+    const time = Number(keyframe.time.toFixed(3));
+    if (!videoGroups.has(time)) {
+      videoGroups.set(time, []);
+    }
+    videoGroups.get(time).push(keyframe.id);
+  });
+  videoGroups.forEach((videoIds, time) => {
+    const occupied = cameraAnimation.keyframes.some((keyframe) => Math.abs(keyframe.time - time) < 0.035) ||
+      parameterKeyframes.some((keyframe) => Math.abs(keyframe.time - time) < 0.035);
+    if (!occupied) {
+      controlsUi.timelineMarkers.append(createTimelineMarker('video', time, { videoIds }));
+    }
+  });
   updateParameterKeyframeButtons();
+  updateVideoPlaneKeyframeButtons();
 
   rebuildCameraPath();
 }
@@ -13350,6 +14266,11 @@ function updateCameraPathVisibility() {
 
   const keyframes = getSortedCameraKeyframes();
   if (!keyframes.length) {
+    cameraPathGroup.visible = false;
+    return;
+  }
+  const activeSceneCamera = getActiveSceneCameraRecord();
+  if (activeSceneCamera?.hidden) {
     cameraPathGroup.visible = false;
     return;
   }
@@ -14522,18 +15443,21 @@ function captureProjectDocument() {
 
   const sceneModels = serializeSceneModels();
   const videoPlanes = serializeVideoPlanes();
+  const sceneCameras = serializeSceneCameras();
   const exportResolution = getExportResolution();
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.9',
+    appVersion: '1.0.15',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
       cameraSettings: getCameraSettings(),
       cameraSnapshot: captureCameraSnapshot(),
       cameraKeyframes: getSortedCameraKeyframes(),
+      sceneCameras,
       parameterKeyframes: serializeParameterKeyframes(),
+      videoPlaneKeyframes: serializeVideoPlaneKeyframes(),
       cameraAnimation: {
         duration: cameraAnimation.duration,
         time: cameraAnimation.time,
@@ -14758,13 +15682,20 @@ async function applyProjectDocument(document) {
 
     await applyOptionsSnapshot(project.options || {}, false);
     importSceneLights(Array.isArray(project.lights) ? project.lights : [], false);
-    setCameraDuration(project.cameraAnimation?.duration ?? 5);
-    setCameraPathMode(project.cameraAnimation?.pathMode ?? 'linear');
-    setCameraCurve(project.cameraAnimation?.curve, project.cameraAnimation?.curveStrength, { applyToSelected: false });
-    setCameraSettings(project.cameraSettings || {}, false);
-    applyCameraSnapshot(project.cameraSnapshot || {}, { pose: true });
-    importCameraKeyframes(Array.isArray(project.cameraKeyframes) ? project.cameraKeyframes : []);
+    if (Array.isArray(project.sceneCameras?.items) && project.sceneCameras.items.length) {
+      importSceneCameras(project.sceneCameras);
+    } else {
+      setCameraDuration(project.cameraAnimation?.duration ?? 5);
+      setCameraPathMode(project.cameraAnimation?.pathMode ?? 'linear');
+      setCameraCurve(project.cameraAnimation?.curve, project.cameraAnimation?.curveStrength, { applyToSelected: false });
+      setCameraSettings(project.cameraSettings || {}, false);
+      applyCameraSnapshot(project.cameraSnapshot || {}, { pose: true });
+      importCameraKeyframes(Array.isArray(project.cameraKeyframes) ? project.cameraKeyframes : []);
+      ensureSceneCamerasInitialized({ replace: true });
+      saveActiveSceneCamera({ renderList: true });
+    }
     importParameterKeyframes(Array.isArray(project.parameterKeyframes) ? project.parameterKeyframes : []);
+    importVideoPlaneKeyframes(Array.isArray(project.videoPlaneKeyframes) ? project.videoPlaneKeyframes : []);
 
     const exportSettings = project.exportSettings || {};
     setExportResolution(exportSettings.width, exportSettings.height, exportSettings.fps);
@@ -14772,7 +15703,10 @@ async function applyProjectDocument(document) {
       controlsUi.exportFormat.value = normalizeExportFormat(exportSettings.format);
       syncExportFormatUi();
     }
-    setCameraTime(project.cameraAnimation?.time ?? 0, true);
+    const restoredCameraTime = Array.isArray(project.sceneCameras?.items) && project.sceneCameras.items.length
+      ? getActiveSceneCameraRecord()?.animation?.time
+      : project.cameraAnimation?.time;
+    setCameraTime(restoredCameraTime ?? 0, true);
     syncUi();
     syncCameraSettingsFromState(true);
     renderSceneModelList();
@@ -15339,9 +16273,10 @@ function stabilizeSceneModelTransformsForRender() {
 function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSeconds) {
   const cameraFrameTime = THREE.MathUtils.clamp(Number(cameraTimeSeconds) || 0, 0, cameraAnimation.duration);
   stabilizeSceneModelTransformsForRender();
-  if (cameraAnimation.keyframes.length || parameterKeyframes.length) {
+  if (cameraAnimation.keyframes.length || parameterKeyframes.length || videoPlaneKeyframes.length) {
     applyKeyframedOptionsAtTime(cameraFrameTime, false);
     applyKeyframedLightsAtTime(cameraFrameTime, false);
+    applyVideoPlaneKeyframesAtTime(cameraFrameTime, false);
   } else if (Number.isFinite(Number(dissolve))) {
     updateDissolve(dissolve, false);
   }
@@ -15696,8 +16631,24 @@ window.particleStudio = {
   setSceneModels: (sceneModels = {}) => importSceneModels(sceneModels),
   getSceneModels: () => serializeSceneModels(),
   selectSceneModel: (id) => activateSceneModel(id),
+  duplicateSelectedSceneModelForTest: () => duplicateSelectedSceneModel(),
+  selectSceneModelIdsForTest: (ids = []) => {
+    selectedSceneModelIds.clear();
+    ids.filter((id) => sceneModelObjects.some((record) => record.id === id)).forEach((id) => selectedSceneModelIds.add(id));
+    renderSceneModelList();
+    return [...selectedSceneModelIds];
+  },
+  addSceneModelCollectionForTest: (name = 'Collection') => createSceneModelCollection(name),
+  assignSelectedSceneModelsToCollectionForTest: (collectionId) => assignSelectedSceneModelsToCollection(collectionId),
+  getSceneCameras: () => serializeSceneCameras(),
+  addSceneCamera: () => addSceneCamera(),
+  duplicateSceneCamera: () => duplicateSceneCamera(),
+  setActiveSceneCamera: (id) => setActiveSceneCamera(id),
+  toggleSceneCameraHidden: (id) => toggleSceneCameraHidden(id),
   setVideoPlanes: (videoPlanes = {}) => importVideoPlanes(videoPlanes),
   getVideoPlanes: () => serializeVideoPlanes(),
+  addVideoPlaneKeyframe: (track) => addVideoPlaneKeyframe(track),
+  getVideoPlaneKeyframes: () => serializeVideoPlaneKeyframes(),
   selectVideoPlane: (id) => selectVideoPlane(id),
   getMorphTargetModel: () => ({
     loaded: Boolean(morphTargetSource),
