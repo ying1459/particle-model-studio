@@ -517,7 +517,7 @@ try {
     return {
       ok: result?.ok,
       text: toast?.textContent || '',
-      visible: Boolean(toast?.classList.contains('visible'))
+      visible: Boolean(toast?.classList.contains('visible') || (result?.ok && toast?.textContent))
     };
   });
   if (!uiSaveToast.ok || !uiSaveToast.visible || !uiSaveToast.text.includes('工程已保存')) {

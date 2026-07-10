@@ -2856,12 +2856,13 @@ const compositeMaterial = new THREE.ShaderMaterial({
     void main() {
       vec4 base = sampleDepthOfField(vUv);
       vec4 bloom = texture2D(uBloomTexture, vUv);
-      bloom.rgb = max(bloom.rgb - vec3(0.0012), vec3(0.0));
-      bloom.a = max(bloom.a - 0.001, 0.0);
+      bloom.rgb = max(bloom.rgb - vec3(0.00035), vec3(0.0));
+      bloom.a = max(bloom.a - 0.00025, 0.0);
       float bloomEnergy = max(max(bloom.r, bloom.g), bloom.b);
-      float bloomMask = smoothstep(0.0, 0.008, bloomEnergy);
+      float bloomMask = smoothstep(0.0, 0.018, bloomEnergy);
       bloom *= bloomMask;
-      vec3 color = base.rgb + bloom.rgb * uBloomStrength;
+      vec3 softBloom = 1.0 - exp(-bloom.rgb * uBloomStrength);
+      vec3 color = base.rgb + softBloom * (0.72 + (1.0 - clamp(base.rgb, 0.0, 1.0)) * 0.28);
       float alpha = max(base.a, bloom.a * uBloomAlpha);
       alpha = mix(1.0, alpha, uTransparentOutput);
       color = linearToSrgb(pmsAgxToneMap(color));
@@ -3443,23 +3444,23 @@ const particleMaterial = new THREE.ShaderMaterial({
         discard;
       }
 
-      float exposureNorm = pow(1.0 - exp(-exposure * 0.55), 1.08);
-      float radiusNorm = 1.0 - exp(-max(uGlowRadius, 0.0) * 0.0032);
+      float exposureNorm = 1.0 - exp(-pow(exposure, 1.16) * 0.42);
+      float radiusNorm = 1.0 - exp(-max(uGlowRadius, 0.0) * 0.0028);
       float glowStrength = exposureNorm * radiusNorm;
-      if (glowStrength <= 0.0005) {
+      if (glowStrength <= 0.00002) {
         discard;
       }
       float luminance = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
       float colorEnergy = max(max(vColor.r, vColor.g), vColor.b);
-      float glowWeight = mix(0.08, 1.0, smoothstep(0.32, 0.96, max(luminance, colorEnergy * 0.76)));
-      float highlight = mix(0.28, 1.0, smoothstep(0.76, 0.99, vGlowSeed));
+      float glowWeight = mix(0.18, 1.0, smoothstep(0.18, 0.92, max(luminance, colorEnergy * 0.76)));
+      float highlight = mix(0.46, 1.0, smoothstep(0.72, 0.99, vGlowSeed));
       float radiusSoftness = clamp(uGlowRadius / 500.0, 0.0, 1.0);
-      float source = mix(exp(-d * d * 42.0), exp(-d * d * 12.0), radiusSoftness);
+      float source = exp(-d * d * mix(5.6, 1.25, radiusSoftness));
       float energy = source * vAlpha * glowWeight * highlight * glowStrength;
-      float alpha = energy * 0.14;
-      vec3 glowColor = mix(vColor, vec3(1.0), glowStrength * 0.08);
-      vec3 color = glowColor * energy * (2.15 + exposureNorm * 2.35);
-      gl_FragColor = vec4(color, clamp(alpha, 0.0, 0.18));
+      float alpha = energy * (0.18 + radiusNorm * 0.3);
+      vec3 glowColor = mix(vColor, pow(max(vColor, vec3(0.0)), vec3(0.72)), 0.34);
+      vec3 color = glowColor * energy * (1.22 + exposureNorm * 1.36);
+      gl_FragColor = vec4(color, clamp(alpha, 0.0, 0.38));
     }
   `
 });
@@ -3722,25 +3723,25 @@ const emissionMaterial = new THREE.ShaderMaterial({
       if (uGlowPass < 0.5) {
         float core = smoothstep(0.48, 0.06, d);
         float feather = smoothstep(0.5, 0.32, d);
-      float glowLift = 1.0 - exp(-max(vGlow, 0.0) * 0.72);
+        float glowLift = 1.0 - exp(-pow(max(vGlow, 0.0), 1.12) * 0.48);
         vec3 color = vColor * (0.92 + glowLift * 0.16);
         gl_FragColor = vec4(color, core * feather * vAlpha);
         return;
       }
 
-      if (vGlow <= 0.001) {
+      if (vGlow <= 0.0001) {
         discard;
       }
 
-      float glowStrength = 1.0 - exp(-max(vGlow, 0.0) * 0.72);
-      if (glowStrength <= 0.0005) {
+      float glowStrength = 1.0 - exp(-pow(max(vGlow, 0.0), 1.12) * 0.48);
+      if (glowStrength <= 0.00002) {
         discard;
       }
 
-      float halo = exp(-d * d * 10.5);
-      float alpha = halo * vAlpha * glowStrength * 0.22;
-      vec3 glowColor = mix(vColor, vec3(1.0), glowStrength * 0.14);
-      gl_FragColor = vec4(glowColor * alpha * (1.08 + glowStrength * 0.62), clamp(alpha, 0.0, 0.26));
+      float halo = exp(-d * d * 4.2);
+      float alpha = halo * vAlpha * glowStrength * 0.16;
+      vec3 glowColor = mix(vColor, pow(max(vColor, vec3(0.0)), vec3(0.72)), 0.28);
+      gl_FragColor = vec4(glowColor * alpha * (0.92 + glowStrength * 0.42), clamp(alpha, 0.0, 0.2));
     }
   `
 });
@@ -3834,7 +3835,8 @@ const imageSplatVertexShader = `
     float densityAlpha = clamp(pow(5.0 / densityDepth, 0.54) * pow(projectionBoost, 0.14), 0.24, 1.3);
     float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
-    float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
+    float glowStrength = 1.0 - exp(-pow(max(uGlow, 0.0), 1.16) * 0.42);
+    float glowScale = mix(1.0, 1.06 + glowStrength * 3.15, glowPass);
     gl_PointSize = max(0.42, uSize * uPixelRatio * perspectiveScale * jitter * glowScale * 2.2);
     gl_Position = projectionMatrix * mvPosition;
 
@@ -3876,7 +3878,23 @@ const imageSplatFragmentShader = `
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
     float alpha = soft * vAlpha * clamp(uOpacity, 0.0, 1.0) * mix(1.0, 0.42, mist);
     color = mix(color, vec3(dot(color, vec3(0.299, 0.587, 0.114))), mist * 0.18);
-    color *= 1.0 + uGlow * mix(0.04, 0.18, glowPass);
+
+    float glowStrength = 1.0 - exp(-pow(max(uGlow, 0.0), 1.16) * 0.42);
+    if (glowPass > 0.5) {
+      if (glowStrength <= 0.00002) {
+        discard;
+      }
+      float halo = exp(-d * d * mix(5.2, 2.15, feather));
+      float glowAlpha = halo * vAlpha * clamp(uOpacity, 0.0, 1.0) * glowStrength * 0.13;
+      if (glowAlpha <= 0.00002) {
+        discard;
+      }
+      vec3 glowColor = mix(color, pow(max(color, vec3(0.0)), vec3(0.72)), 0.28);
+      gl_FragColor = vec4(glowColor * glowAlpha * (0.86 + glowStrength * 0.52), clamp(glowAlpha, 0.0, 0.18));
+      return;
+    }
+
+    color *= 1.0 + glowStrength * 0.13;
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -15505,7 +15523,7 @@ function captureProjectDocument() {
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.16',
+    appVersion: '1.0.17',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
@@ -15836,20 +15854,21 @@ function syncExportFormatUi() {
 
 function glowBlurRadius() {
   if (state.effectMode === 'image') {
-    return THREE.MathUtils.clamp(1.0 + normalizedGlowDriver(state.imageSplatGlow) * 18 + state.imageSplatScatter * 0.45, 0.8, 32);
+    return THREE.MathUtils.clamp(1.0 + normalizedGlowDriver(state.imageSplatGlow) * 24 + state.imageSplatScatter * 0.45, 0.8, 38);
   }
 
   if (state.effectMode === 'emission') {
-    return THREE.MathUtils.clamp(1.1 + normalizedGlowDriver(state.emissionGlow) * 24 + state.emissionDistance * 0.55, 0.85, 42);
+    return THREE.MathUtils.clamp(1.1 + normalizedGlowDriver(state.emissionGlow) * 30 + state.emissionDistance * 0.55, 0.85, 48);
   }
 
   const radius = Math.max(state.glowRadius, 0);
   const exposure = normalizedGlowDriver(state.glowExposure);
-  return THREE.MathUtils.clamp(0.45 + Math.pow(radius, 0.85) * (0.22 + exposure * 0.2), 0.35, 78);
+  return THREE.MathUtils.clamp(0.55 + Math.pow(radius, 0.86) * (0.18 + exposure * 0.22), 0.35, 84);
 }
 
 function normalizedGlowDriver(value) {
-  return 1 - Math.exp(-Math.max(Number(value) || 0, 0) * 0.72);
+  const amount = Math.max(Number(value) || 0, 0);
+  return 1 - Math.exp(-Math.pow(amount, 1.16) * 0.42);
 }
 
 function setFullTargetViewport(targetRenderer, target = null) {
@@ -15993,14 +16012,12 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   const previousViewport = new THREE.Vector4();
   const previousScissor = new THREE.Vector4();
   const previousScissorTest = targetRenderer.getScissorTest?.() || false;
-  const forceOutputComposite = Boolean(options.forceOutputComposite && finalViewport && targets?.sceneTarget);
   const depthOfFieldEnabled = Boolean(
     options.dofEnabled &&
     state.cameraDofEnabled &&
     state.cameraType === 'perspective' &&
     targets?.sceneTarget?.depthTexture
   );
-  const requiresOutputComposite = forceOutputComposite || depthOfFieldEnabled;
   targetRenderer.getViewport(previousViewport);
   targetRenderer.getScissor(previousScissor);
   const applyFinalViewport = () => {
@@ -16038,29 +16055,32 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   }
 
   if (!glowEnabled()) {
-    targetRenderer.setRenderTarget(requiresOutputComposite ? targets.sceneTarget : outputTarget);
-    setFullTargetViewport(targetRenderer, requiresOutputComposite ? targets.sceneTarget : outputTarget);
+    // Keep the base image on the same post pipeline even when glow strength is
+    // exactly zero.  Previously 0.00 rendered directly while 0.01 switched to
+    // composite + tone mapping, which made glow/exposure sliders behave like a
+    // hard on/off switch.
+    targetRenderer.setRenderTarget(targets.sceneTarget);
+    setFullTargetViewport(targetRenderer, targets.sceneTarget);
     targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
     targetRenderer.clear(true, true, true);
     targetRenderer.render(scene, renderCamera);
-    if (requiresOutputComposite) {
-      targetRenderer.setRenderTarget(targets.glowTarget);
-      setFullTargetViewport(targetRenderer, targets.glowTarget);
-      targetRenderer.setClearColor(0x000000, 0);
-      targetRenderer.clear(true, true, true);
-      compositeMaterial.uniforms.uBaseTexture.value = targets.sceneTarget.texture;
-      compositeMaterial.uniforms.uBloomTexture.value = targets.glowTarget.texture;
-      compositeMaterial.uniforms.uBloomStrength.value = 0;
-      compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
-      compositeMaterial.uniforms.uBloomAlpha.value = 0;
-      configureCompositeCameraUniforms(renderCamera, targets, { dofEnabled: depthOfFieldEnabled });
-      targetRenderer.setRenderTarget(outputTarget);
-      applyOutputViewport();
-      targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
-      targetRenderer.clear(true, true, true);
-      postQuad.material = compositeMaterial;
-      targetRenderer.render(postScene, postCamera);
-    }
+
+    targetRenderer.setRenderTarget(targets.glowTarget);
+    setFullTargetViewport(targetRenderer, targets.glowTarget);
+    targetRenderer.setClearColor(0x000000, 0);
+    targetRenderer.clear(true, true, true);
+    compositeMaterial.uniforms.uBaseTexture.value = targets.sceneTarget.texture;
+    compositeMaterial.uniforms.uBloomTexture.value = targets.glowTarget.texture;
+    compositeMaterial.uniforms.uBloomStrength.value = 0;
+    compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
+    compositeMaterial.uniforms.uBloomAlpha.value = 0;
+    configureCompositeCameraUniforms(renderCamera, targets, { dofEnabled: depthOfFieldEnabled });
+    targetRenderer.setRenderTarget(outputTarget);
+    applyOutputViewport();
+    targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
+    targetRenderer.clear(true, true, true);
+    postQuad.material = compositeMaterial;
+    targetRenderer.render(postScene, postCamera);
     restoreRendererViewport();
     if (glowParticles) {
       glowParticles.visible = previousGlowVisible;
@@ -16175,19 +16195,19 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
       : state.glowExposure;
   const bloomShape = normalizedGlowDriver(bloomDriver);
   const bloomStrength = state.effectMode === 'emission'
-    ? THREE.MathUtils.clamp(0.55 + bloomShape * 1.25, 0.55, 1.8)
+    ? THREE.MathUtils.clamp(0.24 + bloomShape * 1.28, 0.24, 1.65)
     : state.effectMode === 'image'
-      ? THREE.MathUtils.clamp(0.65 + bloomShape * 1.4, 0.65, 2.05)
-    : THREE.MathUtils.clamp(0.75 + bloomShape * 1.75, 0.75, 2.5);
+      ? THREE.MathUtils.clamp(0.26 + bloomShape * 1.38, 0.26, 1.9)
+    : THREE.MathUtils.clamp(0.22 + bloomShape * 1.68, 0.22, 2.05);
   compositeMaterial.uniforms.uBaseTexture.value = targets.sceneTarget.texture;
   compositeMaterial.uniforms.uBloomTexture.value = blurredTarget.texture;
   compositeMaterial.uniforms.uBloomStrength.value = bloomStrength;
   compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
   compositeMaterial.uniforms.uBloomAlpha.value = state.effectMode === 'emission'
-    ? THREE.MathUtils.clamp(0.01 + bloomShape * 0.21, 0.01, 0.22)
+    ? THREE.MathUtils.clamp(0.004 + bloomShape * 0.16, 0.004, 0.18)
     : state.effectMode === 'image'
-      ? THREE.MathUtils.clamp(0.015 + bloomShape * 0.23, 0.015, 0.245)
-    : THREE.MathUtils.clamp(0.02 + bloomShape * 0.28, 0.02, 0.3);
+      ? THREE.MathUtils.clamp(0.005 + bloomShape * 0.18, 0.005, 0.2)
+    : THREE.MathUtils.clamp(0.006 + bloomShape * 0.2, 0.006, 0.22);
   configureCompositeCameraUniforms(renderCamera, targets, { dofEnabled: depthOfFieldEnabled });
 
   targetRenderer.setRenderTarget(outputTarget);

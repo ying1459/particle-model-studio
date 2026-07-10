@@ -433,6 +433,10 @@ try {
   if (!cameraClipRange.ok) {
     throw new Error(`Camera clipping range is too short: ${JSON.stringify(cameraClipRange)}`);
   }
+  const parameterContinuity = await verifyParameterContinuity(page);
+  if (!parameterContinuity.ok) {
+    throw new Error(`Parameter zero-crossing is visually discontinuous: ${JSON.stringify(parameterContinuity)}`);
+  }
 
   await page.evaluate(async () => {
     await window.particleStudio.setOptions(
@@ -933,6 +937,7 @@ try {
         cameraFeatures: cameraFeatureCheck,
         cameraDistanceLighting,
         cameraClipRange,
+        parameterContinuity,
         imageSplat: imageSplatCheck,
         videoPlane: videoPlaneCheck,
         animation: animationCheck,
@@ -1105,6 +1110,212 @@ async function verifyCameraClipRange(page) {
       ok: snapshot.near <= 0.0011 && snapshot.far >= 9999,
       near: snapshot.near,
       far: snapshot.far
+    };
+  });
+}
+
+async function verifyParameterContinuity(page) {
+  return page.evaluate(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = src;
+      });
+    }
+
+    async function measureFrame(src) {
+      const image = await loadImage(src);
+      const width = 192;
+      const height = 108;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(image, 0, 0, width, height);
+      const data = context.getImageData(0, 0, width, height).data;
+      let pixelCount = 0;
+      let luminance = 0;
+      let brightCount = 0;
+      let grayishCount = 0;
+      for (let offset = 0; offset < data.length; offset += 4) {
+        const r = data[offset];
+        const g = data[offset + 1];
+        const b = data[offset + 2];
+        const value = r * 0.2126 + g * 0.7152 + b * 0.0722;
+        const backgroundDistance = Math.abs(r - 9) + Math.abs(g - 10) + Math.abs(b - 12);
+        if (backgroundDistance < 22 || value < 12) {
+          continue;
+        }
+        pixelCount += 1;
+        luminance += value;
+        if (value > 205) {
+          brightCount += 1;
+        }
+        const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+        if (chroma < 12 && value > 35) {
+          grayishCount += 1;
+        }
+      }
+      return {
+        pixelCount,
+        meanLuminance: luminance / Math.max(pixelCount, 1),
+        brightRatio: brightCount / Math.max(pixelCount, 1),
+        grayishRatio: grayishCount / Math.max(pixelCount, 1)
+      };
+    }
+
+    async function renderMetrics(options) {
+      await window.particleStudio.setOptions(options, true);
+      await sleep(80);
+      return measureFrame(window.particleStudio.renderFrame(0, undefined, 0));
+    }
+
+    async function compare(name, baseOptions, lowOptions, limits = {}) {
+      const base = await renderMetrics(baseOptions);
+      const low = await renderMetrics(lowOptions);
+      const luminanceRatio = low.meanLuminance / Math.max(base.meanLuminance, 0.0001);
+      const pixelRatio = low.pixelCount / Math.max(base.pixelCount, 1);
+      const brightDelta = low.brightRatio - base.brightRatio;
+      const grayDelta = low.grayishRatio - base.grayishRatio;
+      const ok =
+        base.pixelCount > 80 &&
+        low.pixelCount > 80 &&
+        luminanceRatio <= (limits.maxLuminanceRatio ?? 1.42) &&
+        luminanceRatio >= (limits.minLuminanceRatio ?? 0.62) &&
+        pixelRatio <= (limits.maxPixelRatio ?? 1.85) &&
+        pixelRatio >= (limits.minPixelRatio ?? 0.42) &&
+        brightDelta <= (limits.maxBrightDelta ?? 0.12) &&
+        grayDelta <= (limits.maxGrayDelta ?? 0.32);
+      return { name, ok, base, low, luminanceRatio, pixelRatio, brightDelta, grayDelta };
+    }
+
+    window.particleStudio.clearCameraKeyframes();
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setExportResolution(384, 216, 24);
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.9, 8.8],
+      target: [0, 0.15, 0],
+      cameraType: 'perspective',
+      focalLength: 42,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+
+    const particleBase = {
+      effectMode: 'particles',
+      particleCount: 20000,
+      pointSize: 2.8,
+      particleizeProgress: 1,
+      modelVisibility: 1,
+      sampleCleanup: 0,
+      sizeRandom: 0.28,
+      spread: 0,
+      noise: 0,
+      dissolve: 0,
+      growth: 1,
+      glowRadius: 80,
+      glowExposure: 0,
+      autoRotate: false,
+      worldEnabled: false,
+      worldVisible: false
+    };
+
+    const checks = [];
+    checks.push(await compare('glowExposure 0 -> 0.05', particleBase, { ...particleBase, glowExposure: 0.05 }));
+    checks.push(await compare('glowRadius 0 -> 6', { ...particleBase, glowRadius: 0, glowExposure: 0.35 }, { ...particleBase, glowRadius: 6, glowExposure: 0.35 }));
+    checks.push(await compare('spread 0 -> 0.08', particleBase, { ...particleBase, spread: 0.08 }, { maxPixelRatio: 2.2 }));
+    checks.push(await compare('noise 0 -> 0.08', particleBase, { ...particleBase, noise: 0.08 }, { maxPixelRatio: 2.2 }));
+    checks.push(await compare('dissolve 0 -> 0.04', particleBase, { ...particleBase, dissolve: 0.04 }, { minLuminanceRatio: 0.5, maxPixelRatio: 2.2 }));
+
+    const emissionBase = {
+      effectMode: 'emission',
+      useTexture: true,
+      modelVisibility: 1,
+      emissionEnabled: true,
+      emissionCount: 600,
+      emissionIntensity: 0.65,
+      emissionDistance: 0.75,
+      emissionSpeed: 0.2,
+      emissionOpacity: 0.38,
+      emissionSize: 1.1,
+      emissionGlow: 0,
+      breakAmount: 0,
+      breakProgress: 0,
+      autoRotate: false,
+      worldEnabled: false,
+      worldVisible: false
+    };
+    checks.push(await compare('emissionGlow 0 -> 0.05', emissionBase, { ...emissionBase, emissionGlow: 0.05 }, { maxPixelRatio: 2.3 }));
+
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = 96;
+    sourceCanvas.height = 64;
+    const context = sourceCanvas.getContext('2d');
+    const gradient = context.createLinearGradient(0, 0, sourceCanvas.width, sourceCanvas.height);
+    gradient.addColorStop(0, '#163fff');
+    gradient.addColorStop(0.5, '#f7ead0');
+    gradient.addColorStop(1, '#ff4b1f');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    context.fillStyle = '#0a0d12';
+    context.fillRect(10, 10, 26, 42);
+    context.fillStyle = '#44e6a2';
+    context.beginPath();
+    context.arc(66, 34, 18, 0, Math.PI * 2);
+    context.fill();
+    await window.particleStudio.setImageSplatObject({
+      name: 'continuity-image.png',
+      extension: 'png',
+      dataUrl: sourceCanvas.toDataURL('image/png'),
+      kind: 'image-preview',
+      params: {
+        effectMode: 'image',
+        imageSplatCount: 18000,
+        imageSplatDepth: 0.45,
+        imageSplatScatter: 0,
+        imageSplatSpeed: 0,
+        imageSplatDirX: 0,
+        imageSplatDirY: 0,
+        imageSplatDirZ: 0,
+        imageSplatTurbulence: 0,
+        imageSplatSize: 1.2,
+        imageSplatFeather: 0.15,
+        imageSplatColorKeep: 1,
+        imageSplatOpacity: 0.9,
+        imageSplatGlow: 0,
+        imageSplatPlaneVisible: false
+      }
+    });
+    window.particleStudio.setCameraSnapshot({ position: [0, 0.08, 2.6], target: [0, 0, 0], fov: 36 });
+    const imageSplatBase = {
+      effectMode: 'image',
+      imageSplatCount: 18000,
+      imageSplatDepth: 0.45,
+      imageSplatScatter: 0,
+      imageSplatSpeed: 0,
+      imageSplatDirX: 0,
+      imageSplatDirY: 0,
+      imageSplatDirZ: 0,
+      imageSplatTurbulence: 0,
+      imageSplatSize: 1.2,
+      imageSplatFeather: 0.15,
+      imageSplatColorKeep: 1,
+      imageSplatOpacity: 0.9,
+      imageSplatGlow: 0,
+      imageSplatPlaneVisible: false,
+      autoRotate: false,
+      worldEnabled: false,
+      worldVisible: false
+    };
+    checks.push(await compare('imageSplatGlow 0 -> 0.05', imageSplatBase, { ...imageSplatBase, imageSplatGlow: 0.05 }, { maxPixelRatio: 2.3 }));
+
+    return {
+      ok: checks.every((check) => check.ok),
+      checks
     };
   });
 }
