@@ -86,6 +86,7 @@ const dropZone = document.querySelector('#dropZone');
 const modelName = document.querySelector('#modelName');
 const statusText = document.querySelector('#status');
 const statsText = document.querySelector('#stats');
+let statusToastTimer = 0;
 const resetCameraButton = document.querySelector('#resetCamera');
 const projectUi = {
   input: document.querySelector('#projectInput'),
@@ -3334,7 +3335,13 @@ const particleMaterial = new THREE.ShaderMaterial({
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
       float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
-      float depthScale = clamp(pow(6.2 / cameraDepth, 1.08) * pow(projectionBoost, 0.86), 0.24, 8.0);
+      // Screen-density lock: close-up shots project the same particles across
+      // far more pixels, which otherwise looks sparse while distant geometry
+      // turns into a dense white haze.  A stronger inverse-depth coverage plus
+      // distance alpha keeps close/far shots visually consistent.
+      float densityDepth = max(cameraDepth, 0.18);
+      float depthScale = clamp(pow(6.0 / densityDepth, 1.58) * pow(projectionBoost, 1.08), 0.10, 24.0);
+      float densityAlpha = clamp(pow(6.0 / densityDepth, 0.62) * pow(projectionBoost, 0.16), 0.22, 1.42);
       float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
       float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
       float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
@@ -3381,6 +3388,7 @@ const particleMaterial = new THREE.ShaderMaterial({
       vAlpha *= mix(1.0, 0.82 + morphRibbon * (0.24 + uMorphFlow * 0.05), morphMode);
       vAlpha *= particleizeAlpha * (0.55 + particleizeReveal * 0.45 + particleizeHead * 0.22);
       vAlpha *= 1.0 - smoothstep(0.965, 1.0, dissolveAmount);
+      vAlpha *= densityAlpha;
       vAlpha *= clamp(uModelVisibility, 0.0, 1.0);
       vGlowSeed = aSeed;
     }
@@ -3663,7 +3671,9 @@ const emissionMaterial = new THREE.ShaderMaterial({
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
       float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
-      float depthScale = clamp(pow(6.0 / cameraDepth, 1.04) * pow(projectionBoost, 0.84), 0.24, 7.5);
+      float densityDepth = max(cameraDepth, 0.18);
+      float depthScale = clamp(pow(6.0 / densityDepth, 1.52) * pow(projectionBoost, 1.02), 0.10, 20.0);
+      float densityAlpha = clamp(pow(6.0 / densityDepth, 0.58) * pow(projectionBoost, 0.16), 0.24, 1.35);
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
@@ -3690,6 +3700,7 @@ const emissionMaterial = new THREE.ShaderMaterial({
       float breakAlpha = activeMask * breakMask * smoothstep(0.0, 0.08, uBreakProgress) *
         (1.0 - smoothstep(0.94, 1.0, uBreakProgress)) * (0.52 + aSeed * 0.46);
       vAlpha = max(energy * stream, breakAlpha) * clamp(uEmissionOpacity, 0.0, 1.0) * (0.28 + aSeed * 0.54);
+      vAlpha *= densityAlpha;
       vAlpha *= clamp(uModelVisibility, 0.0, 1.0);
       vGlow = clamp(uEmissionGlow * (0.52 + ribbon * 0.42) + breakMask * 0.35, 0.0, 4.0);
     }
@@ -3818,7 +3829,9 @@ const imageSplatVertexShader = `
 
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
-    float perspectiveScale = clamp(pow(4.8 / max(0.45, -mvPosition.z), 1.02) * pow(projectionBoost, 0.84), 0.26, 6.0);
+    float densityDepth = max(-mvPosition.z, 0.22);
+    float perspectiveScale = clamp(pow(5.0 / densityDepth, 1.46) * pow(projectionBoost, 1.02), 0.11, 18.0);
+    float densityAlpha = clamp(pow(5.0 / densityDepth, 0.54) * pow(projectionBoost, 0.14), 0.24, 1.3);
     float jitter = 0.82 + hash(aSeed + 1.9) * 0.36 + mist * 0.16;
     float glowPass = clamp(uGlowPass, 0.0, 1.0);
     float glowScale = mix(1.0, 1.16 + uGlow * 0.08, glowPass);
@@ -3828,7 +3841,7 @@ const imageSplatVertexShader = `
     vColor = aParticleColor;
     vMix = aMix;
     float activeMask = step(aIndexRatio, clamp(uCountRatio, 0.0, 1.0));
-    vAlpha = aAlpha * activeMask * mix(1.0, 0.38, mist) * mix(1.0, 0.42, clamp(uGlowPass, 0.0, 1.0));
+    vAlpha = aAlpha * activeMask * densityAlpha * mix(1.0, 0.38, mist) * mix(1.0, 0.42, clamp(uGlowPass, 0.0, 1.0));
   }
 `;
 
@@ -3950,14 +3963,16 @@ const realSplatPointMaterial = new THREE.ShaderMaterial({
 
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
-      float perspectiveScale = clamp(pow(6.0 / max(0.45, -mvPosition.z), 1.04) * pow(projectionBoost, 0.84), 0.26, 6.4);
+      float densityDepth = max(-mvPosition.z, 0.22);
+      float perspectiveScale = clamp(pow(6.0 / densityDepth, 1.5) * pow(projectionBoost, 1.02), 0.11, 18.0);
+      float densityAlpha = clamp(pow(6.0 / densityDepth, 0.56) * pow(projectionBoost, 0.14), 0.24, 1.32);
       float glowScale = 1.0 + (1.0 - exp(-max(uGlow, 0.0) * 0.72)) * 0.18;
       gl_PointSize = max(0.85, uPointSize * uPixelRatio * perspectiveScale * aScale * glowScale);
       gl_Position = projectionMatrix * mvPosition;
       float mixValue = clamp(0.5 + p.y * 0.18 + seed * 0.22, 0.0, 1.0);
       vec3 gradient = mix(uColorA, uColorB, mixValue);
       vColor = mix(gradient, color, clamp(uColorKeep, 0.0, 1.0));
-      vAlpha = aAlpha;
+      vAlpha = aAlpha * densityAlpha;
       vGlow = uGlow * (0.45 + seed * 0.55);
     }
   `,
@@ -5991,7 +6006,7 @@ function updateSelectedVideoPlaneProperty(key, value) {
   syncVideoPlaneUi();
 }
 
-const VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS = new Set(['width', 'height', 'opacity', 'playbackRate', 'timeOffset']);
+const VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS = new Set(['width', 'height', 'opacity', 'playbackRate', 'timeOffset', 'uniformScale']);
 const VIDEO_PLANE_VECTOR_KEYFRAME_TRACKS = new Set(['position', 'scale']);
 const VIDEO_PLANE_QUATERNION_KEYFRAME_TRACKS = new Set(['rotation']);
 const VIDEO_PLANE_KEYFRAME_TRACKS = new Set([
@@ -6009,6 +6024,10 @@ function captureVideoPlaneKeyframeValue(record, track) {
     return undefined;
   }
   if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
+    if (track === 'uniformScale') {
+      const scale = record.root?.scale || new THREE.Vector3(1, 1, 1);
+      return (Math.abs(scale.x) + Math.abs(scale.y) + Math.abs(scale.z)) / 3;
+    }
     return Number(record[track]);
   }
   if (track === 'position') {
@@ -6034,6 +6053,9 @@ function normalizeVideoPlaneKeyframe(keyframe = {}, index = 0) {
     value = Number(value);
     if (!Number.isFinite(value)) {
       return null;
+    }
+    if (track === 'uniformScale') {
+      value = THREE.MathUtils.clamp(value, 0.001, 100);
     }
   } else if (VIDEO_PLANE_VECTOR_KEYFRAME_TRACKS.has(track)) {
     if (!Array.isArray(value) || value.length < 3) {
@@ -6173,7 +6195,10 @@ function applyVideoPlaneKeyframesAtTime(time, updateUi = false) {
       if (!keyframes.length) {
         return;
       }
-      if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
+      if (track === 'uniformScale') {
+        const uniformScale = interpolateVideoPlaneNumericKeyframes(keyframes, time);
+        record.root?.scale.setScalar(Math.max(0.001, uniformScale));
+      } else if (VIDEO_PLANE_NUMERIC_KEYFRAME_TRACKS.has(track)) {
         record[track] = interpolateVideoPlaneNumericKeyframes(keyframes, time);
       } else if (track === 'position') {
         record.root?.position.fromArray(interpolateVideoPlaneVectorKeyframes(keyframes, time));
@@ -6237,6 +6262,16 @@ function setupVideoPlaneKeyframeControls() {
       keyRow.append(button);
       videoPlaneKeyframeButtons.set(track, button);
     });
+    if (!videoPlaneKeyframeButtons.has('uniformScale')) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'small-button video-transform-key';
+      button.textContent = '整体缩放 K帧';
+      button.dataset.videoKeyframeTrack = 'uniformScale';
+      button.addEventListener('click', () => addVideoPlaneKeyframe('uniformScale'));
+      keyRow.append(button);
+      videoPlaneKeyframeButtons.set('uniformScale', button);
+    }
     actionRow.after(keyRow);
   }
   updateVideoPlaneKeyframeButtons();
@@ -15392,6 +15427,28 @@ function setStatus(value) {
   statusText.title = value;
 }
 
+function showStatusToast(message, tone = 'success') {
+  if (exportSettings.hideUi || !message) {
+    return;
+  }
+  let toast = document.querySelector('.app-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'app-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    document.body.append(toast);
+  }
+  toast.textContent = message;
+  toast.classList.remove('success', 'error', 'warning', 'visible');
+  toast.classList.add(tone);
+  window.clearTimeout(statusToastTimer);
+  requestAnimationFrame(() => toast.classList.add('visible'));
+  statusToastTimer = window.setTimeout(() => {
+    toast?.classList.remove('visible');
+  }, 3200);
+}
+
 function formatCount(value) {
   const numericValue = Math.max(0, Math.round(Number(value) || 0));
   if (numericValue < 1000) {
@@ -15448,7 +15505,7 @@ function captureProjectDocument() {
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.15',
+    appVersion: '1.0.16',
     savedAt: new Date().toISOString(),
     scene: {
       options: captureKeyframeOptions(),
@@ -15557,6 +15614,7 @@ async function saveProjectFromUi(saveAs = false) {
     currentProjectName = result.name || `${suggestedName}.pms`;
     syncProjectName();
     setStatus('Project saved');
+    showStatusToast(`工程已保存：${currentProjectName}`, 'success');
     return result;
   } catch (error) {
     let recovery = null;
@@ -15572,10 +15630,14 @@ async function saveProjectFromUi(saveAs = false) {
     }
     if (recovery?.ok) {
       console.warn('Primary project save failed; recovery copy was saved.', error);
+      showStatusToast(`原位置保存失败，恢复副本已保存：${recovery.name}`, 'warning');
       setStatus(`原位置保存失败；恢复副本已保存：${recovery.name}`);
     } else {
       console.error(error);
       setStatus(`保存失败：${formatProjectSaveStatus(error)}`);
+    }
+    if (!recovery?.ok) {
+      showStatusToast(`保存失败：${formatProjectSaveStatus(error)}`, 'error');
     }
     return { ok: false, error: error.message || String(error), recovery };
   } finally {

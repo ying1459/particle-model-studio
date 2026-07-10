@@ -170,7 +170,7 @@ try {
     !uiLayout.sceneCameraPanel ||
     uiLayout.sceneCameraRows < 1 ||
     uiLayout.sceneCameraEnabled !== 1 ||
-    uiLayout.videoKeyButtons < 8
+    uiLayout.videoKeyButtons < 9
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);
   }
@@ -417,6 +417,7 @@ try {
     });
     window.particleStudio.addVideoPlaneKeyframe('width');
     window.particleStudio.addVideoPlaneKeyframe('position');
+    window.particleStudio.addVideoPlaneKeyframe('uniformScale');
     const videoKeyframes = window.particleStudio.getVideoPlaneKeyframes();
     const asset = window.particleStudio.getCurrentAsset().videoPlanes.find((item) => item.id === 'electron-mov-proxy-smoke');
     const frame = await window.particleStudio.renderFrameAsync(0, undefined, 0);
@@ -442,7 +443,8 @@ try {
     !movProxyResult.asset?.hasProxy ||
     !movProxyResult.asset?.proxyCached ||
     movProxyResult.asset.playbackExtension !== 'webm' ||
-    movProxyResult.videoKeyframes?.length < 2 ||
+    movProxyResult.videoKeyframes?.length < 3 ||
+    !movProxyResult.videoKeyframes?.some((keyframe) => keyframe.track === 'uniformScale') ||
     movProxyResult.frameBytes < 1000
   ) {
     throw new Error(`MOV proxy import failed: ${JSON.stringify(movProxyResult)}`);
@@ -508,6 +510,20 @@ try {
   ) {
     throw new Error(`Project save/open roundtrip failed: ${JSON.stringify({ projectResult, embeddedModel: Boolean(embeddedModel) })}`);
   }
+  const uiSaveToast = await page.evaluate(async () => {
+    const result = await window.particleStudio.saveProject(true);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const toast = document.querySelector('.app-toast');
+    return {
+      ok: result?.ok,
+      text: toast?.textContent || '',
+      visible: Boolean(toast?.classList.contains('visible'))
+    };
+  });
+  if (!uiSaveToast.ok || !uiSaveToast.visible || !uiSaveToast.text.includes('工程已保存')) {
+    throw new Error(`Project save toast failed: ${JSON.stringify(uiSaveToast)}`);
+  }
+  projectResult.uiSaveToast = uiSaveToast.text;
   result.project = projectResult;
   await rm(projectSmokePath, { force: true });
 
