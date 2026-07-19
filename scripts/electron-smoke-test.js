@@ -24,6 +24,7 @@ const automaticRecoveryFailurePath = path.join(rootDir, 'verification', 'missing
 const pathReferenceProjectSmokePath = path.join(rootDir, 'verification', 'electron-path-reference-smoke.pms');
 const uiScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-packaged.png' : 'electron-ui.png');
 const uiCameraScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-camera-packaged.png' : 'electron-ui-camera.png');
+const uiGraphScreenshotPath = path.join(rootDir, 'verification', packaged ? 'electron-ui-graph-packaged.png' : 'electron-ui-graph.png');
 let electronApp;
 let recoverySmokeOutputPath = '';
 let automaticRecoveryOutputPath = '';
@@ -105,6 +106,258 @@ try {
     const sceneCameraPanel = document.querySelector('#sceneCamerasPanel');
     const sceneCameraRows = document.querySelectorAll('.scene-camera-row').length;
     const sceneCameraEnabled = document.querySelectorAll('.scene-camera-row.enabled').length;
+    const qualityMode = document.querySelector('#qualityMode');
+    const qualityStatus = document.querySelector('#qualityStatus');
+    const graphTab = document.querySelector('[data-workspace-mode="graph"]');
+    const layoutTab = document.querySelector('[data-workspace-mode="layout"]');
+    const feedbackCreatorInputs = {
+      strength: document.querySelector('#feedbackStrength'),
+      turbulence: document.querySelector('#feedbackTurbulence'),
+      drag: document.querySelector('#feedbackDrag')
+    };
+    document.querySelector('[data-property-tab="dissolve"]')?.click();
+    feedbackCreatorInputs.strength.value = '1.1';
+    feedbackCreatorInputs.turbulence.value = '1.3';
+    feedbackCreatorInputs.drag.value = '0.9';
+    Object.values(feedbackCreatorInputs).forEach((control) => {
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const creatorFeedbackGraph = window.particleStudio.getOperatorGraph();
+    const creatorFeedbackParams = creatorFeedbackGraph.nodes
+      .find((node) => node.type === 'simulation.feedback-particles')?.params || {};
+    const creatorForceParams = creatorFeedbackGraph.nodes
+      .find((node) => node.type === 'simulation.force-field')?.params || {};
+    const feedbackCreatorControls = {
+      visible: Object.values(feedbackCreatorInputs).every((control) => Boolean(control?.offsetParent)),
+      enabled: creatorFeedbackParams.enabled !== false,
+      strength: creatorFeedbackParams.strength,
+      turbulence: creatorForceParams.turbulence,
+      drag: creatorFeedbackParams.drag
+    };
+    const flowStyleCards = [...document.querySelectorAll('[data-flow-style]')].map((button) => ({
+      style: button.dataset.flowStyle,
+      active: button.classList.contains('is-active'),
+      pressed: button.getAttribute('aria-pressed')
+    }));
+    const flowMotionStatus = document.querySelector('#flowMotionStatus')?.textContent || '';
+    graphTab?.click();
+    const graphWorkspace = document.querySelector('#operatorGraphWorkspace');
+    const graphWorkspaceOpened = Boolean(graphWorkspace && !graphWorkspace.hidden);
+    const graphNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+    const graphStatus = graphWorkspace?.querySelector('#operatorGraphStatus')?.textContent || '';
+    const graphViewport = graphWorkspace?.querySelector('.operator-graph-viewport');
+    const modelNodeBeforeDrag = window.particleStudio.getOperatorGraph().nodes.find((node) => node.id === 'model-input');
+    const modelNodeCard = graphWorkspace?.querySelector('.operator-node[data-node-id="model-input"]');
+    if (modelNodeCard) {
+      const rect = modelNodeCard.getBoundingClientRect();
+      modelNodeCard.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        pointerId: 71,
+        clientX: rect.left + rect.width * 0.5,
+        clientY: rect.top + rect.height - 12
+      }));
+      window.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true,
+        buttons: 1,
+        pointerId: 71,
+        clientX: rect.left + rect.width * 0.5 + 48,
+        clientY: rect.top + rect.height + 20
+      }));
+      window.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        button: 0,
+        pointerId: 71,
+        clientX: rect.left + rect.width * 0.5 + 48,
+        clientY: rect.top + rect.height + 20
+      }));
+    }
+    const modelNodeAfterDrag = window.particleStudio.getOperatorGraph().nodes.find((node) => node.id === 'model-input');
+    if (graphViewport) graphViewport.scrollLeft = 360;
+    const panNodeCard = graphWorkspace?.querySelector('.operator-node[data-node-id="particle-render"]');
+    const panBefore = graphViewport?.scrollLeft || 0;
+    if (panNodeCard) {
+      const rect = panNodeCard.getBoundingClientRect();
+      panNodeCard.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 1,
+        buttons: 4,
+        pointerId: 72,
+        clientX: rect.left + rect.width * 0.5,
+        clientY: rect.top + 18
+      }));
+      window.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true,
+        buttons: 4,
+        pointerId: 72,
+        clientX: rect.left + rect.width * 0.5 - 64,
+        clientY: rect.top + 18
+      }));
+      window.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        button: 1,
+        pointerId: 72,
+        clientX: rect.left + rect.width * 0.5 - 64,
+        clientY: rect.top + 18
+      }));
+    }
+    const graphInteraction = {
+      nodeDeltaX: Number(modelNodeAfterDrag?.position?.x || 0) - Number(modelNodeBeforeDrag?.position?.x || 0),
+      nodeDeltaY: Number(modelNodeAfterDrag?.position?.y || 0) - Number(modelNodeBeforeDrag?.position?.y || 0),
+      nodeSelected: graphWorkspace?.querySelector('.operator-node[data-node-id="model-input"]')?.classList.contains('selected'),
+      panDeltaX: (graphViewport?.scrollLeft || 0) - panBefore,
+      panningEnded: !graphViewport?.classList.contains('panning')
+    };
+
+    const nodeTypeSelect = graphWorkspace?.querySelector('#operatorGraphNodeType');
+    const simulationNodeOptions = [...(nodeTypeSelect?.options || [])].map((option) => option.value);
+    const localizedNodeOptions = [...(nodeTypeSelect?.options || [])].map((option) => option.textContent || '');
+    const localizedNodeGroups = [...(nodeTypeSelect?.querySelectorAll('optgroup') || [])].map((group) => group.label || '');
+    if (nodeTypeSelect) nodeTypeSelect.value = 'simulation.emitter';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedEmitterNode = window.particleStudio.getOperatorGraph().nodes.at(-1);
+    const emitterDefaults = structuredClone(addedEmitterNode?.params || {});
+    const emitterParamKeys = [...(graphWorkspace?.querySelectorAll('[data-param-key]') || [])]
+      .map((input) => input.dataset.paramKey);
+    const emitterBypassVisible = !graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    if (nodeTypeSelect) nodeTypeSelect.value = 'simulation.birth-life';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedBirthLifeNode = window.particleStudio.getOperatorGraph().nodes.at(-1);
+    const birthLifeDefaults = structuredClone(addedBirthLifeNode?.params || {});
+    const birthLifeParamKeys = [...(graphWorkspace?.querySelectorAll('[data-param-key]') || [])]
+      .map((input) => input.dataset.paramKey);
+    const birthLifeBypassVisible = !graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    if (nodeTypeSelect) nodeTypeSelect.value = 'simulation.attractor';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedAttractorNode = window.particleStudio.getOperatorGraph().nodes.at(-1);
+    const attractorDefaults = structuredClone(addedAttractorNode?.params || {});
+    const attractorParamKeys = [...(graphWorkspace?.querySelectorAll('[data-param-key]') || [])]
+      .map((input) => input.dataset.paramKey);
+    const attractorBypassVisible = !graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    if (nodeTypeSelect) nodeTypeSelect.value = 'simulation.collision-plane';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedCollisionNode = window.particleStudio.getOperatorGraph().nodes.at(-1);
+    const collisionDefaults = structuredClone(addedCollisionNode?.params || {});
+    const collisionParamKeys = [...(graphWorkspace?.querySelectorAll('[data-param-key]') || [])]
+      .map((input) => input.dataset.paramKey);
+    const collisionBypassVisible = !graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    if (nodeTypeSelect) nodeTypeSelect.value = 'simulation.trail';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedTrailNode = window.particleStudio.getOperatorGraph().nodes.at(-1);
+    const trailDefaults = structuredClone(addedTrailNode?.params || {});
+    const trailParamKeys = [...(graphWorkspace?.querySelectorAll('[data-param-key]') || [])]
+      .map((input) => input.dataset.paramKey);
+    const trailBypassVisible = !graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    if (nodeTypeSelect) nodeTypeSelect.value = 'post.glow';
+    graphWorkspace?.querySelector('#operatorGraphAddNode')?.click();
+    const addedNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+    const addedNodeId = window.particleStudio.getOperatorGraph().nodes.at(-1)?.id || '';
+    const glowRadiusInput = graphWorkspace?.querySelector('[data-param-key="glowRadius"]');
+    if (glowRadiusInput) {
+      glowRadiusInput.value = '44';
+      glowRadiusInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const localizedGraphUi = {
+      nodeOptions: localizedNodeOptions,
+      nodeGroups: localizedNodeGroups,
+      glowNodeLabel: graphWorkspace?.querySelector(`.operator-node[data-node-id="${addedNodeId}"] .operator-node-header strong`)?.textContent || '',
+      glowRadiusLabel: graphWorkspace?.querySelector('[data-param-key="glowRadius"]')?.closest('.operator-param-editor')?.querySelector('span')?.textContent || '',
+      portLabels: [...(graphWorkspace?.querySelectorAll('.operator-port-label') || [])].map((item) => item.textContent || ''),
+      portTypes: [...(graphWorkspace?.querySelectorAll('.operator-port-type') || [])].map((item) => item.textContent || '')
+    };
+    const addedGlowRadius = window.particleStudio.getOperatorGraph().nodes
+      .find((node) => node.id === addedNodeId)?.params?.glowRadius;
+    graphWorkspace?.querySelector('#operatorGraphDuplicateNode')?.click();
+    const duplicatedNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+    graphWorkspace?.querySelector('#operatorGraphUndo')?.click();
+    const undoNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+    graphWorkspace?.querySelector('#operatorGraphRedo')?.click();
+    const redoNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+    const redoNodeId = window.particleStudio.getOperatorGraph().nodes.at(-1)?.id;
+    graphWorkspace?.querySelector(`.operator-node[data-node-id="${redoNodeId}"]`)?.click();
+    graphWorkspace?.querySelector('#operatorGraphDeleteNode')?.click();
+    const deletedNodeCount = graphWorkspace?.querySelectorAll('.operator-node').length || 0;
+
+    const renderOutput = graphWorkspace?.querySelector(
+      '.operator-node[data-node-id="particle-render"] .operator-port-dot.output[data-port-id="color"]'
+    );
+    if (renderOutput) {
+      const rect = renderOutput.getBoundingClientRect();
+      renderOutput.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerId: 77,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2
+      }));
+      graphWorkspace?.querySelector(
+        '.operator-node[data-node-id="viewport-output"] .operator-port-dot.input[data-port-id="color"]'
+      )?.click();
+    }
+    const rewiredGraph = window.particleStudio.getOperatorGraph();
+    const viewportInputEdge = rewiredGraph.edges.find((edge) => edge.to.node === 'viewport-output');
+    const directViewportConnection = viewportInputEdge?.from?.node === 'particle-render';
+    window.particleStudio.renderFrame(0, undefined, 0);
+    const glowDemandSkipped = !window.particleStudio.getOperatorRuntimeStats().demandedNodeIds?.includes('multi-glow');
+    graphWorkspace?.querySelector('#operatorGraphUndo')?.click();
+    const undoRestoredDofConnection = window.particleStudio.getOperatorGraph().edges
+      .some((edge) => edge.from.node === 'viewport-dof' && edge.to.node === 'viewport-output');
+
+    const graphEditor = {
+      simulationNodeOptions,
+      emitterDefaults,
+      emitterParamKeys,
+      emitterBypassVisible,
+      birthLifeDefaults,
+      birthLifeParamKeys,
+      birthLifeBypassVisible,
+      attractorDefaults,
+      attractorParamKeys,
+      attractorBypassVisible,
+      collisionDefaults,
+      collisionParamKeys,
+      collisionBypassVisible,
+      trailDefaults,
+      trailParamKeys,
+      trailBypassVisible,
+      addedNodeCount,
+      addedNodeId,
+      addedGlowRadius,
+      duplicatedNodeCount,
+      undoNodeCount,
+      redoNodeCount,
+      deletedNodeCount,
+      directViewportConnection,
+      glowDemandSkipped,
+      undoRestoredDofConnection
+    };
+    graphWorkspace?.querySelector('#operatorGraphSync')?.click();
+    const feedbackNode = graphWorkspace?.querySelector('[data-node-type="simulation.feedback-particles"]');
+    feedbackNode?.click();
+    const feedbackResetBefore = Number(window.particleStudio.getOperatorGraph().nodes
+      .find((node) => node.type === 'simulation.feedback-particles')?.params?.resetVersion || 0);
+    graphWorkspace?.querySelector('#operatorGraphResetFeedback')?.click();
+    const feedbackResetAfter = Number(window.particleStudio.getOperatorGraph().nodes
+      .find((node) => node.type === 'simulation.feedback-particles')?.params?.resetVersion || 0);
+    const feedbackResetButtonVisible = !graphWorkspace?.querySelector('#operatorGraphResetFeedback')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphSync')?.click();
+    const deepGlowNode = graphWorkspace?.querySelector('[data-node-type="post.glow"]');
+    deepGlowNode?.click();
+    graphWorkspace?.querySelector('#operatorGraphPreviewExecution')?.click();
+    const graphExecutionStatus = graphWorkspace?.querySelector('#operatorGraphStatus')?.textContent || '';
+    const graphInspectorVisible = !graphWorkspace?.querySelector('.operator-graph-inspector-content')?.hidden;
+    graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.click();
+    const graphBypassActive = graphWorkspace?.querySelector('#operatorGraphToggleBypass')?.textContent === '取消旁路';
+    const graphBypassMode = window.particleStudio.getOperatorGraph().metadata.mode;
+    graphWorkspace?.querySelector('#operatorGraphSync')?.click();
+    layoutTab?.click();
+    const graphWorkspaceClosed = Boolean(graphWorkspace?.hidden);
     const videoKeyButtons = document.querySelectorAll('.video-keyframe-dot, .video-transform-key').length;
     const frameTicks = [...document.querySelectorAll('.timeline-frame-tick')].map((item) => item.textContent.trim()).filter(Boolean);
     const timelineValue = document.querySelector('#timelineValue')?.textContent || '';
@@ -142,6 +395,26 @@ try {
       sceneCameraPanel: Boolean(sceneCameraPanel),
       sceneCameraRows,
       sceneCameraEnabled,
+      qualityMode: qualityMode?.value || '',
+      qualityOptions: qualityMode?.options?.length || 0,
+      qualityStatus: qualityStatus?.textContent || '',
+      graphWorkspaceOpened,
+      graphWorkspaceClosed,
+      graphNodeCount,
+      graphStatus,
+      graphInteraction,
+      localizedGraphUi,
+      graphEditor,
+      graphExecutionStatus,
+      graphInspectorVisible,
+      graphBypassActive,
+      graphBypassMode,
+      feedbackResetBefore,
+      feedbackResetAfter,
+      feedbackResetButtonVisible,
+      feedbackCreatorControls,
+      flowStyleCards,
+      flowMotionStatus,
       videoKeyButtons
     };
   });
@@ -170,6 +443,81 @@ try {
     !uiLayout.sceneCameraPanel ||
     uiLayout.sceneCameraRows < 1 ||
     uiLayout.sceneCameraEnabled !== 1 ||
+    uiLayout.qualityOptions !== 4 ||
+    !uiLayout.qualityStatus.includes('Glow') ||
+    !uiLayout.graphWorkspaceOpened ||
+    !uiLayout.graphWorkspaceClosed ||
+    uiLayout.graphNodeCount !== 13 ||
+    !uiLayout.graphStatus.includes('有效') ||
+    !uiLayout.graphStatus.includes('资源池') ||
+    !uiLayout.graphStatus.includes('存活资源') ||
+    !uiLayout.graphExecutionStatus.includes('执行 3 个节点') ||
+    !uiLayout.graphInspectorVisible ||
+    uiLayout.graphInteraction?.nodeDeltaX !== 48 ||
+    uiLayout.graphInteraction?.nodeDeltaY !== 32 ||
+    !uiLayout.graphInteraction?.nodeSelected ||
+    uiLayout.graphInteraction?.panDeltaX < 50 ||
+    !uiLayout.graphInteraction?.panningEnded ||
+    !uiLayout.localizedGraphUi?.nodeOptions?.includes('多层深度辉光') ||
+    !uiLayout.localizedGraphUi?.nodeGroups?.includes('模拟') ||
+    uiLayout.localizedGraphUi?.glowNodeLabel !== '多层深度辉光' ||
+    uiLayout.localizedGraphUi?.glowRadiusLabel !== '辉光半径' ||
+    !uiLayout.localizedGraphUi?.portLabels?.includes('粒子点') ||
+    !uiLayout.localizedGraphUi?.portTypes?.includes('图像纹理') ||
+    uiLayout.graphEditor?.addedNodeCount !== 14 ||
+    !uiLayout.graphEditor?.simulationNodeOptions?.includes('simulation.emitter') ||
+    !uiLayout.graphEditor?.simulationNodeOptions?.includes('simulation.birth-life') ||
+    !uiLayout.graphEditor?.simulationNodeOptions?.includes('simulation.attractor') ||
+    !uiLayout.graphEditor?.simulationNodeOptions?.includes('simulation.collision-plane') ||
+    !uiLayout.graphEditor?.simulationNodeOptions?.includes('simulation.trail') ||
+    uiLayout.graphEditor?.emitterDefaults?.mode !== 'all' ||
+    uiLayout.graphEditor?.emitterDefaults?.rate !== 5000 ||
+    !uiLayout.graphEditor?.emitterParamKeys?.includes('burstCount') ||
+    !uiLayout.graphEditor?.emitterParamKeys?.includes('seed') ||
+    !uiLayout.graphEditor?.emitterBypassVisible ||
+    uiLayout.graphEditor?.birthLifeDefaults?.lifetimeMin !== 3.96 ||
+    uiLayout.graphEditor?.birthLifeDefaults?.lifetimeMax !== 7.04 ||
+    !uiLayout.graphEditor?.birthLifeParamKeys?.includes('respawn') ||
+    !uiLayout.graphEditor?.birthLifeParamKeys?.includes('fadeOut') ||
+    !uiLayout.graphEditor?.birthLifeBypassVisible ||
+    uiLayout.graphEditor?.attractorDefaults?.radius !== 4 ||
+    uiLayout.graphEditor?.attractorDefaults?.falloff !== 2 ||
+    !uiLayout.graphEditor?.attractorParamKeys?.includes('centerX') ||
+    !uiLayout.graphEditor?.attractorParamKeys?.includes('strength') ||
+    !uiLayout.graphEditor?.attractorBypassVisible ||
+    uiLayout.graphEditor?.collisionDefaults?.normalY !== 1 ||
+    uiLayout.graphEditor?.collisionDefaults?.restitution !== 0.45 ||
+    !uiLayout.graphEditor?.collisionParamKeys?.includes('offset') ||
+    !uiLayout.graphEditor?.collisionParamKeys?.includes('friction') ||
+    !uiLayout.graphEditor?.collisionBypassVisible ||
+    uiLayout.graphEditor?.trailDefaults?.samples !== 4 ||
+    uiLayout.graphEditor?.trailDefaults?.interval !== 0.04 ||
+    uiLayout.graphEditor?.trailDefaults?.opacity !== 0.38 ||
+    !uiLayout.graphEditor?.trailParamKeys?.includes('fade') ||
+    !uiLayout.graphEditor?.trailParamKeys?.includes('size') ||
+    !uiLayout.graphEditor?.trailBypassVisible ||
+    !uiLayout.graphEditor?.addedNodeId ||
+    uiLayout.graphEditor?.addedGlowRadius !== 44 ||
+    uiLayout.graphEditor?.duplicatedNodeCount !== 15 ||
+    uiLayout.graphEditor?.undoNodeCount !== 14 ||
+    uiLayout.graphEditor?.redoNodeCount !== 15 ||
+    uiLayout.graphEditor?.deletedNodeCount !== 14 ||
+    !uiLayout.graphEditor?.directViewportConnection ||
+    !uiLayout.graphEditor?.glowDemandSkipped ||
+    !uiLayout.graphEditor?.undoRestoredDofConnection ||
+    !uiLayout.graphBypassActive ||
+    uiLayout.graphBypassMode !== 'graph' ||
+    !uiLayout.feedbackResetButtonVisible ||
+    uiLayout.feedbackResetAfter !== uiLayout.feedbackResetBefore + 1 ||
+    uiLayout.feedbackCreatorControls?.visible ||
+    uiLayout.feedbackCreatorControls?.enabled ||
+    uiLayout.feedbackCreatorControls?.strength !== 1.1 ||
+    uiLayout.feedbackCreatorControls?.turbulence !== 1.3 ||
+    uiLayout.feedbackCreatorControls?.drag !== 0.9 ||
+    uiLayout.flowStyleCards?.length !== 3 ||
+    uiLayout.flowStyleCards?.filter((card) => card.active).length !== 1 ||
+    uiLayout.flowStyleCards?.find((card) => card.active)?.style !== 'fluid-ribbon' ||
+    uiLayout.flowMotionStatus !== '已静止' ||
     uiLayout.videoKeyButtons < 9
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);
@@ -248,8 +596,15 @@ try {
     const properties = document.querySelector('.workspace-properties-pane') || document.querySelector('.panel');
     properties.scrollTop = 0;
   });
+  await page.click('[data-workspace-mode="graph"]');
+  await page.click('[data-node-type="simulation.force-field"]');
+  await page.click('#operatorGraphPreviewExecution');
+  await page.screenshot({ path: uiGraphScreenshotPath, type: 'png' });
+  await page.click('[data-workspace-mode="layout"]');
   const result = await page.evaluate(async () => {
     const hasElectronBridge = Boolean(window.electronAPI?.exportMov);
+    const lowQuality = window.particleStudio.setQualityMode('low', { persist: false });
+    const highQuality = window.particleStudio.setQualityMode('high', { persist: false });
     const initialCamera = window.particleStudio.getCameraSettings();
     const camerasBefore = window.particleStudio.getSceneCameras();
     const addedCamera = window.particleStudio.addSceneCamera();
@@ -285,9 +640,15 @@ try {
       type: 'perspective',
       dofEnabled: true,
       aperture: 1.8,
-      focusDistance: 1.5
+      focusDistance: 1.5,
+      bokehScale: 3.2,
+      highlightGain: 1.1,
+      blades: 9,
+      roundness: 0.64
     });
+    const dofCameraSettings = window.particleStudio.getCameraSettings();
     const dofFrameBytes = window.particleStudio.renderFrame(0, undefined, 0).length;
+    const operatorRuntime = window.particleStudio.getOperatorRuntimeStats();
 
     window.particleStudio.setParameterKeyframes([]);
     window.particleStudio.setCameraKeyframes([]);
@@ -299,6 +660,7 @@ try {
     return {
       href: location.href,
       hasElectronBridge,
+      quality: { low: lowQuality, high: highQuality },
       initialCamera,
       camerasBefore: camerasBefore.items.length,
       camerasAfterAdd: camerasAfterAdd.items.length,
@@ -310,6 +672,8 @@ try {
       panoramaSize,
       panoramaBytes: panoramaFrame.length,
       dofFrameBytes,
+      dofCameraSettings,
+      operatorRuntime,
       undoDissolve: window.particleStudio.getOptions().dissolve,
       status: document.querySelector('#status')?.textContent || ''
     };
@@ -323,6 +687,57 @@ try {
   }
   if (result.dofFrameBytes < 1000) {
     throw new Error(`Depth-of-field frame failed: ${JSON.stringify(result)}`);
+  }
+  if (
+    Math.abs(result.dofCameraSettings?.bokehScale - 3.2) > 0.001 ||
+    Math.abs(result.dofCameraSettings?.highlightGain - 1.1) > 0.001 ||
+    result.dofCameraSettings?.blades !== 9 ||
+    Math.abs(result.dofCameraSettings?.roundness - 0.64) > 0.001
+  ) {
+    throw new Error(`Depth-of-field camera controls failed: ${JSON.stringify(result.dofCameraSettings)}`);
+  }
+  if (
+    result.operatorRuntime?.scope !== 'export-frame' ||
+    result.operatorRuntime?.error ||
+    !result.operatorRuntime?.executedNodeIds?.includes('viewport-output') ||
+    !result.operatorRuntime?.timings?.some((item) => item.nodeId === 'multi-glow') ||
+    result.operatorRuntime?.resources?.passCount !== 11 ||
+    result.operatorRuntime?.resources?.poolCount !== 1 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.entryCount !== 9 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.reuses !== 5 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.allocations !== 0 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.releases !== 5 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.peakActiveLeases !== 5 ||
+    result.operatorRuntime?.resources?.pools?.[0]?.activeLeaseCount !== 0 ||
+    result.operatorRuntime?.resources?.lifetime?.managedResourceCount !== 3 ||
+    result.operatorRuntime?.resources?.lifetime?.aliasPublications !== 1 ||
+    result.operatorRuntime?.resources?.lifetime?.releases !== 3 ||
+    result.operatorRuntime?.resources?.lifetime?.activeResourceCount !== 0 ||
+    !result.operatorRuntime?.resources?.resources?.some((item) => (
+      item.kind === 'points' && item.producerNodeId === 'flow-dissolve' && item.count > 0
+    )) ||
+    !result.operatorRuntime?.resources?.resources?.some((item) => item.kind === 'depth') ||
+    !result.operatorRuntime?.resources?.resources?.some((item) => (
+      item.metadata?.stage === 'depth-of-field' &&
+      item.metadata?.lensModel === 'thin-lens-signed-coc' &&
+      item.metadata?.samples === 48 &&
+      Math.abs(item.metadata?.bokehScale - 3.2) < 0.001 &&
+      Math.abs(item.metadata?.highlightGain - 1.1) < 0.001 &&
+      item.metadata?.blades === 9 &&
+      Math.abs(item.metadata?.roundness - 0.64) < 0.001 &&
+      item.metadata?.prefilterRadiusPixels > 0 &&
+      item.metadata?.resolveRadiusPixels >= 2
+    )) ||
+    result.operatorRuntime?.resources?.passes?.map((item) => item.type).join(',') !==
+      'geometry.particle-sampler,simulation.dissolve,simulation.force-field,simulation.return-force,simulation.emitter,simulation.birth-life,simulation.feedback-particles,render.particles,post.glow,post.depth-of-field,output.viewport'
+  ) {
+    throw new Error(`Operator runtime did not execute the Electron render frame: ${JSON.stringify(result.operatorRuntime)}`);
+  }
+  if (
+    result.quality.low.level !== 'low' || result.quality.low.profile.glowLayers !== 1 || result.quality.low.profile.dofSamples !== 12 ||
+    result.quality.high.level !== 'high' || result.quality.high.profile.glowLayers !== 3 || result.quality.high.profile.dofSamples !== 48
+  ) {
+    throw new Error(`Electron quality profiles failed: ${JSON.stringify(result.quality)}`);
   }
   if (
     result.camerasBefore < 1 ||
@@ -453,7 +868,14 @@ try {
 
   const projectResult = await page.evaluate(async () => {
     await window.particleStudio.setOptions({ dissolve: 0.37, spread: 1.23 }, true);
-    window.particleStudio.setCameraSettings({ displaySize: 1.75, focalLength: 70 });
+    window.particleStudio.setCameraSettings({
+      displaySize: 1.75,
+      focalLength: 70,
+      bokehScale: 3.4,
+      highlightGain: 1.3,
+      blades: 8,
+      roundness: 0.58
+    });
     window.particleStudio.setCameraPathMode('bezier');
     window.particleStudio.setCameraKeyframes([
       { id: 'project-camera', time: 0, position: [0, 0.7, 7.2], target: [0, 0, 0], handleOut: [0.5, 0.25, 0] }
@@ -462,6 +884,125 @@ try {
       { id: 'project-param', field: 'noise', time: 1, value: 0.64 }
     ]);
     window.particleStudio.setCameraTime(0, false);
+    const customGraph = window.particleStudio.getOperatorGraph();
+    customGraph.metadata = { ...customGraph.metadata, mode: 'graph', synchronized: false };
+    const customDissolveNode = customGraph.nodes.find((node) => node.type === 'simulation.dissolve');
+    customDissolveNode.params = {
+      ...customDissolveNode.params,
+      dissolve: 0.58,
+      speed: 1,
+      dissolveTurbulence: 1.4,
+      dissolveCurl: 1.8
+    };
+    const customForceNode = customGraph.nodes.find((node) => node.type === 'simulation.force-field');
+    customForceNode.params = {
+      ...customForceNode.params,
+      strength: 1.4,
+      forceX: 0.15,
+      forceY: 0.25,
+      forceZ: -0.05,
+      turbulence: 2.1,
+      curl: 1.3
+    };
+    const customReturnForceNode = customGraph.nodes.find((node) => node.type === 'simulation.return-force');
+    customReturnForceNode.params = { ...customReturnForceNode.params, strength: -0.35 };
+    const customEmitterNode = customGraph.nodes.find((node) => node.type === 'simulation.emitter');
+    customEmitterNode.params = {
+      ...customEmitterNode.params,
+      mode: 'continuous',
+      rate: 12000,
+      seed: 23,
+      speed: 0.6,
+      spread: 0.3
+    };
+    const customBirthLifeNode = customGraph.nodes.find((node) => node.type === 'simulation.birth-life');
+    customBirthLifeNode.params = {
+      ...customBirthLifeNode.params,
+      lifetimeMin: 1.5,
+      lifetimeMax: 4.5,
+      respawn: false,
+      fadeIn: 0.05,
+      fadeOut: 0.4
+    };
+    customGraph.nodes.push(
+      {
+        id: 'project-attractor',
+        type: 'simulation.attractor',
+        label: 'Project Attractor',
+        position: { x: 980, y: 260 },
+        params: {
+          enabled: true,
+          centerX: 0.6,
+          centerY: 0.2,
+          centerZ: -0.1,
+          strength: 2.4,
+          radius: 3.5,
+          falloff: 1.4
+        }
+      },
+      {
+        id: 'project-collision',
+        type: 'simulation.collision-plane',
+        label: 'Project Collision',
+        position: { x: 1200, y: 260 },
+        params: {
+          enabled: true,
+          normalX: 0,
+          normalY: 1,
+          normalZ: 0,
+          offset: -0.4,
+          restitution: 0.7,
+          friction: 0.22
+        }
+      },
+      {
+        id: 'project-trail',
+        type: 'simulation.trail',
+        label: 'Project Trail',
+        position: { x: 1420, y: 260 },
+        params: {
+          enabled: true,
+          samples: 5,
+          interval: 0.03,
+          opacity: 0.44,
+          fade: 1.8,
+          size: 0.66
+        }
+      }
+    );
+    customGraph.edges = customGraph.edges.filter((edge) => edge.id !== 'return-to-emitter');
+    customGraph.edges.push(
+      {
+        id: 'project-return-to-attractor',
+        from: { node: 'particle-return', port: 'points' },
+        to: { node: 'project-attractor', port: 'points' }
+      },
+      {
+        id: 'project-attractor-to-collision',
+        from: { node: 'project-attractor', port: 'points' },
+        to: { node: 'project-collision', port: 'points' }
+      },
+      {
+        id: 'project-collision-to-trail',
+        from: { node: 'project-collision', port: 'points' },
+        to: { node: 'project-trail', port: 'points' }
+      },
+      {
+        id: 'project-trail-to-emitter',
+        from: { node: 'project-trail', port: 'points' },
+        to: { node: 'particle-emitter', port: 'points' }
+      }
+    );
+    const customFeedbackNode = customGraph.nodes.find((node) => node.type === 'simulation.feedback-particles');
+    customFeedbackNode.params = {
+      ...customFeedbackNode.params,
+      enabled: true,
+      resetVersion: 7,
+      strength: 1.23,
+      turbulence: 0.2,
+      substeps: 4
+    };
+    window.particleStudio.setOperatorGraph(customGraph);
     const before = window.particleStudio.captureProject();
     const save = await window.electronAPI.saveProject({
       document: before,
@@ -478,6 +1019,22 @@ try {
     const opened = await window.electronAPI.openProject();
     await window.particleStudio.applyProject(opened.document);
     const after = window.particleStudio.captureProject();
+    window.particleStudio.renderFrame(0, undefined, 0);
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const restoredFrame = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const restoredRuntime = window.particleStudio.getOperatorRuntimeStats();
+    const restoredDissolveNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.dissolve');
+    const restoredForceNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.force-field');
+    const restoredReturnForceNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.return-force');
+    const restoredEmitterNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.emitter');
+    const restoredBirthLifeNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.birth-life');
+    const restoredAttractorNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.attractor');
+    const restoredCollisionNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.collision-plane');
+    const restoredTrailNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.trail');
+    const restoredFeedbackNode = after.operatorGraph?.nodes?.find((node) => node.type === 'simulation.feedback-particles');
+    const restoredFeedbackResource = restoredRuntime.resources?.resources?.find((resource) => (
+      resource.producerNodeId === 'particle-feedback' && resource.kind === 'points'
+    ));
     return {
       save: { ok: save.ok, name: save.name, bytes: save.bytes },
       opened: { ok: opened.ok, name: opened.name },
@@ -486,10 +1043,66 @@ try {
       spread: after.scene.options.spread,
       displaySize: after.scene.cameraSettings.displaySize,
       focalLength: after.scene.cameraSettings.focalLength,
+      bokehScale: after.scene.cameraSettings.bokehScale,
+      highlightGain: after.scene.cameraSettings.highlightGain,
+      blades: after.scene.cameraSettings.blades,
+      roundness: after.scene.cameraSettings.roundness,
       pathMode: after.scene.cameraAnimation.pathMode,
       handleOut: after.scene.cameraKeyframes[0]?.handleOut,
       cameraKeyframes: after.scene.cameraKeyframes.length,
-      parameterKeyframes: after.scene.parameterKeyframes.length
+      parameterKeyframes: after.scene.parameterKeyframes.length,
+      operatorGraph: {
+        schemaVersion: after.operatorGraph?.schemaVersion,
+        nodes: after.operatorGraph?.nodes?.length || 0,
+        edges: after.operatorGraph?.edges?.length || 0,
+        valid: window.particleStudio.validateOperatorGraph(after.operatorGraph).valid,
+        executionTail: window.particleStudio.getOperatorExecutionPlan().order.at(-1),
+        mode: after.operatorGraph?.metadata?.mode,
+        dissolve: restoredDissolveNode?.params?.dissolve,
+        turbulence: restoredDissolveNode?.params?.dissolveTurbulence,
+        curl: restoredDissolveNode?.params?.dissolveCurl,
+        forceStrength: restoredForceNode?.params?.strength,
+        forceTurbulence: restoredForceNode?.params?.turbulence,
+        forceY: restoredForceNode?.params?.forceY,
+        returnStrength: restoredReturnForceNode?.params?.strength,
+        emitterMode: restoredEmitterNode?.params?.mode,
+        emitterRate: restoredEmitterNode?.params?.rate,
+        emitterSeed: restoredEmitterNode?.params?.seed,
+        emitterSpeed: restoredEmitterNode?.params?.speed,
+        lifetimeMin: restoredBirthLifeNode?.params?.lifetimeMin,
+        lifetimeMax: restoredBirthLifeNode?.params?.lifetimeMax,
+        respawn: restoredBirthLifeNode?.params?.respawn,
+        attractorStrength: restoredAttractorNode?.params?.strength,
+        attractorRadius: restoredAttractorNode?.params?.radius,
+        collisionOffset: restoredCollisionNode?.params?.offset,
+        collisionRestitution: restoredCollisionNode?.params?.restitution,
+        trailSamples: restoredTrailNode?.params?.samples,
+        trailInterval: restoredTrailNode?.params?.interval,
+        trailOpacity: restoredTrailNode?.params?.opacity,
+        feedbackResetVersion: restoredFeedbackNode?.params?.resetVersion,
+        feedbackStrength: restoredFeedbackNode?.params?.strength,
+        feedbackTurbulence: restoredFeedbackNode?.params?.turbulence,
+        feedbackSubsteps: restoredFeedbackNode?.params?.substeps,
+        effectiveModifierCount: restoredFeedbackResource?.metadata?.simulationModifierCount,
+        effectiveAttractorCount: restoredFeedbackResource?.metadata?.attractorCount,
+        effectiveCollisionPlaneCount: restoredFeedbackResource?.metadata?.collisionPlaneCount,
+        effectiveTrailHistorySamples: restoredFeedbackResource?.metadata?.trailHistorySamples,
+        effectiveTrailHistoryCapacity: restoredFeedbackResource?.metadata?.trailHistoryCapacity,
+        effectiveTrailByteLength: restoredFeedbackResource?.metadata?.trailByteLength,
+        stateSpace: restoredFeedbackResource?.metadata?.stateSpace,
+        lifecycleTimeModel: restoredFeedbackResource?.metadata?.lifecycleTimeModel,
+        lifecycleSeekDeterministic: restoredFeedbackResource?.metadata?.lifecycleSeekDeterministic,
+        effectiveEmitterMode: restoredFeedbackResource?.metadata?.emitterMode,
+        effectiveEmitterNodeId: restoredFeedbackResource?.metadata?.emitterNodeId,
+        effectiveBirthLifeNodeId: restoredFeedbackResource?.metadata?.birthLifeNodeId,
+        effectiveForceY: restoredFeedbackResource?.metadata?.effectiveForce?.[1],
+        effectiveAttraction: restoredFeedbackResource?.metadata?.effectiveAttraction,
+        effectiveTurbulence: restoredFeedbackResource?.metadata?.effectiveTurbulence
+      },
+      restoredFrameBytes: restoredFrame.length,
+      restoredPointDissolve: restoredRuntime.resources?.resources?.find((resource) => (
+        resource.producerNodeId === 'flow-dissolve' && resource.kind === 'points'
+      ))?.metadata?.dissolve
     };
   });
   const savedProject = JSON.parse(await readFile(projectSmokePath, 'utf8'));
@@ -502,10 +1115,74 @@ try {
     Math.abs(projectResult.spread - 1.23) > 0.01 ||
     Math.abs(projectResult.displaySize - 1.75) > 0.01 ||
     Math.abs(projectResult.focalLength - 70) > 0.01 ||
+    Math.abs(projectResult.bokehScale - 3.4) > 0.001 ||
+    Math.abs(projectResult.highlightGain - 1.3) > 0.001 ||
+    projectResult.blades !== 8 ||
+    Math.abs(projectResult.roundness - 0.58) > 0.001 ||
     projectResult.pathMode !== 'bezier' ||
     Math.abs(Number(projectResult.handleOut?.[0] || 0) - 0.5) > 0.001 ||
     projectResult.cameraKeyframes !== 1 ||
     projectResult.parameterKeyframes !== 1 ||
+    projectResult.operatorGraph.schemaVersion !== 1 ||
+    projectResult.operatorGraph.nodes !== 16 ||
+    projectResult.operatorGraph.edges !== 17 ||
+    !projectResult.operatorGraph.valid ||
+    projectResult.operatorGraph.executionTail !== 'viewport-output' ||
+    projectResult.operatorGraph.mode !== 'graph' ||
+    Math.abs(projectResult.operatorGraph.dissolve - 0.58) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.turbulence - 1.4) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.curl - 1.8) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.forceStrength - 1.4) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.forceTurbulence - 2.1) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.forceY - 0.25) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.returnStrength + 0.35) > 0.001 ||
+    projectResult.operatorGraph.emitterMode !== 'continuous' ||
+    projectResult.operatorGraph.emitterRate !== 12000 ||
+    projectResult.operatorGraph.emitterSeed !== 23 ||
+    Math.abs(projectResult.operatorGraph.emitterSpeed - 0.6) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.lifetimeMin - 1.5) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.lifetimeMax - 4.5) > 0.001 ||
+    projectResult.operatorGraph.respawn !== false ||
+    Math.abs(projectResult.operatorGraph.attractorStrength - 2.4) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.attractorRadius - 3.5) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.collisionOffset + 0.4) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.collisionRestitution - 0.7) > 0.001 ||
+    projectResult.operatorGraph.trailSamples !== 5 ||
+    Math.abs(projectResult.operatorGraph.trailInterval - 0.03) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.trailOpacity - 0.44) > 0.001 ||
+    projectResult.operatorGraph.feedbackResetVersion !== 7 ||
+    Math.abs(projectResult.operatorGraph.feedbackStrength - 1.23) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.feedbackTurbulence - 0.2) > 0.001 ||
+    projectResult.operatorGraph.feedbackSubsteps !== 4 ||
+    projectResult.operatorGraph.effectiveModifierCount !== 7 ||
+    projectResult.operatorGraph.effectiveAttractorCount !== 1 ||
+    projectResult.operatorGraph.effectiveCollisionPlaneCount !== 1 ||
+    projectResult.operatorGraph.effectiveTrailHistorySamples !== 5 ||
+    projectResult.operatorGraph.effectiveTrailHistoryCapacity !== 5 ||
+    projectResult.operatorGraph.effectiveTrailByteLength <= 0 ||
+    projectResult.operatorGraph.stateSpace !== 'model-local-position' ||
+    projectResult.operatorGraph.lifecycleTimeModel !== 'absolute-cycle-v1' ||
+    projectResult.operatorGraph.lifecycleSeekDeterministic !== true ||
+    projectResult.operatorGraph.effectiveEmitterMode !== 'continuous' ||
+    projectResult.operatorGraph.effectiveEmitterNodeId !== 'particle-emitter' ||
+    projectResult.operatorGraph.effectiveBirthLifeNodeId !== 'particle-birth-life' ||
+    Math.abs(projectResult.operatorGraph.effectiveForceY - 0.35) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.effectiveAttraction + 0.35) > 0.001 ||
+    Math.abs(projectResult.operatorGraph.effectiveTurbulence - 3.14) > 0.001 ||
+    Math.abs(projectResult.restoredPointDissolve - 0.58) > 0.001 ||
+    projectResult.restoredFrameBytes < 1000 ||
+    savedProject.operatorGraph?.nodes?.length !== 16 ||
+    savedProject.operatorGraph?.edges?.length !== 17 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.dissolve')?.params?.dissolve - 0.58) > 0.001 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.force-field')?.params?.strength - 1.4) > 0.001 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.return-force')?.params?.strength + 0.35) > 0.001 ||
+    savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.emitter')?.params?.mode !== 'continuous' ||
+    savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.emitter')?.params?.rate !== 12000 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.birth-life')?.params?.lifetimeMin - 1.5) > 0.001 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.attractor')?.params?.strength - 2.4) > 0.001 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.collision-plane')?.params?.offset + 0.4) > 0.001 ||
+    savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.trail')?.params?.samples !== 5 ||
+    Math.abs(savedProject.operatorGraph?.nodes?.find((node) => node.type === 'simulation.feedback-particles')?.params?.strength - 1.23) > 0.001 ||
     !embeddedModel
   ) {
     throw new Error(`Project save/open roundtrip failed: ${JSON.stringify({ projectResult, embeddedModel: Boolean(embeddedModel) })}`);
@@ -820,6 +1497,7 @@ try {
     uiLayout,
     uiScreenshotPath,
     uiCameraScreenshotPath,
+    uiGraphScreenshotPath,
     result,
     errors
   }, null, 2));

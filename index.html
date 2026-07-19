@@ -228,6 +228,23 @@
           </div>
         </details>
 
+        <details class="modifier-section" id="qualityPanel" open>
+          <summary>实时质量</summary>
+          <div class="modifier-body quality-panel-body">
+            <label class="quality-mode-row">
+              <span>质量档位</span>
+              <select id="qualityMode" aria-label="实时质量档位">
+                <option value="auto" selected>Auto · 自动调节</option>
+                <option value="low">Low · 流畅</option>
+                <option value="medium">Medium · 均衡</option>
+                <option value="high">High · 影视</option>
+              </select>
+            </label>
+            <output id="qualityStatus" class="quality-status" aria-live="polite">正在评估显卡与帧率…</output>
+            <p class="quality-hint">控制视口 DPR、辉光层数、景深采样与相机预览频率，不改动工程粒子参数。</p>
+          </div>
+        </details>
+
         <details class="modifier-section particle-mode-only" open>
           <summary>粒子外观</summary>
           <div class="control-grid">
@@ -286,39 +303,90 @@
         </details>
 
         <details class="modifier-section particle-mode-only" open>
-          <summary>噪波 / 运动</summary>
+          <summary class="flow-section-summary">
+            <span>一键粒子流</span>
+            <span id="flowMotionStatus" class="flow-motion-status is-still">已静止</span>
+          </summary>
+          <div class="flow-style-cards" role="group" aria-label="一键粒子流风格">
+            <button class="flow-style-card is-active" type="button" data-flow-style="fluid-ribbon" aria-pressed="true">
+              <strong>流体丝带</strong>
+              <span>连续束状流线</span>
+            </button>
+            <button class="flow-style-card" type="button" data-flow-style="weathered-dust" aria-pressed="false">
+              <strong>风化烟尘</strong>
+              <span>柔边雾化剥落</span>
+            </button>
+            <button class="flow-style-card" type="button" data-flow-style="energy-burst" aria-pressed="false">
+              <strong>能量爆散</strong>
+              <span>强方向冲击流</span>
+            </button>
+          </div>
           <div class="control-grid">
+            <label class="flow-style-select-row">
+              <span>一键风格</span>
+              <select id="flowStyle">
+                <option value="fluid-ribbon" selected>流体丝带</option>
+                <option value="weathered-dust">风化烟尘</option>
+                <option value="energy-burst">能量爆散</option>
+              </select>
+            </label>
             <label>
-              <span>扩散</span>
+              <span>扩散强度</span>
               <input id="spread" type="range" min="0" max="4" step="0.01" value="0" />
               <input id="spreadValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
             </label>
             <label>
-              <span>噪波强度</span>
-              <input id="noise" type="range" min="0" max="3" step="0.01" value="0" />
-              <input id="noiseValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+              <span>消散进度</span>
+              <input id="dissolve" type="range" min="0" max="1" step="0.01" value="0" />
+              <input id="dissolveValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
             </label>
             <label>
-              <span>噪波大小</span>
-              <input id="noiseScale" type="range" min="0.15" max="8" step="0.01" value="1.8" />
-              <input id="noiseScaleValue" class="value-input" type="number" min="0.01" step="0.01" value="1.8" />
-            </label>
-            <label>
-              <span>涡旋</span>
-              <input id="swirl" type="range" min="-3" max="3" step="0.01" value="0" />
-              <input id="swirlValue" class="value-input" type="number" step="0.01" value="0.00" />
-            </label>
-            <label>
-              <span>速度</span>
+              <span>流动速度</span>
               <input id="speed" type="range" min="0" max="3" step="0.01" value="0" />
               <input id="speedValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
             </label>
+            <label>
+              <span>流动方向</span>
+              <select id="flowDirectionPreset">
+                <option value="auto" selected>自动</option>
+                <option value="left">向左</option>
+                <option value="right">向右</option>
+                <option value="up">向上</option>
+                <option value="down">向下</option>
+                <option value="forward">向前</option>
+                <option value="backward">向后</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <label>
+              <span>质感：丝滑 — 细碎</span>
+              <input id="flowCharacter" type="range" min="0" max="1" step="0.01" value="0.28" />
+              <input id="flowCharacterValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.28" />
+            </label>
           </div>
+          <button id="resetFlowStyle" class="secondary full-width" type="button">恢复当前风格默认值</button>
+          <p id="flowStyleDescription" class="hint">连续束状流线，适合产品、角色和有机形体的丝滑消散。</p>
+          <p class="hint flow-selection-hint">选择模型只切换编辑对象，不会启动或重置动画。只有“流动速度”会推进形变时间，0 表示完全静止。</p>
         </details>
 
-        <details class="modifier-section particle-mode-only" open>
-          <summary>生长</summary>
+        <details class="modifier-section particle-mode-only">
+          <summary>高级塑形</summary>
           <div class="control-grid">
+            <label>
+              <span>噪波强度</span>
+              <input id="noise" type="range" min="0" max="3" step="0.01" value="0.24" />
+              <input id="noiseValue" class="value-input" type="number" min="0" step="0.01" value="0.24" />
+            </label>
+            <label>
+              <span>噪波大小</span>
+              <input id="noiseScale" type="range" min="0.15" max="8" step="0.01" value="2.2" />
+              <input id="noiseScaleValue" class="value-input" type="number" min="0.01" step="0.01" value="2.20" />
+            </label>
+            <label>
+              <span>涡旋</span>
+              <input id="swirl" type="range" min="-3" max="3" step="0.01" value="0.16" />
+              <input id="swirlValue" class="value-input" type="number" step="0.01" value="0.16" />
+            </label>
             <label>
               <span>生长进度</span>
               <input id="growth" type="range" min="0" max="1" step="0.01" value="1" />
@@ -341,59 +409,54 @@
             </label>
             <label>
               <span>花瓣流体</span>
-              <input id="organicFlow" type="range" min="0" max="1" step="0.01" value="0" />
-              <input id="organicFlowValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+              <input id="organicFlow" type="range" min="0" max="1" step="0.01" value="0.72" />
+              <input id="organicFlowValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.72" />
             </label>
             <label>
               <span>边缘撕裂</span>
-              <input id="edgeBreak" type="range" min="0" max="1" step="0.01" value="0" />
-              <input id="edgeBreakValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
+              <input id="edgeBreak" type="range" min="0" max="1" step="0.01" value="0.28" />
+              <input id="edgeBreakValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.28" />
             </label>
             <label>
               <span>流丝长度</span>
-              <input id="filamentLength" type="range" min="0" max="4" step="0.01" value="0" />
-              <input id="filamentLengthValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+              <input id="filamentLength" type="range" min="0" max="4" step="0.01" value="1.7" />
+              <input id="filamentLengthValue" class="value-input" type="number" min="0" step="0.01" value="1.70" />
             </label>
             <label>
               <span>卷曲强度</span>
-              <input id="filamentCurl" type="range" min="0" max="3" step="0.01" value="0" />
-              <input id="filamentCurlValue" class="value-input" type="number" min="0" step="0.01" value="0.00" />
+              <input id="filamentCurl" type="range" min="0" max="3" step="0.01" value="1.4" />
+              <input id="filamentCurlValue" class="value-input" type="number" min="0" step="0.01" value="1.40" />
             </label>
           </div>
         </details>
 
-        <details class="modifier-section particle-mode-only" open>
-          <summary>粒子消散</summary>
+        <details class="modifier-section particle-mode-only">
+          <summary>高级消散</summary>
           <div class="control-grid">
             <label>
-              <span>消散进度</span>
-              <input id="dissolve" type="range" min="0" max="1" step="0.01" value="0" />
-              <input id="dissolveValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.00" />
-            </label>
-            <label>
               <span>扩散距离</span>
-              <input id="dissolveSpread" type="range" min="0" max="6" step="0.01" value="1.55" />
-              <input id="dissolveSpreadValue" class="value-input" type="number" min="0" step="0.01" value="1.55" />
+              <input id="dissolveSpread" type="range" min="0" max="6" step="0.01" value="1.8" />
+              <input id="dissolveSpreadValue" class="value-input" type="number" min="0" step="0.01" value="1.80" />
             </label>
             <label>
               <span>边缘宽度</span>
-              <input id="dissolveEdgeWidth" type="range" min="0.02" max="0.6" step="0.01" value="0.22" />
-              <input id="dissolveEdgeWidthValue" class="value-input" type="number" min="0.01" max="1" step="0.01" value="0.22" />
+              <input id="dissolveEdgeWidth" type="range" min="0.02" max="0.6" step="0.01" value="0.24" />
+              <input id="dissolveEdgeWidthValue" class="value-input" type="number" min="0.01" max="1" step="0.01" value="0.24" />
             </label>
             <label>
               <span>消散湍流</span>
-              <input id="dissolveTurbulence" type="range" min="0" max="4" step="0.01" value="0.9" />
-              <input id="dissolveTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.90" />
+              <input id="dissolveTurbulence" type="range" min="0" max="4" step="0.01" value="0.85" />
+              <input id="dissolveTurbulenceValue" class="value-input" type="number" min="0" step="0.01" value="0.85" />
             </label>
             <label>
               <span>流丝卷曲</span>
-              <input id="dissolveCurl" type="range" min="0" max="4" step="0.01" value="1.1" />
-              <input id="dissolveCurlValue" class="value-input" type="number" min="0" step="0.01" value="1.10" />
+              <input id="dissolveCurl" type="range" min="0" max="4" step="0.01" value="1.6" />
+              <input id="dissolveCurlValue" class="value-input" type="number" min="0" step="0.01" value="1.60" />
             </label>
             <label>
               <span>雾化碎散</span>
-              <input id="dissolveMist" type="range" min="0" max="1" step="0.01" value="0.62" />
-              <input id="dissolveMistValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.62" />
+              <input id="dissolveMist" type="range" min="0" max="1" step="0.01" value="0.22" />
+              <input id="dissolveMistValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.22" />
             </label>
             <label>
               <span>消散方向 X</span>
@@ -412,8 +475,23 @@
             </label>
             <label>
               <span>上扬 / 下坠</span>
-              <input id="dissolveLift" type="range" min="-2" max="2" step="0.01" value="0.24" />
-              <input id="dissolveLiftValue" class="value-input" type="number" step="0.01" value="0.24" />
+              <input id="dissolveLift" type="range" min="-2" max="2" step="0.01" value="0.18" />
+              <input id="dissolveLiftValue" class="value-input" type="number" step="0.01" value="0.18" />
+            </label>
+            <label class="creator-feedback-legacy">
+              <span>反馈强度</span>
+              <input id="feedbackStrength" type="range" min="0" max="4" step="0.01" value="0.72" />
+              <input id="feedbackStrengthValue" class="value-input" type="number" min="0" max="4" step="0.01" value="0.72" />
+            </label>
+            <label class="creator-feedback-legacy">
+              <span>反馈湍流</span>
+              <input id="feedbackTurbulence" type="range" min="0" max="6" step="0.01" value="0.72" />
+              <input id="feedbackTurbulenceValue" class="value-input" type="number" min="0" max="6" step="0.01" value="0.72" />
+            </label>
+            <label class="creator-feedback-legacy">
+              <span>反馈阻力</span>
+              <input id="feedbackDrag" type="range" min="0" max="6" step="0.01" value="1.15" />
+              <input id="feedbackDragValue" class="value-input" type="number" min="0" max="6" step="0.01" value="1.15" />
             </label>
           </div>
         </details>
@@ -977,6 +1055,26 @@
               <span>焦点距离</span>
               <input id="cameraFocusDistance" type="range" min="0.05" max="10000" step="0.05" value="7.18" disabled />
               <input id="cameraFocusDistanceValue" class="value-input" type="number" min="0.05" max="10000" step="0.05" value="7.18" disabled />
+            </label>
+            <label>
+              <span>散景半径</span>
+              <input id="cameraBokehScale" type="range" min="0.25" max="6" step="0.05" value="2.35" disabled />
+              <input id="cameraBokehScaleValue" class="value-input" type="number" min="0.25" max="6" step="0.05" value="2.35" disabled />
+            </label>
+            <label>
+              <span>散景高光</span>
+              <input id="cameraBokehHighlight" type="range" min="0" max="4" step="0.01" value="0.72" disabled />
+              <input id="cameraBokehHighlightValue" class="value-input" type="number" min="0" max="4" step="0.01" value="0.72" disabled />
+            </label>
+            <label>
+              <span>光圈叶片</span>
+              <input id="cameraApertureBlades" type="range" min="3" max="12" step="1" value="7" disabled />
+              <input id="cameraApertureBladesValue" class="value-input" type="number" min="3" max="12" step="1" value="7" disabled />
+            </label>
+            <label>
+              <span>叶片圆润</span>
+              <input id="cameraApertureRoundness" type="range" min="0" max="1" step="0.01" value="0.84" disabled />
+              <input id="cameraApertureRoundnessValue" class="value-input" type="number" min="0" max="1" step="0.01" value="0.84" disabled />
             </label>
           </div>
           <p class="camera-mode-hint" id="cameraModeHint">相机大小调整场景中的相机线框和手柄；焦段控制最终取景，景深参数可独立 K 帧。</p>

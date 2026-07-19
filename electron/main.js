@@ -14,6 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, '..');
 const distDir = path.join(appRoot, 'dist');
 const preloadPath = path.join(__dirname, 'preload.cjs');
+const appIconPath = path.join(appRoot, 'build', 'app-icon.png');
 let exportModelDir = '';
 const runtimeAssetDirs = new Set();
 const runtimeAssetMap = new Map();
@@ -72,6 +73,7 @@ function createMainWindow() {
     minWidth: 1000,
     minHeight: 720,
     title: 'Particle Model Studio',
+    icon: existsSync(appIconPath) ? appIconPath : undefined,
     backgroundColor: '#090a0c',
     webPreferences: {
       preload: preloadPath,

@@ -1,6 +1,9 @@
 {
   "name": "particle-model-studio",
-  "version": "1.0.17",
+  "version": "1.0.21",
+  "description": "Fast desktop particle studio with creator presets, a Chinese node graph, GPU feedback, camera animation, glow, depth of field, and video export.",
+  "author": "ying1459",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "electron/main.js",
@@ -8,12 +11,18 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "electron": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win dir --x64",
-    "dist:win:portable": "npm run build && electron-builder --win portable --x64",
+    "build:icon": "node scripts/generate-app-icon.js",
+    "dist:win": "npm run build:icon && npm run build && electron-builder --win dir --x64",
+    "dist:win:portable": "npm run build:icon && npm run build && electron-builder --win portable --x64",
     "export:mov": "node scripts/export-mov.js",
     "test:smoke": "node scripts/smoke-test.js",
+    "test:graph": "node --test scripts/operator-graph-test.js scripts/operator-graph-edit-test.js scripts/operator-graph-localization-test.js scripts/operator-runtime-test.js scripts/operator-resources-test.js scripts/operator-resource-pool-test.js scripts/operator-resource-lifetime-test.js scripts/gpu-particle-feedback-test.js scripts/particle-simulation-modifiers-test.js scripts/depth-of-field-test.js scripts/particle-flow-effect-test.js",
+    "test:particle-flow": "node --test scripts/particle-flow-effect-test.js && node scripts/particle-flow-runtime-test.js",
+    "test:project-density": "node scripts/project-density-test.js",
+    "test:project-density:packaged": "node scripts/project-density-test.js --packaged",
     "test:electron": "node scripts/electron-smoke-test.js",
     "test:electron:packaged": "node scripts/electron-smoke-test.js --packaged",
+    "promo:assets": "npm run build && node scripts/generate-promo-assets.js",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -37,6 +46,7 @@
     },
     "files": [
       "dist/**/*",
+      "build/app-icon.png",
       "electron/**/*",
       "package.json",
       "node_modules/ffmpeg-static/**/*"
@@ -64,6 +74,7 @@
       }
     ],
     "win": {
+      "icon": "build/app-icon.ico",
       "target": [
         {
           "target": "portable",

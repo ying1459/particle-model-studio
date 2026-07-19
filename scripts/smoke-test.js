@@ -39,6 +39,61 @@ try {
   await page.goto(`${baseUrl}?model=${modelUrl}&t=${Date.now()}`, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.particleStudio?.isReady(), null, { timeout: 90000 });
 
+  const qualityProfiles = await page.evaluate(() => {
+    const low = window.particleStudio.setQualityMode('low', { persist: false });
+    const medium = window.particleStudio.setQualityMode('medium', { persist: false });
+    const high = window.particleStudio.setQualityMode('high', { persist: false });
+    const auto = window.particleStudio.setQualityMode('auto', { persist: false, resolvedLevel: 'medium' });
+    window.particleStudio.setQualityMode('high', { persist: false });
+    return { low, medium, high, auto };
+  });
+  if (
+    qualityProfiles.low.level !== 'low' || qualityProfiles.low.profile.glowLayers !== 1 || qualityProfiles.low.profile.dofSamples !== 12 ||
+    qualityProfiles.medium.level !== 'medium' || qualityProfiles.medium.profile.glowLayers !== 2 || qualityProfiles.medium.profile.dofSamples !== 24 ||
+    qualityProfiles.high.level !== 'high' || qualityProfiles.high.profile.glowLayers !== 3 || qualityProfiles.high.profile.dofSamples !== 48 ||
+    qualityProfiles.auto.mode !== 'auto' || qualityProfiles.auto.level !== 'medium'
+  ) {
+    throw new Error(`Quality profiles are not applied correctly: ${JSON.stringify(qualityProfiles)}`);
+  }
+
+  const operatorGraph = await page.evaluate(() => {
+    const graph = window.particleStudio.getOperatorGraph();
+    const validation = window.particleStudio.validateOperatorGraph(graph);
+    const fullPlan = window.particleStudio.getOperatorExecutionPlan();
+    const dirtyPlan = window.particleStudio.getOperatorExecutionPlan({ dirtyNodeIds: ['flow-dissolve'] });
+    const projectGraph = window.particleStudio.captureProject().operatorGraph;
+    const customGraph = structuredClone(graph);
+    customGraph.name = 'Smoke Custom Graph';
+    customGraph.metadata = { ...customGraph.metadata, mode: 'graph', synchronized: false };
+    const customResult = window.particleStudio.setOperatorGraph(customGraph, { dirtyNodeIds: ['multi-glow'] });
+    const retainedName = window.particleStudio.getOperatorGraph().name;
+    const resetResult = window.particleStudio.resetOperatorGraph();
+    return {
+      graph,
+      validation,
+      fullPlan,
+      dirtyPlan,
+      projectGraph,
+      customExecution: customResult.plan.executionNodeIds,
+      retainedName,
+      resetMode: resetResult.graph.metadata.mode
+    };
+  });
+  if (
+    !operatorGraph.validation.valid ||
+    operatorGraph.graph.schemaVersion !== 1 ||
+    operatorGraph.graph.nodes.length !== 13 ||
+    operatorGraph.graph.edges.length !== 14 ||
+    operatorGraph.fullPlan.order.at(-1) !== 'viewport-output' ||
+    operatorGraph.dirtyPlan.executionNodeIds[0] !== 'flow-dissolve' ||
+    !operatorGraph.dirtyPlan.executionNodeIds.includes('viewport-output') ||
+    operatorGraph.projectGraph?.metadata?.mode !== 'creator' ||
+    operatorGraph.retainedName !== 'Smoke Custom Graph' ||
+    operatorGraph.resetMode !== 'creator'
+  ) {
+    throw new Error(`Operator graph runtime integration failed: ${JSON.stringify(operatorGraph)}`);
+  }
+
   const importModeCheck = await verifyImportReplaceAndAppend(page);
   if (!importModeCheck.replaceOk || !importModeCheck.appendOk) {
     throw new Error(`Import replace/append behavior is wrong: ${JSON.stringify(importModeCheck)}`);
@@ -436,6 +491,14 @@ try {
   const parameterContinuity = await verifyParameterContinuity(page);
   if (!parameterContinuity.ok) {
     throw new Error(`Parameter zero-crossing is visually discontinuous: ${JSON.stringify(parameterContinuity)}`);
+  }
+  const visualQuality = await verifyVisualQuality(page);
+  if (!visualQuality.ok) {
+    throw new Error(`Glow/DOF/dissolve visual regression failed: ${JSON.stringify(visualQuality)}`);
+  }
+  const operatorRuntimeRendering = await verifyOperatorRuntimeRendering(page);
+  if (!operatorRuntimeRendering.ok) {
+    throw new Error(`Operator runtime did not control the rendered frame: ${JSON.stringify(operatorRuntimeRendering)}`);
   }
 
   await page.evaluate(async () => {
@@ -937,7 +1000,16 @@ try {
         cameraFeatures: cameraFeatureCheck,
         cameraDistanceLighting,
         cameraClipRange,
+        qualityProfiles,
+        operatorGraph: {
+          nodes: operatorGraph.graph.nodes.length,
+          edges: operatorGraph.graph.edges.length,
+          stages: operatorGraph.fullPlan.stages.length,
+          dirtyExecution: operatorGraph.dirtyPlan.executionNodeIds
+        },
         parameterContinuity,
+        visualQuality,
+        operatorRuntimeRendering,
         imageSplat: imageSplatCheck,
         videoPlane: videoPlaneCheck,
         animation: animationCheck,
@@ -1112,6 +1184,1055 @@ async function verifyCameraClipRange(page) {
       far: snapshot.far
     };
   });
+}
+
+async function verifyVisualQuality(page) {
+  const baseOptions = {
+    effectMode: 'particles',
+    particleCount: 20000,
+    pointSize: 2.8,
+    particleizeProgress: 1,
+    modelVisibility: 1,
+    sampleCleanup: 0,
+    sizeRandom: 0.28,
+    spread: 0,
+    noise: 0,
+    dissolve: 0,
+    dissolveSpread: 1.55,
+    dissolveEdgeWidth: 0.22,
+    dissolveTurbulence: 0.9,
+    dissolveCurl: 1.1,
+    dissolveMist: 0.62,
+    growth: 1,
+    glowRadius: 0,
+    glowExposure: 0,
+    autoRotate: false,
+    worldEnabled: false,
+    worldVisible: false
+  };
+
+  const glowFrames = await page.evaluate(async (options) => {
+    window.particleStudio.setQualityMode('high', { persist: false });
+    window.particleStudio.clearCameraKeyframes();
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setExportResolution(512, 288, 24);
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.9, 8.8],
+      target: [0, 0.15, 0],
+      cameraType: 'perspective',
+      focalLength: 42,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+    await window.particleStudio.setOptions(options, true);
+    const base = window.particleStudio.renderFrame(0, undefined, 0);
+    await window.particleStudio.setOptions({ ...options, glowRadius: 220, glowExposure: 2 }, true);
+    const styled = window.particleStudio.renderFrame(0, undefined, 0);
+    return { base, styled };
+  }, baseOptions);
+  const glowDifference = await measureFrameDifference(page, glowFrames.base, glowFrames.styled);
+  await writeDataUrl(path.join(outDir, 'visual-glow-high.png'), glowFrames.styled);
+
+  const dissolveFrames = await page.evaluate(async (options) => {
+    await window.particleStudio.setOptions({ ...options, glowRadius: 80, glowExposure: 0.85, dissolve: 0 }, true);
+    const base = window.particleStudio.renderFrame(0.8, undefined, 0);
+    await window.particleStudio.setOptions({ ...options, glowRadius: 80, glowExposure: 0.85, dissolve: 0.5 }, true);
+    const styled = window.particleStudio.renderFrame(0.8, undefined, 0);
+    return { base, styled };
+  }, baseOptions);
+  const dissolveDifference = await measureFrameDifference(page, dissolveFrames.base, dissolveFrames.styled);
+  await writeDataUrl(path.join(outDir, 'visual-dissolve-mid.png'), dissolveFrames.styled);
+
+  await page.evaluate(async (options) => {
+    await window.particleStudio.setOptions({ ...options, particleizeProgress: 0, glowRadius: 0, glowExposure: 0, dissolve: 0 }, true);
+    window.particleStudio.setCameraSnapshot({ position: [0, 0.9, 8.8], target: [0, 0.15, 0], focalLength: 42, filmGauge: 36 });
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false, aperture: 1.2, focusDistance: 1 });
+  }, baseOptions);
+  await page.waitForTimeout(180);
+  const dofOff = await page.evaluate(() => window.particleStudio.capturePng());
+  await page.evaluate(() => window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: true, aperture: 1.2, focusDistance: 1 }));
+  await page.waitForTimeout(220);
+  const dofOn = await page.evaluate(() => window.particleStudio.capturePng());
+  const dofViewportDifference = await measureFrameDifference(page, dofOff, dofOn);
+  await writeDataUrl(path.join(outDir, 'visual-dof-viewport.png'), dofOn);
+
+  await page.evaluate(async (options) => {
+    await window.particleStudio.setOptions({
+      ...options,
+      particleCount: 18,
+      particleizeProgress: 1,
+      modelVisibility: 1,
+      pointSize: 8,
+      sizeRandom: 0,
+      glowRadius: 120,
+      glowExposure: 4,
+      dissolve: 0
+    }, true);
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.9, 8.8],
+      target: [0, 0.15, 0],
+      cameraType: 'perspective',
+      focalLength: 85,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+    window.particleStudio.setCameraSettings({
+      type: 'perspective',
+      dofEnabled: false,
+      aperture: 1.2,
+      focusDistance: 3
+    });
+  }, baseOptions);
+  await page.waitForTimeout(220);
+  const bokehSharp = await page.evaluate(() => window.particleStudio.capturePng());
+  await page.evaluate(() => window.particleStudio.setCameraSettings({
+    type: 'perspective',
+    dofEnabled: true,
+    aperture: 1.2,
+    focusDistance: 3
+  }));
+  await page.waitForTimeout(260);
+  const bokehBlurred = await page.evaluate(() => window.particleStudio.capturePng());
+  const bokehDifference = await measureFrameDifference(page, bokehSharp, bokehBlurred);
+  await writeDataUrl(path.join(outDir, 'visual-dof-bokeh-sharp.png'), bokehSharp);
+  await writeDataUrl(path.join(outDir, 'visual-dof-bokeh-f1.2.png'), bokehBlurred);
+
+  await page.evaluate(() => {
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false });
+    window.particleStudio.setQualityMode('high', { persist: false });
+  });
+
+  return {
+    ok:
+      glowDifference.meanDelta > 0.05 && glowDifference.changedRatio > 0.001 &&
+      dissolveDifference.meanDelta > 0.5 && dissolveDifference.changedRatio > 0.01 &&
+      dofViewportDifference.meanDelta > 0.5 && dofViewportDifference.changedRatio > 0.01 &&
+      bokehDifference.meanDelta > 0.05 && bokehDifference.changedRatio > 0.001,
+    glowDifference,
+    dissolveDifference,
+    dofViewportDifference,
+    bokehDifference,
+    fixtures: {
+      glow: path.join(outDir, 'visual-glow-high.png'),
+      dissolve: path.join(outDir, 'visual-dissolve-mid.png'),
+      dofViewport: path.join(outDir, 'visual-dof-viewport.png'),
+      dofBokehSharp: path.join(outDir, 'visual-dof-bokeh-sharp.png'),
+      dofBokehF12: path.join(outDir, 'visual-dof-bokeh-f1.2.png')
+    }
+  };
+}
+
+async function verifyOperatorRuntimeRendering(page) {
+  const frames = await page.evaluate(async () => {
+    window.particleStudio.setQualityMode('high', { persist: false });
+    window.particleStudio.clearCameraKeyframes();
+    window.particleStudio.setParameterKeyframes([]);
+    window.particleStudio.setExportResolution(512, 288, 24);
+    window.particleStudio.setCameraSnapshot({
+      position: [0, 0.9, 8.8],
+      target: [0, 0.15, 0],
+      cameraType: 'perspective',
+      focalLength: 42,
+      filmGauge: 36,
+      dofEnabled: false
+    });
+    await window.particleStudio.setOptions({
+      effectMode: 'particles',
+      particleCount: 20000,
+      pointSize: 2.8,
+      particleizeProgress: 1,
+      modelVisibility: 1,
+      sampleCleanup: 0,
+      spread: 0,
+      noise: 0,
+      dissolve: 0,
+      growth: 1,
+      glowRadius: 220,
+      glowExposure: 2,
+      autoRotate: false,
+      worldEnabled: false,
+      worldVisible: false
+    }, true);
+
+    window.particleStudio.resetOperatorGraph();
+    const glowOn = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const enabledStats = window.particleStudio.getOperatorRuntimeStats();
+    const graph = window.particleStudio.getOperatorGraph();
+    window.particleStudio.setCameraSettings({
+      type: 'perspective',
+      dofEnabled: true,
+      aperture: 1.4,
+      focusDistance: 1.2
+    });
+    window.particleStudio.resetOperatorGraph();
+    window.particleStudio.renderFrame(0.4, undefined, 0);
+    const fullEffectsStats = window.particleStudio.getOperatorRuntimeStats();
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false });
+    graph.metadata = { ...graph.metadata, mode: 'graph', synchronized: false };
+    const glowNode = graph.nodes.find((node) => node.type === 'post.glow');
+    glowNode.params = { ...glowNode.params, glowRadius: 30, glowExposure: 0.15 };
+    window.particleStudio.setOperatorGraph(graph);
+    const glowParamLow = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const parameterStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const feedbackGraph = structuredClone(graph);
+    const feedbackNode = feedbackGraph.nodes.find((node) => node.type === 'simulation.feedback-particles');
+    const forceNode = feedbackGraph.nodes.find((node) => node.type === 'simulation.force-field');
+    const returnForceNode = feedbackGraph.nodes.find((node) => node.type === 'simulation.return-force');
+    forceNode.params = {
+      ...forceNode.params,
+      strength: 1.6,
+      forceX: 0.22,
+      forceY: 0.35,
+      forceZ: -0.08,
+      turbulence: 1.8,
+      curl: 1.2
+    };
+    returnForceNode.params = { ...returnForceNode.params, strength: 0.05 };
+    feedbackNode.params = {
+      ...feedbackNode.params,
+      resetVersion: Number(feedbackNode.params.resetVersion || 0) + 100,
+      strength: 3.2,
+      dissolveCoupling: 0,
+      drag: 0.12,
+      damping: 0,
+      turbulence: 0,
+      curl: 0,
+      forceX: 0,
+      forceY: 0,
+      forceZ: 0,
+      attraction: 0,
+      maxVelocity: 4,
+      life: 10,
+      substeps: 4
+    };
+    window.particleStudio.setOperatorGraph(feedbackGraph);
+    window.particleStudio.renderFrame(0, undefined, 0);
+    const feedbackResetStats = window.particleStudio.getOperatorRuntimeStats();
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const feedbackOn = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const feedbackStats = window.particleStudio.getOperatorRuntimeStats();
+    feedbackNode.bypass = true;
+    window.particleStudio.setOperatorGraph(feedbackGraph);
+    const feedbackBypassed = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const feedbackBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const forceBypassGraph = structuredClone(feedbackGraph);
+    const forceBypassNode = forceBypassGraph.nodes.find((node) => node.type === 'simulation.force-field');
+    const forceBypassFeedbackNode = forceBypassGraph.nodes.find((node) => node.type === 'simulation.feedback-particles');
+    forceBypassNode.bypass = true;
+    forceBypassFeedbackNode.bypass = false;
+    forceBypassFeedbackNode.params.resetVersion = Number(forceBypassFeedbackNode.params.resetVersion || 0) + 1;
+    window.particleStudio.setOperatorGraph(forceBypassGraph);
+    window.particleStudio.renderFrame(0, undefined, 0);
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const forceBypassed = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const forceBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const lifecycleAllGraph = structuredClone(graph);
+    const lifecycleForceNode = lifecycleAllGraph.nodes.find((node) => node.type === 'simulation.force-field');
+    const lifecycleReturnNode = lifecycleAllGraph.nodes.find((node) => node.type === 'simulation.return-force');
+    const lifecycleEmitterNode = lifecycleAllGraph.nodes.find((node) => node.type === 'simulation.emitter');
+    const lifecycleBirthLifeNode = lifecycleAllGraph.nodes.find((node) => node.type === 'simulation.birth-life');
+    const lifecycleFeedbackNode = lifecycleAllGraph.nodes.find((node) => node.type === 'simulation.feedback-particles');
+    lifecycleForceNode.bypass = true;
+    lifecycleReturnNode.bypass = true;
+    lifecycleEmitterNode.params = {
+      ...lifecycleEmitterNode.params,
+      mode: 'all',
+      startTime: 0,
+      duration: 0,
+      directionX: 0,
+      directionY: 1,
+      directionZ: 0,
+      speed: 2,
+      spread: 0,
+      positionSpread: 0
+    };
+    lifecycleBirthLifeNode.params = {
+      ...lifecycleBirthLifeNode.params,
+      lifetimeMin: 10,
+      lifetimeMax: 10,
+      respawn: false,
+      fadeIn: 0,
+      fadeOut: 0
+    };
+    lifecycleFeedbackNode.params = {
+      ...lifecycleFeedbackNode.params,
+      resetVersion: Number(lifecycleFeedbackNode.params.resetVersion || 0) + 400,
+      strength: 1,
+      dissolveCoupling: 0,
+      substeps: 1
+    };
+    window.particleStudio.setOperatorGraph(lifecycleAllGraph);
+    const lifecycleAll = window.particleStudio.renderFrame(1, undefined, 0);
+    const lifecycleAllMoved = window.particleStudio.renderFrame(1.2, undefined, 0);
+
+    const lifecycleBurstGraph = structuredClone(lifecycleAllGraph);
+    const burstEmitterNode = lifecycleBurstGraph.nodes.find((node) => node.type === 'simulation.emitter');
+    burstEmitterNode.params = {
+      ...burstEmitterNode.params,
+      mode: 'burst',
+      burstCount: 800,
+      loop: false
+    };
+    lifecycleBurstGraph.nodes.find((node) => node.type === 'simulation.feedback-particles').params.resetVersion += 1;
+    window.particleStudio.setOperatorGraph(lifecycleBurstGraph);
+    const lifecycleBurst = window.particleStudio.renderFrame(1, undefined, 0);
+    const lifecycleBurstRepeat = window.particleStudio.renderFrame(1, undefined, 0);
+
+    const lifecycleContinuousGraph = structuredClone(lifecycleAllGraph);
+    const continuousEmitterNode = lifecycleContinuousGraph.nodes.find((node) => node.type === 'simulation.emitter');
+    continuousEmitterNode.params = {
+      ...continuousEmitterNode.params,
+      mode: 'continuous',
+      rate: 2000,
+      seed: 17
+    };
+    lifecycleContinuousGraph.nodes.find((node) => node.type === 'simulation.feedback-particles').params.resetVersion += 2;
+    window.particleStudio.setOperatorGraph(lifecycleContinuousGraph);
+    const lifecycleContinuousStart = window.particleStudio.renderFrame(0, undefined, 0);
+    const lifecycleContinuousMid = window.particleStudio.renderFrame(5, undefined, 0);
+    const lifecycleStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const spatialGraph = structuredClone(feedbackGraph);
+    const spatialForceNode = spatialGraph.nodes.find((node) => node.type === 'simulation.force-field');
+    const spatialReturnNode = spatialGraph.nodes.find((node) => node.type === 'simulation.return-force');
+    const spatialFeedbackNode = spatialGraph.nodes.find((node) => node.type === 'simulation.feedback-particles');
+    spatialForceNode.bypass = false;
+    spatialForceNode.params = {
+      ...spatialForceNode.params,
+      strength: 1,
+      forceX: 0.15,
+      forceY: -3,
+      forceZ: 0,
+      turbulence: 0,
+      curl: 0
+    };
+    spatialReturnNode.params = { ...spatialReturnNode.params, strength: 0 };
+    spatialFeedbackNode.bypass = false;
+    spatialFeedbackNode.params = {
+      ...spatialFeedbackNode.params,
+      resetVersion: Number(spatialFeedbackNode.params.resetVersion || 0) + 20,
+      strength: 3.2,
+      drag: 0.05,
+      maxVelocity: 6,
+      life: 10,
+      substeps: 4
+    };
+    spatialGraph.nodes.push(
+      {
+        id: 'particle-attractor',
+        type: 'simulation.attractor',
+        label: 'Attractor',
+        position: { x: 1040, y: 250 },
+        params: {
+          enabled: true,
+          centerX: 0.8,
+          centerY: 0.4,
+          centerZ: 0,
+          strength: 5,
+          radius: 4,
+          falloff: 0.8
+        }
+      },
+      {
+        id: 'particle-collision',
+        type: 'simulation.collision-plane',
+        label: 'Plane Collision',
+        position: { x: 1260, y: 250 },
+        params: {
+          enabled: true,
+          normalX: 0,
+          normalY: 1,
+          normalZ: 0,
+          offset: 0,
+          restitution: 0.65,
+          friction: 0.18
+        }
+      },
+      {
+        id: 'particle-trail',
+        type: 'simulation.trail',
+        label: 'Particle Trail',
+        position: { x: 1480, y: 250 },
+        params: {
+          enabled: true,
+          samples: 6,
+          interval: 0.02,
+          opacity: 0.82,
+          fade: 1.1,
+          size: 0.86
+        }
+      }
+    );
+    spatialGraph.edges = spatialGraph.edges.filter((edge) => edge.id !== 'return-to-emitter');
+    spatialGraph.edges.push(
+      {
+        id: 'return-to-attractor',
+        from: { node: 'particle-return', port: 'points' },
+        to: { node: 'particle-attractor', port: 'points' }
+      },
+      {
+        id: 'attractor-to-collision',
+        from: { node: 'particle-attractor', port: 'points' },
+        to: { node: 'particle-collision', port: 'points' }
+      },
+      {
+        id: 'collision-to-trail',
+        from: { node: 'particle-collision', port: 'points' },
+        to: { node: 'particle-trail', port: 'points' }
+      },
+      {
+        id: 'trail-to-emitter',
+        from: { node: 'particle-trail', port: 'points' },
+        to: { node: 'particle-emitter', port: 'points' }
+      }
+    );
+    window.particleStudio.setOperatorGraph(spatialGraph);
+    window.particleStudio.renderFrame(0, undefined, 0);
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const spatialCollisionOn = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const spatialCollisionStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const collisionBypassGraph = structuredClone(spatialGraph);
+    collisionBypassGraph.nodes.find((node) => node.id === 'particle-collision').bypass = true;
+    collisionBypassGraph.nodes.find((node) => node.id === 'particle-feedback').params.resetVersion += 1;
+    window.particleStudio.setOperatorGraph(collisionBypassGraph);
+    window.particleStudio.renderFrame(0, undefined, 0);
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const spatialCollisionBypassed = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const spatialCollisionBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const trailBypassGraph = structuredClone(spatialGraph);
+    trailBypassGraph.nodes.find((node) => node.id === 'particle-trail').bypass = true;
+    trailBypassGraph.nodes.find((node) => node.id === 'particle-feedback').params.resetVersion += 2;
+    window.particleStudio.setOperatorGraph(trailBypassGraph);
+    window.particleStudio.renderFrame(0, undefined, 0);
+    window.particleStudio.renderFrame(0.12, undefined, 0);
+    const spatialTrailBypassed = window.particleStudio.renderFrame(0.24, undefined, 0);
+    const spatialTrailBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const dissolveGraph = structuredClone(graph);
+    const dissolveNode = dissolveGraph.nodes.find((node) => node.type === 'simulation.dissolve');
+    dissolveNode.params = {
+      ...dissolveNode.params,
+      dissolve: 0.65,
+      dissolveSpread: 1.55,
+      dissolveTurbulence: 1.25,
+      dissolveCurl: 1.5,
+      dissolveMist: 0.7
+    };
+    window.particleStudio.setOperatorGraph(dissolveGraph);
+    const graphDissolve = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const dissolveStats = window.particleStudio.getOperatorRuntimeStats();
+    const creatorDissolveAfterGraph = window.particleStudio.getOptions().dissolve;
+    dissolveNode.bypass = true;
+    window.particleStudio.setOperatorGraph(dissolveGraph);
+    const dissolveBypassed = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const dissolveBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const brokenOutputGraph = structuredClone(graph);
+    brokenOutputGraph.edges = brokenOutputGraph.edges.filter((edge) => edge.to.node !== 'viewport-output');
+    window.particleStudio.setOperatorGraph(brokenOutputGraph);
+    window.particleStudio.renderFrame(0.4, undefined, 0);
+    const brokenOutputStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const disabledOutputGraph = structuredClone(graph);
+    disabledOutputGraph.nodes.find((node) => node.type === 'output.viewport').enabled = false;
+    window.particleStudio.setOperatorGraph(disabledOutputGraph);
+    window.particleStudio.renderFrame(0.4, undefined, 0);
+    const disabledOutputStats = window.particleStudio.getOperatorRuntimeStats();
+
+    const directGraph = structuredClone(graph);
+    directGraph.edges = directGraph.edges.filter((edge) => edge.to.node !== 'viewport-output');
+    directGraph.edges.push({
+      id: 'render-direct-to-viewport',
+      from: { node: 'particle-render', port: 'color' },
+      to: { node: 'viewport-output', port: 'color' },
+      enabled: true,
+      feedback: false,
+      metadata: {}
+    });
+    window.particleStudio.setOperatorGraph(directGraph);
+    const directOutput = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const directOutputStats = window.particleStudio.getOperatorRuntimeStats();
+
+    glowNode.bypass = true;
+    window.particleStudio.setOperatorGraph(graph);
+    const glowBypassed = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const bypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    window.particleStudio.resetOperatorGraph();
+    await window.particleStudio.setOptions({ glowRadius: 0, glowExposure: 0 }, true);
+    window.particleStudio.setCameraSettings({
+      type: 'perspective',
+      dofEnabled: true,
+      aperture: 1.2,
+      focusDistance: 1
+    });
+    window.particleStudio.resetOperatorGraph();
+    const dofOn = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const dofEnabledStats = window.particleStudio.getOperatorRuntimeStats();
+    const dofGraph = window.particleStudio.getOperatorGraph();
+    dofGraph.metadata = { ...dofGraph.metadata, mode: 'graph', synchronized: false };
+    const dofNode = dofGraph.nodes.find((node) => node.type === 'post.depth-of-field');
+    dofNode.bypass = true;
+    window.particleStudio.setOperatorGraph(dofGraph);
+    const dofBypassed = window.particleStudio.renderFrame(0.4, undefined, 0);
+    const dofBypassStats = window.particleStudio.getOperatorRuntimeStats();
+
+    window.particleStudio.setExportResolution(400, 224, 24);
+    window.particleStudio.resetOperatorGraph();
+    window.particleStudio.renderFrame(0.4, undefined, 0);
+    const resizedPoolStats = window.particleStudio.getOperatorRuntimeStats();
+    window.particleStudio.setExportResolution(512, 288, 24);
+
+    window.particleStudio.setCameraSettings({ type: 'perspective', dofEnabled: false });
+    window.particleStudio.resetOperatorGraph();
+    return {
+      glowOn,
+      glowParamLow,
+      feedbackOn,
+      feedbackBypassed,
+      forceBypassed,
+      lifecycleAll,
+      lifecycleAllMoved,
+      lifecycleBurst,
+      lifecycleBurstRepeat,
+      lifecycleContinuousStart,
+      lifecycleContinuousMid,
+      lifecycleStats,
+      spatialCollisionOn,
+      spatialCollisionBypassed,
+      spatialTrailBypassed,
+      graphDissolve,
+      dissolveBypassed,
+      directOutput,
+      glowBypassed,
+      dofOn,
+      dofBypassed,
+      enabledStats,
+      fullEffectsStats,
+      parameterStats,
+      feedbackResetStats,
+      feedbackStats,
+      feedbackBypassStats,
+      forceBypassStats,
+      spatialCollisionStats,
+      spatialCollisionBypassStats,
+      spatialTrailBypassStats,
+      dissolveStats,
+      dissolveBypassStats,
+      brokenOutputStats,
+      disabledOutputStats,
+      resizedPoolStats,
+      creatorDissolveAfterGraph,
+      directOutputStats,
+      bypassStats,
+      dofEnabledStats,
+      dofBypassStats
+    };
+  });
+
+  const glowDifference = await measureFrameDifference(page, frames.glowOn, frames.glowBypassed);
+  const glowParameterDifference = await measureFrameDifference(page, frames.glowOn, frames.glowParamLow);
+  const graphDissolveDifference = await measureFrameDifference(page, frames.glowParamLow, frames.graphDissolve);
+  const feedbackDifference = await measureFrameDifference(page, frames.feedbackOn, frames.feedbackBypassed);
+  const forceBypassDifference = await measureFrameDifference(page, frames.feedbackOn, frames.forceBypassed);
+  const lifecycleBurstDifference = await measureFrameDifference(page, frames.lifecycleAll, frames.lifecycleBurst);
+  const lifecycleInitialVelocityDifference = await measureFrameDifference(
+    page,
+    frames.lifecycleAll,
+    frames.lifecycleAllMoved
+  );
+  const lifecycleContinuousDifference = await measureFrameDifference(
+    page,
+    frames.lifecycleContinuousStart,
+    frames.lifecycleContinuousMid
+  );
+  const spatialCollisionDifference = await measureFrameDifference(
+    page,
+    frames.spatialCollisionOn,
+    frames.spatialCollisionBypassed
+  );
+  const spatialTrailDifference = await measureFrameDifference(
+    page,
+    frames.spatialCollisionOn,
+    frames.spatialTrailBypassed
+  );
+  const dissolveBypassDifference = await measureFrameDifference(page, frames.graphDissolve, frames.dissolveBypassed);
+  const directOutputDifference = await measureFrameDifference(page, frames.glowOn, frames.directOutput);
+  const dofDifference = await measureFrameDifference(page, frames.dofOn, frames.dofBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-glow-on.png'), frames.glowOn);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-glow-param-low.png'), frames.glowParamLow);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-feedback-on.png'), frames.feedbackOn);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-feedback-bypassed.png'), frames.feedbackBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-force-bypassed.png'), frames.forceBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-lifecycle-all.png'), frames.lifecycleAll);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-lifecycle-all-moved.png'), frames.lifecycleAllMoved);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-lifecycle-burst.png'), frames.lifecycleBurst);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-lifecycle-continuous-start.png'), frames.lifecycleContinuousStart);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-lifecycle-continuous-mid.png'), frames.lifecycleContinuousMid);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-attractor-collision.png'), frames.spatialCollisionOn);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-collision-bypassed.png'), frames.spatialCollisionBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-trail-bypassed.png'), frames.spatialTrailBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-graph-dissolve.png'), frames.graphDissolve);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-dissolve-bypassed.png'), frames.dissolveBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-direct-output.png'), frames.directOutput);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-glow-bypassed.png'), frames.glowBypassed);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-dof-on.png'), frames.dofOn);
+  await writeDataUrl(path.join(outDir, 'operator-runtime-dof-bypassed.png'), frames.dofBypassed);
+  const requiredNodes = [
+    'particle-force',
+    'particle-return',
+    'particle-emitter',
+    'particle-birth-life',
+    'particle-feedback',
+    'particle-render',
+    'multi-glow',
+    'viewport-dof',
+    'viewport-output'
+  ];
+  const requiredResourcePasses = [
+    'geometry.particle-sampler',
+    'simulation.dissolve',
+    'simulation.force-field',
+    'simulation.return-force',
+    'simulation.emitter',
+    'simulation.birth-life',
+    'simulation.feedback-particles',
+    'render.particles',
+    'post.glow',
+    'post.depth-of-field',
+    'output.viewport'
+  ];
+  const enabledResourceStats = frames.enabledStats.resources;
+  const enabledPoolStats = enabledResourceStats?.pools?.[0];
+  const fullEffectsResourceStats = frames.fullEffectsStats.resources;
+  const fullEffectsPoolStats = fullEffectsResourceStats?.pools?.[0];
+  const parameterPoolStats = frames.parameterStats.resources?.pools?.[0];
+  const resizedPoolStats = frames.resizedPoolStats.resources?.pools?.[0];
+  const dofEnabledResourceStats = frames.dofEnabledStats.resources;
+  const dofEnabledPoolStats = dofEnabledResourceStats?.pools?.[0];
+  const dofResourceStats = frames.dofBypassStats.resources;
+  const feedbackResetResource = frames.feedbackResetStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'particle-feedback' && resource.kind === 'points'
+  ));
+  const feedbackResource = frames.feedbackStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'particle-feedback' && resource.kind === 'points'
+  ));
+  const spatialFeedbackResource = frames.spatialCollisionStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'particle-feedback' && resource.kind === 'points'
+  ));
+  const lifecycleFeedbackResource = frames.lifecycleStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'particle-feedback' && resource.kind === 'points'
+  ));
+  const spatialRenderResource = frames.spatialCollisionStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'particle-render' && resource.kind === 'texture'
+  ));
+  const spatialGlowResource = frames.spatialCollisionStats.resources?.resources?.find((resource) => (
+    resource.producerNodeId === 'multi-glow' && resource.kind === 'texture'
+  ));
+  return {
+    ok:
+      glowDifference.meanDelta > 0.5 &&
+      glowDifference.changedRatio > 0.01 &&
+      glowParameterDifference.meanDelta > 0.5 &&
+      glowParameterDifference.changedRatio > 0.01 &&
+      feedbackDifference.meanDelta > 0.1 &&
+      feedbackDifference.changedRatio > 0.003 &&
+      forceBypassDifference.meanDelta > 0.1 &&
+      forceBypassDifference.changedRatio > 0.003 &&
+      lifecycleBurstDifference.meanDelta > 0.1 &&
+      lifecycleBurstDifference.changedRatio > 0.003 &&
+      lifecycleInitialVelocityDifference.meanDelta > 0.1 &&
+      lifecycleInitialVelocityDifference.changedRatio > 0.003 &&
+      lifecycleContinuousDifference.meanDelta > 0.1 &&
+      lifecycleContinuousDifference.changedRatio > 0.003 &&
+      frames.lifecycleBurst === frames.lifecycleBurstRepeat &&
+      lifecycleFeedbackResource?.metadata?.emitterMode === 'continuous' &&
+      lifecycleFeedbackResource?.metadata?.emitterRate === 2000 &&
+      lifecycleFeedbackResource?.metadata?.lifetimeRange?.join(',') === '10,10' &&
+      lifecycleFeedbackResource?.metadata?.lifecycleSeekDeterministic === true &&
+      spatialCollisionDifference.meanDelta > 0.1 &&
+      spatialCollisionDifference.changedRatio > 0.003 &&
+      spatialTrailDifference.meanDelta > 0.05 &&
+      spatialTrailDifference.changedRatio > 0.001 &&
+      graphDissolveDifference.meanDelta > 0.5 &&
+      graphDissolveDifference.changedRatio > 0.01 &&
+      dissolveBypassDifference.meanDelta > 0.5 &&
+      dissolveBypassDifference.changedRatio > 0.01 &&
+      frames.creatorDissolveAfterGraph === 0 &&
+      directOutputDifference.meanDelta > 0.5 &&
+      directOutputDifference.changedRatio > 0.01 &&
+      dofDifference.meanDelta > 0.5 &&
+      dofDifference.changedRatio > 0.01 &&
+      !frames.enabledStats.error &&
+      !frames.parameterStats.error &&
+      !frames.feedbackStats.error &&
+      !frames.feedbackBypassStats.error &&
+      !frames.forceBypassStats.error &&
+      !frames.spatialCollisionStats.error &&
+      !frames.spatialCollisionBypassStats.error &&
+      !frames.spatialTrailBypassStats.error &&
+      feedbackResetResource?.metadata?.reset === true &&
+      feedbackResetResource?.metadata?.resetReason === 'reset-version' &&
+      feedbackResource?.metadata?.computeFrames >= 2 &&
+      feedbackResource?.metadata?.computeSteps >= 8 &&
+      feedbackResource?.metadata?.frameSteps === 4 &&
+      Math.abs(feedbackResource?.metadata?.delta - 0.12) < 0.001 &&
+      feedbackResource?.metadata?.simulationModifierCount === 4 &&
+      feedbackResource?.metadata?.simulationModifierNodeIds?.join(',') ===
+        'particle-force,particle-return,particle-emitter,particle-birth-life' &&
+      feedbackResource?.metadata?.lifecycleTimeModel === 'absolute-cycle-v1' &&
+      feedbackResource?.metadata?.lifecycleSeekDeterministic === true &&
+      feedbackResource?.metadata?.motionSeekDeterministic === false &&
+      feedbackResource?.metadata?.emitterNodeId === 'particle-emitter' &&
+      feedbackResource?.metadata?.birthLifeNodeId === 'particle-birth-life' &&
+      Math.abs(feedbackResource?.metadata?.effectiveForce?.[0] - 0.352) < 0.001 &&
+      Math.abs(feedbackResource?.metadata?.effectiveForce?.[1] - 0.56) < 0.001 &&
+      Math.abs(feedbackResource?.metadata?.effectiveForce?.[2] + 0.128) < 0.001 &&
+      Math.abs(feedbackResource?.metadata?.effectiveAttraction - 0.05) < 0.001 &&
+      Math.abs(feedbackResource?.metadata?.effectiveTurbulence - 2.88) < 0.001 &&
+      Math.abs(feedbackResource?.metadata?.effectiveCurl - 1.92) < 0.001 &&
+      spatialFeedbackResource?.metadata?.stateSpace === 'model-local-position' &&
+      spatialFeedbackResource?.metadata?.basePositionByteLength > 0 &&
+      spatialFeedbackResource?.metadata?.stateByteLength > spatialFeedbackResource?.metadata?.pingPongByteLength &&
+      spatialFeedbackResource?.metadata?.simulationModifierCount === 7 &&
+      spatialFeedbackResource?.metadata?.attractorCount === 1 &&
+      spatialFeedbackResource?.metadata?.attractorNodeIds?.join(',') === 'particle-attractor' &&
+      spatialFeedbackResource?.metadata?.collisionPlaneCount === 1 &&
+      spatialFeedbackResource?.metadata?.collisionPlaneNodeIds?.join(',') === 'particle-collision' &&
+      spatialFeedbackResource?.metadata?.trailByteLength > 0 &&
+      spatialFeedbackResource?.metadata?.trailHistorySamples === 6 &&
+      spatialFeedbackResource?.metadata?.trailHistoryCapacity === 6 &&
+      spatialFeedbackResource?.metadata?.trailNodeId === 'particle-trail' &&
+      spatialRenderResource?.metadata?.trailDrawCount === 6 &&
+      spatialGlowResource?.metadata?.trailGlowDrawCount === 6 &&
+      frames.spatialCollisionStats.resources?.passes?.map((pass) => pass.type).join(',') ===
+        'geometry.particle-sampler,simulation.dissolve,simulation.force-field,simulation.return-force,simulation.attractor,simulation.collision-plane,simulation.trail,simulation.emitter,simulation.birth-life,simulation.feedback-particles,render.particles,post.glow,post.depth-of-field,output.viewport' &&
+      frames.spatialCollisionBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.collision-plane' &&
+        pass.skipped &&
+        pass.reason === 'bypass' &&
+        pass.inputResourceIds.length === 1 &&
+        pass.inputResourceIds[0] === pass.outputResourceIds[0]
+      )) &&
+      frames.spatialCollisionBypassStats.resources?.resources?.some((resource) => (
+        resource.producerNodeId === 'particle-feedback' &&
+        resource.metadata?.simulationModifierCount === 6 &&
+        resource.metadata?.attractorCount === 1 &&
+        resource.metadata?.collisionPlaneCount === 0 &&
+        resource.metadata?.trailHistoryCapacity === 6
+      )) &&
+      frames.spatialTrailBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.trail' &&
+        pass.skipped &&
+        pass.reason === 'bypass' &&
+        pass.inputResourceIds.length === 1 &&
+        pass.inputResourceIds[0] === pass.outputResourceIds[0]
+      )) &&
+      frames.spatialTrailBypassStats.resources?.resources?.some((resource) => (
+        resource.producerNodeId === 'particle-feedback' &&
+        resource.metadata?.simulationModifierCount === 6 &&
+        resource.metadata?.trailHistorySamples === 0 &&
+        resource.metadata?.trailHistoryCapacity === 0 &&
+        resource.metadata?.trailByteLength === 0
+      )) &&
+      frames.feedbackBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.feedback-particles' &&
+        pass.skipped &&
+        pass.reason === 'bypass' &&
+        pass.inputResourceIds.length === 1 &&
+        pass.inputResourceIds[0] === pass.outputResourceIds[0]
+      )) &&
+      frames.feedbackBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'render.particles' &&
+        pass.inputResourceIds.some((id) => id.includes(':particle-birth-life:points:'))
+      )) &&
+      frames.forceBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.force-field' &&
+        pass.skipped &&
+        pass.reason === 'bypass' &&
+        pass.inputResourceIds.length === 1 &&
+        pass.inputResourceIds[0] === pass.outputResourceIds[0]
+      )) &&
+      frames.forceBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.return-force' &&
+        pass.inputResourceIds.some((id) => id.includes(':flow-dissolve:points:'))
+      )) &&
+      frames.forceBypassStats.resources?.resources?.some((resource) => (
+        resource.producerNodeId === 'particle-feedback' &&
+        resource.metadata?.simulationModifierCount === 3 &&
+        Math.abs(resource.metadata?.effectiveForce?.[0] || 0) < 0.001 &&
+        Math.abs(resource.metadata?.effectiveForce?.[1] || 0) < 0.001 &&
+        Math.abs(resource.metadata?.effectiveForce?.[2] || 0) < 0.001 &&
+        Math.abs(resource.metadata?.effectiveAttraction - 0.05) < 0.001
+      )) &&
+      !frames.dissolveStats.error &&
+      !frames.dissolveBypassStats.error &&
+      frames.brokenOutputStats.fallback === true &&
+      frames.brokenOutputStats.error?.nodeId === 'viewport-output' &&
+      frames.brokenOutputStats.resources?.pools?.[0]?.activeLeaseCount === 0 &&
+      frames.brokenOutputStats.resources?.pools?.[0]?.acquisitions === 0 &&
+      frames.brokenOutputStats.resources?.pools?.[0]?.releases === 0 &&
+      frames.brokenOutputStats.resources?.lifetime?.activeResourceCount === 0 &&
+      frames.brokenOutputStats.resources?.lifetime?.aborted === true &&
+      frames.disabledOutputStats.fallback === true &&
+      frames.disabledOutputStats.error?.message?.includes('without reaching an enabled Viewport Output') &&
+      frames.disabledOutputStats.resources?.pools?.[0]?.activeLeaseCount === 0 &&
+      frames.disabledOutputStats.resources?.pools?.[0]?.acquisitions === 0 &&
+      frames.disabledOutputStats.resources?.pools?.[0]?.releases === 0 &&
+      frames.disabledOutputStats.resources?.lifetime?.activeResourceCount === 0 &&
+      !frames.directOutputStats.error &&
+      !frames.bypassStats.error &&
+      !frames.dofEnabledStats.error &&
+      !frames.dofBypassStats.error &&
+      frames.bypassStats.scope === 'export-frame' &&
+      frames.dofBypassStats.scope === 'export-frame' &&
+      requiredNodes.every((nodeId) => frames.bypassStats.executedNodeIds.includes(nodeId)) &&
+      requiredNodes.every((nodeId) => frames.dofBypassStats.executedNodeIds.includes(nodeId)) &&
+      enabledResourceStats?.resourceCount >= 3 &&
+      enabledResourceStats?.poolCount === 1 &&
+      enabledPoolStats?.entryCount === 9 &&
+      enabledPoolStats?.adoptedEntryCount === 9 &&
+      enabledPoolStats?.ownedEntryCount === 0 &&
+      enabledPoolStats?.reuses === 7 &&
+      enabledPoolStats?.allocations === 0 &&
+      enabledPoolStats?.releases === 7 &&
+      enabledPoolStats?.peakActiveLeases === 7 &&
+      enabledPoolStats?.activeLeaseCount === 0 &&
+      enabledResourceStats?.lifetime?.managedResourceCount === 3 &&
+      enabledResourceStats?.lifetime?.activeResourceCount === 0 &&
+      enabledResourceStats?.lifetime?.aliasPublications === 1 &&
+      enabledResourceStats?.lifetime?.releases === 3 &&
+      fullEffectsPoolStats?.reuses === 11 &&
+      fullEffectsPoolStats?.allocations === 0 &&
+      fullEffectsPoolStats?.releases === 11 &&
+      fullEffectsPoolStats?.peakActiveLeases === 7 &&
+      fullEffectsPoolStats?.activeLeaseCount === 0 &&
+      fullEffectsResourceStats?.lifetime?.managedResourceCount === 4 &&
+      fullEffectsResourceStats?.lifetime?.activeResourceCount === 0 &&
+      fullEffectsResourceStats?.lifetime?.releases === 4 &&
+      parameterPoolStats?.totalReuses > fullEffectsPoolStats?.totalReuses &&
+      parameterPoolStats?.activeLeaseCount === 0 &&
+      resizedPoolStats?.entryCount === 9 &&
+      resizedPoolStats?.reuses === 5 &&
+      resizedPoolStats?.allocations === 0 &&
+      resizedPoolStats?.releases === 5 &&
+      resizedPoolStats?.peakActiveLeases === 5 &&
+      resizedPoolStats?.activeLeaseCount === 0 &&
+      resizedPoolStats?.entries?.some((entry) => (
+        entry.label === 'sceneTarget' &&
+        entry.descriptor?.width === 400 &&
+        entry.descriptor?.height === 224
+      )) &&
+      enabledResourceStats?.passes?.map((pass) => pass.type).join(',') === requiredResourcePasses.join(',') &&
+      enabledResourceStats?.resources?.some((resource) => (
+        resource.kind === 'points' &&
+        resource.producerNodeId === 'particle-sampler' &&
+        resource.count === 20000 &&
+        resource.byteLength > 0
+      )) &&
+      enabledResourceStats?.resources?.some((resource) => (
+        resource.kind === 'points' && resource.producerNodeId === 'flow-dissolve'
+      )) &&
+      enabledResourceStats?.resources?.some((resource) => (
+        resource.kind === 'points' &&
+        resource.producerNodeId === 'particle-force' &&
+        resource.metadata?.stage === 'particle-force-field' &&
+        resource.metadata?.modifierKind === 'force-field'
+      )) &&
+      enabledResourceStats?.resources?.some((resource) => (
+        resource.kind === 'points' &&
+        resource.producerNodeId === 'particle-return' &&
+        resource.metadata?.stage === 'particle-return-force' &&
+        resource.metadata?.modifierKind === 'return-force'
+      )) &&
+      enabledResourceStats?.resources?.some((resource) => (
+        resource.kind === 'points' &&
+        resource.producerNodeId === 'particle-feedback' &&
+        resource.metadata?.stage === 'particle-feedback' &&
+        resource.metadata?.stateTextureWidth > 0 &&
+        resource.metadata?.stateTextureHeight > 0 &&
+        resource.metadata?.pingPongByteLength > 0 &&
+        resource.metadata?.simulationModifierCount === 4 &&
+        Math.abs(resource.metadata?.effectiveForce?.[1] - 0.1) < 0.001 &&
+        Math.abs(resource.metadata?.effectiveAttraction - 0.48) < 0.001 &&
+        Math.abs(resource.metadata?.effectiveTurbulence - 0.72) < 0.001
+      )) &&
+      enabledResourceStats?.resources?.some((resource) => resource.kind === 'depth') &&
+      enabledResourceStats?.resources?.some((resource) => resource.metadata?.stage === 'glow') &&
+      frames.parameterStats.resources?.resources?.some((resource) => (
+        resource.metadata?.stage === 'glow' &&
+        resource.metadata.glowRadius === 30 &&
+        resource.metadata.glowExposure === 0.15
+      )) &&
+      frames.dissolveStats.resources?.resources?.some((resource) => (
+        resource.kind === 'points' &&
+        resource.producerNodeId === 'flow-dissolve' &&
+        resource.metadata?.dissolve === 0.65 &&
+        resource.metadata?.turbulence === 1.25 &&
+        resource.metadata?.curl === 1.5
+      )) &&
+      frames.dissolveStats.resources?.passes?.some((pass) => (
+        pass.type === 'render.particles' &&
+        pass.inputResourceIds.some((id) => id.includes(':particle-feedback:points:'))
+      )) &&
+      frames.dissolveBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.dissolve' &&
+        pass.skipped &&
+        pass.reason === 'bypass' &&
+        pass.inputResourceIds.length === 1 &&
+        pass.inputResourceIds[0] === pass.outputResourceIds[0]
+      )) &&
+      frames.dissolveBypassStats.resources?.passes?.some((pass) => (
+        pass.type === 'simulation.force-field' &&
+        pass.inputResourceIds.some((id) => id.includes(':particle-sampler:points:'))
+      )) &&
+      frames.directOutputStats.demandedNodeIds?.includes('particle-render') &&
+      !frames.directOutputStats.demandedNodeIds?.includes('multi-glow') &&
+      !frames.directOutputStats.demandedNodeIds?.includes('viewport-dof') &&
+      frames.directOutputStats.skippedUndemandedNodeIds?.includes('multi-glow') &&
+      frames.directOutputStats.resources?.passes?.map((pass) => pass.type).join(',') ===
+        'geometry.particle-sampler,simulation.dissolve,simulation.force-field,simulation.return-force,simulation.emitter,simulation.birth-life,simulation.feedback-particles,render.particles,output.viewport' &&
+      frames.directOutputStats.resources?.pools?.[0]?.acquisitions === 1 &&
+      frames.directOutputStats.resources?.pools?.[0]?.reuses === 1 &&
+      frames.directOutputStats.resources?.pools?.[0]?.releases === 1 &&
+      frames.directOutputStats.resources?.pools?.[0]?.peakActiveLeases === 1 &&
+      frames.directOutputStats.resources?.lifetime?.managedResourceCount === 2 &&
+      frames.directOutputStats.resources?.lifetime?.zeroConsumerReleases === 1 &&
+      frames.directOutputStats.resources?.lifetime?.activeResourceCount === 0 &&
+      dofEnabledPoolStats?.entryCount === 9 &&
+      dofEnabledPoolStats?.reuses === 5 &&
+      dofEnabledPoolStats?.allocations === 0 &&
+      dofEnabledPoolStats?.releases === 5 &&
+      dofEnabledPoolStats?.peakActiveLeases === 5 &&
+      dofEnabledPoolStats?.activeLeaseCount === 0 &&
+      dofEnabledResourceStats?.resources?.some((resource) => (
+        resource.metadata?.stage === 'depth-of-field' &&
+        resource.producerNodeId === 'viewport-dof' &&
+        resource.metadata?.lensModel === 'thin-lens-signed-coc' &&
+        resource.metadata?.maximumRadiusPixels > 0 &&
+        resource.metadata?.prefilterRadiusPixels > 0 &&
+        resource.metadata?.prefilterWidth > 0 &&
+        resource.metadata?.prefilterHeight > 0 &&
+        resource.metadata?.bokehWidth > 0 &&
+        resource.metadata?.bokehHeight > 0 &&
+        resource.metadata?.bokehRenderScale === 0.5 &&
+        resource.metadata?.resolveRadiusPixels >= 2
+      )) &&
+      dofEnabledResourceStats?.passes?.some((pass) => (
+        pass.type === 'post.depth-of-field' && !pass.skipped && pass.outputResourceIds.length === 1
+      )) &&
+      dofResourceStats?.passes?.some((pass) => (
+        pass.type === 'post.depth-of-field' && pass.skipped && pass.reason === 'bypass'
+      )),
+    glowDifference,
+    glowParameterDifference,
+    feedbackDifference,
+    forceBypassDifference,
+    lifecycleBurstDifference,
+    lifecycleInitialVelocityDifference,
+    lifecycleContinuousDifference,
+    lifecycleBurstRepeatable: frames.lifecycleBurst === frames.lifecycleBurstRepeat,
+    spatialCollisionDifference,
+    spatialTrailDifference,
+    graphDissolveDifference,
+    dissolveBypassDifference,
+    directOutputDifference,
+    dofDifference,
+    enabledStats: {
+      scope: frames.enabledStats.scope,
+      totalMs: frames.enabledStats.totalMs,
+      executedNodeIds: frames.enabledStats.executedNodeIds,
+      cacheHitNodeIds: frames.enabledStats.cacheHitNodeIds,
+      error: frames.enabledStats.error,
+      resources: frames.enabledStats.resources
+    },
+    fullEffectsStats: {
+      scope: frames.fullEffectsStats.scope,
+      totalMs: frames.fullEffectsStats.totalMs,
+      executedNodeIds: frames.fullEffectsStats.executedNodeIds,
+      error: frames.fullEffectsStats.error,
+      resources: frames.fullEffectsStats.resources
+    },
+    bypassStats: {
+      scope: frames.bypassStats.scope,
+      totalMs: frames.bypassStats.totalMs,
+      executedNodeIds: frames.bypassStats.executedNodeIds,
+      cacheHitNodeIds: frames.bypassStats.cacheHitNodeIds,
+      error: frames.bypassStats.error
+    },
+    parameterStats: {
+      scope: frames.parameterStats.scope,
+      totalMs: frames.parameterStats.totalMs,
+      executedNodeIds: frames.parameterStats.executedNodeIds,
+      cacheHitNodeIds: frames.parameterStats.cacheHitNodeIds,
+      error: frames.parameterStats.error,
+      resources: frames.parameterStats.resources
+    },
+    feedbackStats: {
+      scope: frames.feedbackStats.scope,
+      totalMs: frames.feedbackStats.totalMs,
+      executedNodeIds: frames.feedbackStats.executedNodeIds,
+      error: frames.feedbackStats.error,
+      feedbackResource
+    },
+    feedbackBypassStats: {
+      scope: frames.feedbackBypassStats.scope,
+      totalMs: frames.feedbackBypassStats.totalMs,
+      executedNodeIds: frames.feedbackBypassStats.executedNodeIds,
+      error: frames.feedbackBypassStats.error
+    },
+    directOutputStats: {
+      scope: frames.directOutputStats.scope,
+      totalMs: frames.directOutputStats.totalMs,
+      executedNodeIds: frames.directOutputStats.executedNodeIds,
+      demandedNodeIds: frames.directOutputStats.demandedNodeIds,
+      skippedUndemandedNodeIds: frames.directOutputStats.skippedUndemandedNodeIds,
+      error: frames.directOutputStats.error,
+      resources: frames.directOutputStats.resources
+    },
+    dofEnabledStats: {
+      scope: frames.dofEnabledStats.scope,
+      totalMs: frames.dofEnabledStats.totalMs,
+      executedNodeIds: frames.dofEnabledStats.executedNodeIds,
+      cacheHitNodeIds: frames.dofEnabledStats.cacheHitNodeIds,
+      error: frames.dofEnabledStats.error,
+      resources: frames.dofEnabledStats.resources
+    },
+    dofBypassStats: {
+      scope: frames.dofBypassStats.scope,
+      totalMs: frames.dofBypassStats.totalMs,
+      executedNodeIds: frames.dofBypassStats.executedNodeIds,
+      cacheHitNodeIds: frames.dofBypassStats.cacheHitNodeIds,
+      error: frames.dofBypassStats.error,
+      resources: frames.dofBypassStats.resources
+    },
+    fixtures: {
+      glowOn: path.join(outDir, 'operator-runtime-glow-on.png'),
+      glowParamLow: path.join(outDir, 'operator-runtime-glow-param-low.png'),
+      feedbackOn: path.join(outDir, 'operator-runtime-feedback-on.png'),
+      feedbackBypassed: path.join(outDir, 'operator-runtime-feedback-bypassed.png'),
+      forceBypassed: path.join(outDir, 'operator-runtime-force-bypassed.png'),
+      lifecycleAll: path.join(outDir, 'operator-runtime-lifecycle-all.png'),
+      lifecycleAllMoved: path.join(outDir, 'operator-runtime-lifecycle-all-moved.png'),
+      lifecycleBurst: path.join(outDir, 'operator-runtime-lifecycle-burst.png'),
+      lifecycleContinuousStart: path.join(outDir, 'operator-runtime-lifecycle-continuous-start.png'),
+      lifecycleContinuousMid: path.join(outDir, 'operator-runtime-lifecycle-continuous-mid.png'),
+      spatialCollisionOn: path.join(outDir, 'operator-runtime-attractor-collision.png'),
+      spatialCollisionBypassed: path.join(outDir, 'operator-runtime-collision-bypassed.png'),
+      spatialTrailBypassed: path.join(outDir, 'operator-runtime-trail-bypassed.png'),
+      graphDissolve: path.join(outDir, 'operator-runtime-graph-dissolve.png'),
+      dissolveBypassed: path.join(outDir, 'operator-runtime-dissolve-bypassed.png'),
+      directOutput: path.join(outDir, 'operator-runtime-direct-output.png'),
+      glowBypassed: path.join(outDir, 'operator-runtime-glow-bypassed.png'),
+      dofOn: path.join(outDir, 'operator-runtime-dof-on.png'),
+      dofBypassed: path.join(outDir, 'operator-runtime-dof-bypassed.png')
+    }
+  };
 }
 
 async function verifyParameterContinuity(page) {

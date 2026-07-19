@@ -14,6 +14,43 @@ import { MeshSurfaceSampler } from 'three/examples/jsm/math/MeshSurfaceSampler.j
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { clone as cloneSkeletonRoot } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import {
+  cloneOperatorGraph,
+  compileOperatorGraph,
+  createCreatorOperatorGraph,
+  normalizeOperatorGraph,
+  validateOperatorGraph
+} from './core/operator-graph.js';
+import { OperatorGraphRuntime } from './core/operator-runtime.js';
+import {
+  OperatorResourceTracker,
+  isOperatorResource
+} from './core/operator-resources.js';
+import { OperatorResourcePool } from './core/operator-resource-pool.js';
+import { OperatorResourceLifetime } from './core/operator-resource-lifetime.js';
+import { GpuParticleFeedbackManager } from './core/gpu-particle-feedback.js';
+import { getMaximumBokehRadiusPixels } from './core/depth-of-field.js';
+import {
+  DEFAULT_FLOW_CHARACTER,
+  DEFAULT_FLOW_DIRECTION_PRESET,
+  DEFAULT_FLOW_STYLE,
+  advanceFlowPhase,
+  applyFlowStylePreset,
+  getFlowQualityDetail,
+  getFlowStyleId,
+  integrateLinearSpeed,
+  normalizeFlowCharacter,
+  normalizeFlowDirectionPreset,
+  normalizeFlowEffectOptions,
+  normalizeFlowStyle,
+  resolveFlowDirectionVector
+} from './core/particle-flow-effect.js';
+import {
+  appendParticleSimulationModifier,
+  createParticleSimulationModifier,
+  resolveParticleSimulationModifiers
+} from './core/particle-simulation-modifiers.js';
+import { createOperatorGraphWorkspace } from './ui/operator-graph-workspace.js';
+import {
   Box,
   Camera,
   createIcons,
@@ -94,6 +131,16 @@ const projectUi = {
   save: document.querySelector('#saveProject'),
   name: document.querySelector('#projectName')
 };
+const qualityUi = {
+  mode: document.querySelector('#qualityMode'),
+  status: document.querySelector('#qualityStatus')
+};
+let operatorGraphDocument = null;
+let studioOperatorRuntime = null;
+let lastOperatorRuntimeResult = null;
+let lastOperatorRuntimeError = null;
+let lastOperatorResourceStats = null;
+let operatorRuntimeErrorReported = false;
 const presetButtons = [...document.querySelectorAll('[data-preset]')];
 const effectModeButtons = [...document.querySelectorAll('[data-effect-mode]')];
 const MODEL_EXTENSIONS = new Set(['blend', 'glb', 'gltf', 'obj', 'stl', 'fbx']);
@@ -104,6 +151,12 @@ const GAUSSIAN_SPLAT_EXTENSIONS = new Set(['ply', 'splat', 'ksplat', 'spz']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm']);
 const INLINE_MODEL_PAYLOAD_LIMIT = 160 * 1024 * 1024;
 const MIN_PARTICLE_COUNT = 1;
+const ADAPTIVE_PARTICLE_RESERVOIR_MAX = 650000;
+const ADAPTIVE_PARTICLE_LOW_COUNT_THRESHOLD = 60000;
+const ADAPTIVE_PARTICLE_MID_COUNT_THRESHOLD = 140000;
+const ADAPTIVE_PARTICLE_HIGH_COUNT_THRESHOLD = 280000;
+const ADAPTIVE_PARTICLE_CLOSE_REFERENCE_DIAMETER = 520;
+const ADAPTIVE_PARTICLE_MIN_SCREEN_MULTIPLIER = 1;
 const SHARP_PLY_PREVIEW_LIMIT = 320000;
 const SHARP_PLY_EXPORT_LIMIT = 520000;
 const SHARP_DC_COLOR_FACTOR = 0.28209479177387814;
@@ -132,11 +185,73 @@ const PANEL_COLLAPSED_STORAGE_KEY = 'particle-studio-panel-collapsed';
 const WORKSPACE_LAYOUT_STORAGE_KEY = 'particle-studio-workspace-layout-v2';
 const WORKSPACE_PROPERTY_TAB_STORAGE_KEY = 'particle-studio-property-tab-v1';
 const CAMERA_PREVIEW_VISIBLE_STORAGE_KEY = 'particle-studio-camera-preview-visible';
+const QUALITY_MODE_STORAGE_KEY = 'particle-studio-quality-mode-v1';
+const QUALITY_LEVELS = ['low', 'medium', 'high'];
+const QUALITY_PROFILES = Object.freeze({
+  low: Object.freeze({
+    pixelRatioCap: 0.65,
+    bloomScale: 0.24,
+    glowLayers: 1,
+    dofSamples: 12,
+    cameraPreviewFps: 5,
+    cameraPreviewScale: 0.4,
+    animatedParticlePreviewFps: 9
+  }),
+  medium: Object.freeze({
+    pixelRatioCap: 0.9,
+    bloomScale: 0.32,
+    glowLayers: 2,
+    dofSamples: 24,
+    cameraPreviewFps: 8,
+    cameraPreviewScale: 0.65,
+    animatedParticlePreviewFps: 14
+  }),
+  high: Object.freeze({
+    pixelRatioCap: PREVIEW_PIXEL_RATIO_CAP,
+    bloomScale: 0.4,
+    glowLayers: 3,
+    dofSamples: 48,
+    cameraPreviewFps: 10,
+    cameraPreviewScale: 1,
+    animatedParticlePreviewFps: 18
+  })
+});
+
+function normalizeQualityMode(value) {
+  const mode = String(value || '').toLowerCase();
+  return mode === 'low' || mode === 'medium' || mode === 'high' ? mode : 'auto';
+}
+
+function readStoredQualityMode() {
+  try {
+    return normalizeQualityMode(window.localStorage?.getItem(QUALITY_MODE_STORAGE_KEY));
+  } catch {
+    return 'auto';
+  }
+}
+
+function resolveAutoQualityLevel() {
+  const cores = Math.max(1, Number(navigator.hardwareConcurrency) || 4);
+  const memory = Math.max(0, Number(navigator.deviceMemory) || 0);
+  if (cores <= 4 || (memory > 0 && memory <= 4)) {
+    return 'low';
+  }
+  if (cores <= 8 || (memory > 0 && memory <= 8)) {
+    return 'medium';
+  }
+  return 'high';
+}
+
 const requestedPixelRatio = Number.isFinite(exportSettings.pixelRatio) ? exportSettings.pixelRatio : 1;
-const renderPixelRatio = exportSettings.hideUi
+let qualityMode = exportSettings.hideUi
+  ? 'high'
+  : normalizeQualityMode(urlParams.get('quality') || readStoredQualityMode());
+let activeQualityLevel = qualityMode === 'auto' ? resolveAutoQualityLevel() : qualityMode;
+let activeQualityProfile = QUALITY_PROFILES[activeQualityLevel];
+let renderPixelRatio = exportSettings.hideUi
   ? EXPORT_RENDER_PIXEL_RATIO
-  : THREE.MathUtils.clamp(Math.min(requestedPixelRatio, PREVIEW_PIXEL_RATIO_CAP), 0.5, PREVIEW_PIXEL_RATIO_CAP);
-const studioPixelRatio = renderPixelRatio;
+  : THREE.MathUtils.clamp(Math.min(requestedPixelRatio, activeQualityProfile.pixelRatioCap), 0.5, PREVIEW_PIXEL_RATIO_CAP);
+let studioPixelRatio = renderPixelRatio;
 
 if (exportSettings.hideUi) {
   document.documentElement.classList.add('export-mode');
@@ -152,6 +267,13 @@ const controlsUi = {
   glowExposure: document.querySelector('#glowExposure'),
   particleizeProgress: document.querySelector('#particleizeProgress'),
   modelVisibility: document.querySelector('#modelVisibility'),
+  flowStyle: document.querySelector('#flowStyle'),
+  flowStyleCards: [...document.querySelectorAll('[data-flow-style]')],
+  flowStyleDescription: document.querySelector('#flowStyleDescription'),
+  flowMotionStatus: document.querySelector('#flowMotionStatus'),
+  flowDirectionPreset: document.querySelector('#flowDirectionPreset'),
+  flowCharacter: document.querySelector('#flowCharacter'),
+  resetFlowStyle: document.querySelector('#resetFlowStyle'),
   spread: document.querySelector('#spread'),
   noise: document.querySelector('#noise'),
   noiseScale: document.querySelector('#noiseScale'),
@@ -167,6 +289,9 @@ const controlsUi = {
   dissolveDirectionY: document.querySelector('#dissolveDirectionY'),
   dissolveDirectionZ: document.querySelector('#dissolveDirectionZ'),
   dissolveLift: document.querySelector('#dissolveLift'),
+  feedbackStrength: document.querySelector('#feedbackStrength'),
+  feedbackTurbulence: document.querySelector('#feedbackTurbulence'),
+  feedbackDrag: document.querySelector('#feedbackDrag'),
   growth: document.querySelector('#growth'),
   growthFlow: document.querySelector('#growthFlow'),
   growthWidth: document.querySelector('#growthWidth'),
@@ -266,6 +391,10 @@ const controlsUi = {
   cameraDofEnabled: document.querySelector('#cameraDofEnabled'),
   cameraAperture: document.querySelector('#cameraAperture'),
   cameraFocusDistance: document.querySelector('#cameraFocusDistance'),
+  cameraBokehScale: document.querySelector('#cameraBokehScale'),
+  cameraBokehHighlight: document.querySelector('#cameraBokehHighlight'),
+  cameraApertureBlades: document.querySelector('#cameraApertureBlades'),
+  cameraApertureRoundness: document.querySelector('#cameraApertureRoundness'),
   cameraModeHint: document.querySelector('#cameraModeHint'),
   timeline: document.querySelector('#timeline'),
   duration: document.querySelector('#duration'),
@@ -308,6 +437,7 @@ const outputUi = {
   glowExposure: document.querySelector('#glowExposureValue'),
   particleizeProgress: document.querySelector('#particleizeProgressValue'),
   modelVisibility: document.querySelector('#modelVisibilityValue'),
+  flowCharacter: document.querySelector('#flowCharacterValue'),
   spread: document.querySelector('#spreadValue'),
   noise: document.querySelector('#noiseValue'),
   noiseScale: document.querySelector('#noiseScaleValue'),
@@ -323,6 +453,9 @@ const outputUi = {
   dissolveDirectionY: document.querySelector('#dissolveDirectionYValue'),
   dissolveDirectionZ: document.querySelector('#dissolveDirectionZValue'),
   dissolveLift: document.querySelector('#dissolveLiftValue'),
+  feedbackStrength: document.querySelector('#feedbackStrengthValue'),
+  feedbackTurbulence: document.querySelector('#feedbackTurbulenceValue'),
+  feedbackDrag: document.querySelector('#feedbackDragValue'),
   growth: document.querySelector('#growthValue'),
   growthFlow: document.querySelector('#growthFlowValue'),
   growthWidth: document.querySelector('#growthWidthValue'),
@@ -384,6 +517,10 @@ const outputUi = {
   cameraFocalLength: document.querySelector('#cameraFocalLengthValue'),
   cameraAperture: document.querySelector('#cameraApertureValue'),
   cameraFocusDistance: document.querySelector('#cameraFocusDistanceValue'),
+  cameraBokehScale: document.querySelector('#cameraBokehScaleValue'),
+  cameraBokehHighlight: document.querySelector('#cameraBokehHighlightValue'),
+  cameraApertureBlades: document.querySelector('#cameraApertureBladesValue'),
+  cameraApertureRoundness: document.querySelector('#cameraApertureRoundnessValue'),
   videoPlaneWidth: document.querySelector('#videoPlaneWidthValue'),
   videoPlaneHeight: document.querySelector('#videoPlaneHeightValue'),
   videoPlaneOpacity: document.querySelector('#videoPlaneOpacityValue'),
@@ -860,13 +997,38 @@ function setupWorkspaceLayout() {
       <span>帮助</span>
     </nav>
     <div class="workspace-tabs" aria-label="Workspace tabs">
-      <span class="active">布局</span>
-      <span>建模</span>
-      <span>动画</span>
-      <span>渲染</span>
-      <span>合成</span>
+      <button class="active" type="button" data-workspace-mode="layout">布局</button>
+      <button type="button" data-workspace-mode="graph">图谱</button>
+      <button type="button" disabled title="后续里程碑：几何与建模算子">建模</button>
+      <button type="button" disabled title="后续里程碑：统一时间线与 CHOP">动画</button>
+      <button type="button" disabled title="后续里程碑：输出与 Perform 模式">输出</button>
     </div>
   `;
+
+  const graphWorkspace = createOperatorGraphWorkspace({
+    getGraph: () => captureOperatorGraphDocument(),
+    setGraph: (graph, options = {}) => setStudioOperatorGraph(graph, options),
+    resetGraph: () => resetStudioOperatorGraph(),
+    validateGraph: (graph) => validateOperatorGraph(graph),
+    getPlan: (options = {}) => compileOperatorGraph(captureOperatorGraphDocument(), options),
+    getRuntimeStats: () => getStudioOperatorRuntimeStats()
+  });
+  const workspaceModeButtons = [...topbar.querySelectorAll('[data-workspace-mode]')];
+  const setWorkspaceMode = (mode) => {
+    const graphMode = mode === 'graph';
+    workspaceModeButtons.forEach((button) => {
+      button.classList.toggle('active', button.dataset.workspaceMode === (graphMode ? 'graph' : 'layout'));
+    });
+    if (graphMode) {
+      graphWorkspace.activate();
+    } else {
+      graphWorkspace.deactivate();
+      requestWorkspaceResize();
+    }
+  };
+  workspaceModeButtons.forEach((button) => {
+    button.addEventListener('click', () => setWorkspaceMode(button.dataset.workspaceMode));
+  });
 
   const leftToolbar = document.createElement('aside');
   leftToolbar.className = 'workspace-left-toolbar';
@@ -925,6 +1087,7 @@ function setupWorkspaceLayout() {
   panel.replaceChildren(outlinerPane, paneSplitHandle, propertiesPane);
 
   app.prepend(topbar, leftToolbar);
+  app.append(graphWorkspace.root);
   app.append(timelineHandle, timelineDock, rightWidthHandle);
 
   setupWorkspaceDragHandle(rightWidthHandle, (event) => {
@@ -952,6 +1115,11 @@ const state = {
   glowExposure: Number(controlsUi.glowExposure.value),
   particleizeProgress: Number(controlsUi.particleizeProgress.value),
   modelVisibility: Number(controlsUi.modelVisibility.value),
+  flowStyle: normalizeFlowStyle(controlsUi.flowStyle?.value || DEFAULT_FLOW_STYLE),
+  flowDirectionPreset: normalizeFlowDirectionPreset(
+    controlsUi.flowDirectionPreset?.value || DEFAULT_FLOW_DIRECTION_PRESET
+  ),
+  flowCharacter: normalizeFlowCharacter(controlsUi.flowCharacter?.value, DEFAULT_FLOW_CHARACTER),
   spread: Number(controlsUi.spread.value),
   noise: Number(controlsUi.noise.value),
   noiseScale: Number(controlsUi.noiseScale.value),
@@ -967,6 +1135,9 @@ const state = {
   dissolveDirectionY: Number(controlsUi.dissolveDirectionY.value),
   dissolveDirectionZ: Number(controlsUi.dissolveDirectionZ.value),
   dissolveLift: Number(controlsUi.dissolveLift.value),
+  feedbackStrength: Number(controlsUi.feedbackStrength.value),
+  feedbackTurbulence: Number(controlsUi.feedbackTurbulence.value),
+  feedbackDrag: Number(controlsUi.feedbackDrag.value),
   growth: Number(controlsUi.growth.value),
   growthFlow: Number(controlsUi.growthFlow.value),
   growthWidth: Number(controlsUi.growthWidth.value),
@@ -1054,7 +1225,11 @@ const state = {
   cameraFocalLength: Number(controlsUi.cameraFocalLength?.value || 22.74),
   cameraDofEnabled: Boolean(controlsUi.cameraDofEnabled?.checked),
   cameraAperture: Number(controlsUi.cameraAperture?.value || 5.6),
-  cameraFocusDistance: Number(controlsUi.cameraFocusDistance?.value || 7.18)
+  cameraFocusDistance: Number(controlsUi.cameraFocusDistance?.value || 7.18),
+  cameraBokehScale: Number(controlsUi.cameraBokehScale?.value || 2.35),
+  cameraBokehHighlight: Number(controlsUi.cameraBokehHighlight?.value || 0.72),
+  cameraApertureBlades: Number(controlsUi.cameraApertureBlades?.value || 7),
+  cameraApertureRoundness: Number(controlsUi.cameraApertureRoundness?.value || 0.84)
 };
 
 const cameraAnimation = {
@@ -1280,6 +1455,7 @@ async function restoreUndoSceneModels(models = [], activeId = null, collections 
     await buildParticles(activeRecord.source, activeRecord.name, { resetView: false });
     currentSource = activeRecord.source;
     currentLabel = activeRecord.name;
+    uniforms.uTime.value = Math.max(0, Number(activeRecord.effectPhase) || 0);
   } finally {
     sceneModelSaveSuspended = false;
   }
@@ -1352,6 +1528,7 @@ const NUMERIC_KEYFRAME_FIELDS = [
   'glowExposure',
   'particleizeProgress',
   'modelVisibility',
+  'flowCharacter',
   'spread',
   'noise',
   'noiseScale',
@@ -1367,6 +1544,9 @@ const NUMERIC_KEYFRAME_FIELDS = [
   'dissolveDirectionY',
   'dissolveDirectionZ',
   'dissolveLift',
+  'feedbackStrength',
+  'feedbackTurbulence',
+  'feedbackDrag',
   'growth',
   'growthFlow',
   'growthWidth',
@@ -1434,7 +1614,11 @@ const NUMERIC_KEYFRAME_FIELDS = [
   'cameraSensorWidth',
   'cameraFocalLength',
   'cameraAperture',
-  'cameraFocusDistance'
+  'cameraFocusDistance',
+  'cameraBokehScale',
+  'cameraBokehHighlight',
+  'cameraApertureBlades',
+  'cameraApertureRoundness'
 ];
 const COLOR_KEYFRAME_FIELDS = ['colorA', 'colorB'];
 const BOOLEAN_KEYFRAME_FIELDS = [
@@ -1448,13 +1632,17 @@ const BOOLEAN_KEYFRAME_FIELDS = [
   'worldVisible',
   'cameraDofEnabled'
 ];
-const STRING_KEYFRAME_FIELDS = ['effectMode', 'cameraType'];
+const STRING_KEYFRAME_FIELDS = ['effectMode', 'cameraType', 'flowStyle', 'flowDirectionPreset'];
 const REBUILD_NUMERIC_FIELDS = new Set(['sampleCleanup', 'emissionCount', 'imageSplatCount']);
 const CAMERA_KEYFRAME_FIELDS = new Set([
   'cameraSensorWidth',
   'cameraFocalLength',
   'cameraAperture',
   'cameraFocusDistance',
+  'cameraBokehScale',
+  'cameraBokehHighlight',
+  'cameraApertureBlades',
+  'cameraApertureRoundness',
   'cameraDofEnabled'
 ]);
 const PARAMETER_KEYFRAME_FIELDS = [
@@ -1469,6 +1657,7 @@ const CLAMP_01_FIELDS = new Set([
   'sampleCleanup',
   'organicFlow',
   'edgeBreak',
+  'flowCharacter',
   'dissolve',
   'particleizeProgress',
   'modelVisibility',
@@ -1528,6 +1717,22 @@ const HAND_CONNECTIONS = [
 ];
 
 const VALID_EFFECT_MODES = new Set(['particles', 'emission', 'image', 'morph']);
+
+function normalizeStringStateValue(field, value) {
+  if (field === 'effectMode') {
+    return VALID_EFFECT_MODES.has(value) ? value : 'particles';
+  }
+  if (field === 'cameraType') {
+    return normalizeCameraType(value);
+  }
+  if (field === 'flowStyle') {
+    return normalizeFlowStyle(value);
+  }
+  if (field === 'flowDirectionPreset') {
+    return normalizeFlowDirectionPreset(value);
+  }
+  return String(value ?? '');
+}
 
 const LIGHT_TYPES = {
   point: '点光',
@@ -1786,6 +1991,8 @@ if (cameraPreviewRenderer) {
   cameraPreviewRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1));
 }
 
+const particleFeedbackManager = new GpuParticleFeedbackManager();
+
 let mainWebglContextLost = false;
 let cameraPreviewContextLost = false;
 
@@ -1796,6 +2003,7 @@ function bindWebglContextLossHandlers(targetCanvas, label, isMainRenderer = fals
 
   targetCanvas.addEventListener('webglcontextlost', (event) => {
     event.preventDefault();
+    particleFeedbackManager.disposeRenderer(isMainRenderer ? renderer : cameraPreviewRenderer);
     if (isMainRenderer) {
       mainWebglContextLost = true;
       document.body.classList.add('webgl-context-lost');
@@ -1831,18 +2039,28 @@ const postSize = new THREE.Vector2();
 const postClearColor = new THREE.Color();
 // Preview, camera view, and hidden export must use the same bloom resolution.
 // Different scales change the apparent glow energy and break WYSIWYG output.
-const bloomScale = 0.4;
+let bloomScale = exportSettings.hideUi ? QUALITY_PROFILES.high.bloomScale : activeQualityProfile.bloomScale;
 const perfStats = {
   requestedPixelRatio,
   renderPixelRatio,
   bloomScale,
+  qualityMode,
+  qualityLevel: activeQualityLevel,
+  glowLayers: activeQualityProfile.glowLayers,
+  dofSamples: activeQualityProfile.dofSamples,
   frameMs: 0,
   renderMs: 0,
   cameraPreviewMs: 0,
   buildMs: 0,
   lastParticleCount: 0,
   lastEmissionCount: 0,
+  lastAdaptiveParticleStats: [],
   gpu: null
+};
+const qualityRuntime = {
+  lastDecisionAt: performance.now(),
+  lastStatusAt: -Infinity,
+  autoDecisions: 0
 };
 
 function smoothPerfStat(key, value, alpha = 0.14) {
@@ -1875,6 +2093,108 @@ function readGpuInfo() {
 
 perfStats.gpu = readGpuInfo();
 
+function qualityLevelLabel(level) {
+  return level === 'low' ? 'Low' : level === 'medium' ? 'Medium' : 'High';
+}
+
+function getQualitySettings() {
+  return {
+    mode: qualityMode,
+    level: activeQualityLevel,
+    profile: { ...activeQualityProfile },
+    requestedPixelRatio,
+    renderPixelRatio,
+    bloomScale,
+    frameMs: Number((perfStats.frameMs || 0).toFixed(2)),
+    renderMs: Number((perfStats.renderMs || 0).toFixed(2)),
+    autoDecisions: qualityRuntime.autoDecisions,
+    hardware: {
+      cores: Math.max(1, Number(navigator.hardwareConcurrency) || 1),
+      memoryGb: Math.max(0, Number(navigator.deviceMemory) || 0)
+    }
+  };
+}
+
+function syncQualityUi(now = performance.now()) {
+  if (qualityUi.mode) {
+    qualityUi.mode.value = qualityMode;
+  }
+  if (!qualityUi.status || now - qualityRuntime.lastStatusAt < 450) {
+    return;
+  }
+  qualityRuntime.lastStatusAt = now;
+  const fps = perfStats.frameMs > 0 ? Math.min(240, 1000 / perfStats.frameMs) : 0;
+  const modeLabel = qualityMode === 'auto'
+    ? `Auto → ${qualityLevelLabel(activeQualityLevel)}`
+    : qualityLevelLabel(activeQualityLevel);
+  qualityUi.status.textContent = `${modeLabel} · ${fps > 0 ? `${fps.toFixed(0)} FPS` : '预热中'} · DPR ${renderPixelRatio.toFixed(2)} · Glow ${activeQualityProfile.glowLayers} 层 · DOF ${activeQualityProfile.dofSamples} 采样`;
+}
+
+function applyResolvedQualityLevel(level, options = {}) {
+  const normalizedLevel = QUALITY_LEVELS.includes(level) ? level : 'medium';
+  activeQualityLevel = exportSettings.hideUi ? 'high' : normalizedLevel;
+  activeQualityProfile = QUALITY_PROFILES[activeQualityLevel];
+  renderPixelRatio = exportSettings.hideUi
+    ? EXPORT_RENDER_PIXEL_RATIO
+    : THREE.MathUtils.clamp(Math.min(requestedPixelRatio, activeQualityProfile.pixelRatioCap), 0.5, PREVIEW_PIXEL_RATIO_CAP);
+  studioPixelRatio = renderPixelRatio;
+  bloomScale = exportSettings.hideUi ? QUALITY_PROFILES.high.bloomScale : activeQualityProfile.bloomScale;
+  CAMERA_PREVIEW_INTERVAL_MS = 1000 / (exportSettings.hideUi ? 15 : activeQualityProfile.cameraPreviewFps);
+  ANIMATED_PARTICLE_PREVIEW_INTERVAL_MS = 1000 / (exportSettings.hideUi ? 30 : activeQualityProfile.animatedParticlePreviewFps);
+  perfStats.renderPixelRatio = renderPixelRatio;
+  perfStats.bloomScale = bloomScale;
+  perfStats.qualityMode = qualityMode;
+  perfStats.qualityLevel = activeQualityLevel;
+  perfStats.glowLayers = activeQualityProfile.glowLayers;
+  perfStats.dofSamples = activeQualityProfile.dofSamples;
+  perfStats.cameraPreviewFps = activeQualityProfile.cameraPreviewFps;
+  perfStats.animatedParticlePreviewFps = activeQualityProfile.animatedParticlePreviewFps;
+  uniforms.uFlowQuality.value = getFlowQualityDetail(activeQualityLevel);
+  cameraPreviewLayoutCache = null;
+  if (options.resize !== false) {
+    resizeRenderer();
+  }
+  setCameraPreviewDirty();
+  qualityRuntime.lastStatusAt = -Infinity;
+  syncQualityUi();
+  return getQualitySettings();
+}
+
+function setQualityMode(mode, options = {}) {
+  qualityMode = exportSettings.hideUi ? 'high' : normalizeQualityMode(mode);
+  if (options.persist !== false && !exportSettings.hideUi) {
+    try {
+      window.localStorage?.setItem(QUALITY_MODE_STORAGE_KEY, qualityMode);
+    } catch {
+      // Ignore storage failures; the active session still uses the selection.
+    }
+  }
+  const resolvedLevel = qualityMode === 'auto'
+    ? (QUALITY_LEVELS.includes(options.resolvedLevel) ? options.resolvedLevel : resolveAutoQualityLevel())
+    : qualityMode;
+  qualityRuntime.lastDecisionAt = performance.now();
+  return applyResolvedQualityLevel(resolvedLevel, options);
+}
+
+function updateAutoQuality(now) {
+  syncQualityUi(now);
+  if (exportSettings.hideUi || qualityMode !== 'auto' || now - qualityRuntime.lastDecisionAt < 8000 || perfStats.frameMs <= 0) {
+    return;
+  }
+  const currentIndex = QUALITY_LEVELS.indexOf(activeQualityLevel);
+  let nextIndex = currentIndex;
+  if (perfStats.frameMs > 30 && currentIndex > 0) {
+    nextIndex -= 1;
+  } else if (perfStats.frameMs < 13.5 && currentIndex < QUALITY_LEVELS.length - 1) {
+    nextIndex += 1;
+  }
+  qualityRuntime.lastDecisionAt = now;
+  if (nextIndex !== currentIndex) {
+    qualityRuntime.autoDecisions += 1;
+    applyResolvedQualityLevel(QUALITY_LEVELS[nextIndex]);
+  }
+}
+
 function createPostTarget(name, width, height, options = {}) {
   const target = new THREE.WebGLRenderTarget(width, height, {
     format: THREE.RGBAFormat,
@@ -1895,6 +2215,131 @@ function createPostTarget(name, width, height, options = {}) {
   return target;
 }
 
+const operatorPostTargetPools = new WeakMap();
+let operatorPostTargetSerial = 0;
+
+function describeOperatorPostTarget(target) {
+  return {
+    kind: 'render-target',
+    width: Math.max(2, Math.floor(Number(target?.width) || 2)),
+    height: Math.max(2, Math.floor(Number(target?.height) || 2)),
+    depthBuffer: Boolean(target?.depthBuffer || target?.depthTexture),
+    format: 'rgba16f',
+    type: 'half-float'
+  };
+}
+
+function getOperatorPostTargetPool(targets) {
+  const anchor = targets?.sceneTarget;
+  if (!anchor) {
+    throw new Error('Operator post target pool requires a scene target.');
+  }
+  const entries = Object.entries(targets);
+  const signature = entries.map(([role, target]) => (
+    `${role}:${target?.uuid || ''}:${target?.width || 0}x${target?.height || 0}:${target?.depthBuffer ? 1 : 0}`
+  )).join('|');
+  const existing = operatorPostTargetPools.get(anchor);
+  if (existing?.signature === signature) {
+    return existing.pool;
+  }
+  existing?.pool.dispose();
+  const poolName = `operator-post-targets-${++operatorPostTargetSerial}`;
+  const pool = new OperatorResourcePool({
+    name: poolName,
+    create: (descriptor, context) => createPostTarget(
+      `${poolName}-${context.label || 'overflow'}`,
+      descriptor.width,
+      descriptor.height,
+      { depthBuffer: descriptor.depthBuffer }
+    ),
+    dispose: (target) => target?.dispose?.()
+  });
+  entries.forEach(([role, target]) => {
+    pool.adopt(target, describeOperatorPostTarget(target), { label: role });
+  });
+  operatorPostTargetPools.set(anchor, { signature, pool });
+  return pool;
+}
+
+function createOperatorPostTargetLeaseManager(targets, tracker) {
+  const pool = getOperatorPostTargetPool(targets).beginFrame({
+    scope: tracker.scope,
+    frame: tracker.frame
+  });
+  const ownerByRole = {
+    sceneTarget: 'particle-render',
+    glowTarget: 'multi-glow',
+    blurTargetA: 'multi-glow',
+    blurTargetB: 'multi-glow',
+    blurTargetC: 'multi-glow',
+    blurTargetD: 'multi-glow',
+    glowCompositeTarget: 'multi-glow',
+    dofBokehTarget: 'viewport-dof',
+    dofTarget: 'viewport-dof'
+  };
+  const activeTokens = new Set();
+  let ended = false;
+
+  const createToken = (lease, role) => {
+    const token = {
+      role,
+      resource: lease.resource,
+      released: false,
+      retain() {
+        if (ended || token.released) {
+          throw new Error(`Cannot retain inactive operator target ${role}.`);
+        }
+        pool.retain(lease);
+        return createToken(lease, role);
+      },
+      release() {
+        if (token.released) return 0;
+        token.released = true;
+        activeTokens.delete(token);
+        if (ended) return 0;
+        return lease.release();
+      }
+    };
+    activeTokens.add(token);
+    return token;
+  };
+
+  const close = (strict) => {
+    if (ended) return pool.getStats();
+    const stats = pool.endFrame({ strict });
+    ended = true;
+    activeTokens.forEach((token) => {
+      token.released = true;
+    });
+    activeTokens.clear();
+    tracker.recordPoolStats(stats);
+    return stats;
+  };
+
+  return {
+    acquire(role, ownerNodeId = ownerByRole[role] || '') {
+      if (ended) {
+        throw new Error(`Cannot acquire ${role} from a finished operator target frame.`);
+      }
+      const template = targets?.[role];
+      if (!template) {
+        throw new Error(`Operator GPU pipeline is missing ${role}.`);
+      }
+      const lease = pool.acquire(describeOperatorPostTarget(template), {
+        ownerNodeId,
+        label: role
+      });
+      return createToken(lease, role);
+    },
+    finish: () => close(true),
+    abort: () => close(false),
+    getStats: () => pool.getStats(),
+    get ended() {
+      return ended;
+    }
+  };
+}
+
 function currentDrawingBufferSize() {
   renderer.getDrawingBufferSize(postSize);
   return {
@@ -1913,6 +2358,15 @@ let glowTarget = createPostTarget(
 );
 let blurTargetA = createPostTarget('particle-glow-blur-a', glowTarget.width, glowTarget.height);
 let blurTargetB = createPostTarget('particle-glow-blur-b', glowTarget.width, glowTarget.height);
+let blurTargetC = createPostTarget('particle-glow-blur-c', glowTarget.width, glowTarget.height);
+let blurTargetD = createPostTarget('particle-glow-blur-d', glowTarget.width, glowTarget.height);
+let glowCompositeTarget = createPostTarget('particle-glow-composite', drawingSize.width, drawingSize.height);
+let dofBokehTarget = createPostTarget(
+  'particle-dof-bokeh',
+  Math.max(2, Math.floor(drawingSize.width * 0.5)),
+  Math.max(2, Math.floor(drawingSize.height * 0.5))
+);
+let dofTarget = createPostTarget('particle-dof', drawingSize.width, drawingSize.height);
 let cameraPreviewPostTargets = cameraPreviewRenderer ? createPostTargetSet('camera-preview', 2, 2) : null;
 let cameraViewPostTargets = !exportSettings.hideUi ? createPostTargetSet('camera-view', 2, 2) : null;
 
@@ -1925,7 +2379,16 @@ function createPostTargetSet(prefix, width, height) {
     sceneTarget: createPostTarget(`${prefix}-base`, safeWidth, safeHeight, { depthBuffer: true }),
     glowTarget: createPostTarget(`${prefix}-glow-source`, bloomWidth, bloomHeight, { depthBuffer: true }),
     blurTargetA: createPostTarget(`${prefix}-glow-blur-a`, bloomWidth, bloomHeight),
-    blurTargetB: createPostTarget(`${prefix}-glow-blur-b`, bloomWidth, bloomHeight)
+    blurTargetB: createPostTarget(`${prefix}-glow-blur-b`, bloomWidth, bloomHeight),
+    blurTargetC: createPostTarget(`${prefix}-glow-blur-c`, bloomWidth, bloomHeight),
+    blurTargetD: createPostTarget(`${prefix}-glow-blur-d`, bloomWidth, bloomHeight),
+    glowCompositeTarget: createPostTarget(`${prefix}-glow-composite`, safeWidth, safeHeight),
+    dofBokehTarget: createPostTarget(
+      `${prefix}-dof-bokeh`,
+      Math.max(2, Math.floor(safeWidth * 0.5)),
+      Math.max(2, Math.floor(safeHeight * 0.5))
+    ),
+    dofTarget: createPostTarget(`${prefix}-dof`, safeWidth, safeHeight)
   };
 }
 
@@ -1942,6 +2405,14 @@ function resizePostTargetSet(targets, width, height) {
   targets.glowTarget.setSize(bloomWidth, bloomHeight);
   targets.blurTargetA.setSize(bloomWidth, bloomHeight);
   targets.blurTargetB.setSize(bloomWidth, bloomHeight);
+  targets.blurTargetC.setSize(bloomWidth, bloomHeight);
+  targets.blurTargetD.setSize(bloomWidth, bloomHeight);
+  targets.glowCompositeTarget.setSize(safeWidth, safeHeight);
+  targets.dofBokehTarget.setSize(
+    Math.max(2, Math.floor(safeWidth * 0.5)),
+    Math.max(2, Math.floor(safeHeight * 0.5))
+  );
+  targets.dofTarget.setSize(safeWidth, safeHeight);
 }
 
 function resizePostTargets() {
@@ -1952,6 +2423,14 @@ function resizePostTargets() {
   glowTarget.setSize(bloomWidth, bloomHeight);
   blurTargetA.setSize(bloomWidth, bloomHeight);
   blurTargetB.setSize(bloomWidth, bloomHeight);
+  blurTargetC.setSize(bloomWidth, bloomHeight);
+  blurTargetD.setSize(bloomWidth, bloomHeight);
+  glowCompositeTarget.setSize(drawingSize.width, drawingSize.height);
+  dofBokehTarget.setSize(
+    Math.max(2, Math.floor(drawingSize.width * 0.5)),
+    Math.max(2, Math.floor(drawingSize.height * 0.5))
+  );
+  dofTarget.setSize(drawingSize.width, drawingSize.height);
 }
 
 const scene = new THREE.Scene();
@@ -1993,8 +2472,8 @@ const cameraPreviewCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAU
 const outputFrameCamera = new THREE.PerspectiveCamera(48, 16 / 9, CAMERA_DEFAULT_NEAR, CAMERA_DEFAULT_FAR);
 camera.filmGauge = state.cameraSensorWidth;
 camera.setFocalLength(state.cameraFocalLength);
-const CAMERA_PREVIEW_INTERVAL_MS = exportSettings.hideUi ? 1000 / 15 : 1000 / 10;
-const ANIMATED_PARTICLE_PREVIEW_INTERVAL_MS = exportSettings.hideUi ? 1000 / 30 : 1000 / 18;
+let CAMERA_PREVIEW_INTERVAL_MS = 1000 / (exportSettings.hideUi ? 15 : activeQualityProfile.cameraPreviewFps);
+let ANIMATED_PARTICLE_PREVIEW_INTERVAL_MS = 1000 / (exportSettings.hideUi ? 30 : activeQualityProfile.animatedParticlePreviewFps);
 perfStats.cameraPreviewFps = 1000 / CAMERA_PREVIEW_INTERVAL_MS;
 perfStats.animatedParticlePreviewFps = 1000 / ANIMATED_PARTICLE_PREVIEW_INTERVAL_MS;
 let cameraPreviewLastRender = -Infinity;
@@ -2116,6 +2595,7 @@ let selectedImageSplat = false;
 let selectedImageSplatMode = 'translate';
 const sceneModelObjects = [];
 let selectedSceneModelId = null;
+let deterministicFlowRenderTime = null;
 const selectedSceneModelIds = new Set();
 const sceneModelCollections = [];
 let sceneModelCollectionCounter = 1;
@@ -2610,10 +3090,18 @@ const uniforms = {
   uPointSize: { value: state.pointSize },
   uEdgeFeather: { value: state.edgeFeather },
   uSizeRandom: { value: state.sizeRandom },
+  uAdaptiveDensityRatio: { value: 1 },
+  uAdaptivePointScale: { value: 1 },
+  uAdaptiveAlphaScale: { value: 1 },
   uGlowRadius: { value: state.glowRadius },
   uGlowExposure: { value: state.glowExposure },
   uParticleizeProgress: { value: state.particleizeProgress },
   uModelVisibility: { value: state.modelVisibility },
+  uFlowStyle: { value: getFlowStyleId(state.flowStyle) },
+  uFlowCharacter: { value: state.flowCharacter },
+  uFlowQuality: { value: getFlowQualityDetail(activeQualityLevel) },
+  uEffectBoundsCenter: { value: new THREE.Vector3() },
+  uEffectBoundsExtent: { value: new THREE.Vector3(1, 1, 1) },
   uSpread: { value: state.spread },
   uNoise: { value: state.noise },
   uNoiseScale: { value: state.noiseScale },
@@ -2645,6 +3133,17 @@ const uniforms = {
   uUseTexture: { value: state.useTexture ? 1 : 0 },
   uColorA: { value: new THREE.Color(state.colorA) },
   uColorB: { value: new THREE.Color(state.colorB) },
+  uFeedbackEnabled: { value: 0 },
+  uFeedbackPosition: { value: null },
+  uFeedbackVelocity: { value: null },
+  uFeedbackStrength: { value: 0 },
+  uFeedbackDissolveCoupling: { value: 0.88 },
+  uFeedbackLifetimeMin: { value: 3.96 },
+  uFeedbackLifetimeMax: { value: 7.04 },
+  uFeedbackFadeIn: { value: 0 },
+  uFeedbackFadeOut: { value: 0.35 },
+  uTrailOpacity: { value: 1 },
+  uTrailSize: { value: 1 },
   ...createParticleLightingUniforms()
 };
 uniforms.uGlowPass = { value: 0 };
@@ -2679,32 +3178,166 @@ const blurMaterial = new THREE.ShaderMaterial({
     varying vec2 vUv;
 
     void main() {
-      vec2 stepOffset = uDirection * uTexelSize * max(uRadius, 0.001);
-      vec4 color = texture2D(uTexture, vUv) * 0.227027;
-      color += texture2D(uTexture, vUv + stepOffset * 1.384615) * 0.316216;
-      color += texture2D(uTexture, vUv - stepOffset * 1.384615) * 0.316216;
-      color += texture2D(uTexture, vUv + stepOffset * 3.230769) * 0.070270;
-      color += texture2D(uTexture, vUv - stepOffset * 3.230769) * 0.070270;
+      // Thirteen taps keep very large glow radii smooth. The previous five-tap
+      // kernel skipped across sparse point sources and produced tiled blotches.
+      vec2 stepOffset = uDirection * uTexelSize * max(uRadius, 0.001) / 3.0;
+      vec4 color = texture2D(uTexture, vUv) * 0.1673;
+      color += texture2D(uTexture, vUv + stepOffset) * 0.1534;
+      color += texture2D(uTexture, vUv - stepOffset) * 0.1534;
+      color += texture2D(uTexture, vUv + stepOffset * 2.0) * 0.1182;
+      color += texture2D(uTexture, vUv - stepOffset * 2.0) * 0.1182;
+      color += texture2D(uTexture, vUv + stepOffset * 3.0) * 0.0766;
+      color += texture2D(uTexture, vUv - stepOffset * 3.0) * 0.0766;
+      color += texture2D(uTexture, vUv + stepOffset * 4.0) * 0.0417;
+      color += texture2D(uTexture, vUv - stepOffset * 4.0) * 0.0417;
+      color += texture2D(uTexture, vUv + stepOffset * 5.0) * 0.0191;
+      color += texture2D(uTexture, vUv - stepOffset * 5.0) * 0.0191;
+      color += texture2D(uTexture, vUv + stepOffset * 6.0) * 0.00735;
+      color += texture2D(uTexture, vUv - stepOffset * 6.0) * 0.00735;
       gl_FragColor = color;
     }
   `
 });
 
+// Single-pass thin-lens gather used by both the legacy compositor and the
+// operator DOF node. CoC is signed and measured in output pixels, so foreground
+// and background defocus can be layered instead of collapsing into a generic
+// screen blur. The aperture transform keeps bright points as filled, rounded
+// iris discs rather than a Gaussian smear.
+const depthOfFieldShaderCommon = `
+  float perspectiveDepthToViewZ(float invClipZ, float nearValue, float farValue) {
+    return (nearValue * farValue) / ((farValue - nearValue) * invClipZ - farValue);
+  }
+
+  float viewDistanceAt(vec2 uv) {
+    float depth = texture2D(uDepthTexture, clamp(uv, vec2(0.0), vec2(1.0))).x;
+    if (depth >= 0.999999) {
+      return uCameraFar;
+    }
+    return max(-perspectiveDepthToViewZ(depth, uCameraNear, uCameraFar), 0.001);
+  }
+
+  float maximumBokehRadiusPixels() {
+    return clamp(min(uResolution.x, uResolution.y) * 0.09, 10.0, 82.0);
+  }
+
+  float signedCircleOfConfusionPixels(float viewDistance) {
+    float focalLength = clamp(uFocalLength * 0.001, 0.001, 0.3);
+    float focusDistance = max(uFocusDistance, focalLength + 0.01);
+    float objectDistance = max(viewDistance, focalLength + 0.001);
+    float apertureDiameter = focalLength / max(uAperture, 0.7);
+    float sensorWidth = max(uSensorWidth * 0.001, 0.008);
+    float cocOnSensor = apertureDiameter * focalLength * (objectDistance - focusDistance) /
+      (objectDistance * max(focusDistance - focalLength, 0.001));
+    float radiusPixels = cocOnSensor / sensorWidth * uResolution.x * 0.5 * uBokehScale;
+    float limit = maximumBokehRadiusPixels();
+    return clamp(radiusPixels, -limit, limit);
+  }
+
+  vec2 roundedApertureSample(float sampleIndex, float sampleCount) {
+    const float PI = 3.141592653589793;
+    const float TWO_PI = 6.283185307179586;
+    const float GOLDEN_ANGLE = 2.399963229728653;
+    float ring = sqrt((sampleIndex + 0.5) / max(sampleCount, 1.0));
+    // A photographic iris has one coherent orientation across the frame.
+    // Per-pixel rotation hid undersampling, but turned point highlights into
+    // noisy smudges and erased the aperture silhouette.
+    float apertureRotation = PI * 0.5;
+    float angle = (sampleIndex + 0.5) * GOLDEN_ANGLE + apertureRotation;
+    float blades = clamp(floor(uApertureBlades + 0.5), 3.0, 12.0);
+    float sector = TWO_PI / blades;
+    float localAngle = mod(angle + sector * 0.5, sector) - sector * 0.5;
+    float polygonBoundary = cos(PI / blades) / max(cos(localAngle), 0.001);
+    float roundedBoundary = mix(polygonBoundary, 1.0, clamp(uApertureRoundness, 0.0, 1.0));
+    return vec2(cos(angle), sin(angle)) * ring * roundedBoundary;
+  }
+
+  vec4 sampleDepthOfField(vec2 uv) {
+    vec4 center = texture2D(PMS_DOF_COLOR_TEXTURE, uv);
+    float centerDistance = viewDistanceAt(uv);
+    float centerCoc = signedCircleOfConfusionPixels(centerDistance);
+    float centerRadius = abs(centerCoc);
+    float focusBlend = smoothstep(0.45, 1.8, centerRadius);
+    if (focusBlend <= 0.001) {
+      return center;
+    }
+
+    vec2 texel = 1.0 / max(uResolution, vec2(2.0));
+    vec4 accum = center;
+    float totalWeight = 1.0;
+    float maxRadius = maximumBokehRadiusPixels();
+
+    for (int i = 0; i < 48; i++) {
+      float fi = float(i);
+      if (fi + 0.5 > uDofSamples) {
+        break;
+      }
+      vec2 aperturePoint = roundedApertureSample(fi, uDofSamples);
+      vec2 sampleUv = clamp(
+        uv + aperturePoint * texel * centerRadius,
+        texel * 0.5,
+        vec2(1.0) - texel * 0.5
+      );
+      float sampleDistance = viewDistanceAt(sampleUv);
+      float sampleCoc = signedCircleOfConfusionPixels(sampleDistance);
+      float sampleRadius = abs(sampleCoc);
+      float offsetPixels = length(aperturePoint) * centerRadius;
+
+      // A source contributes only when its own defocus disc reaches this pixel.
+      // This keeps focused edges from being dragged across the frame.
+      float coverage = smoothstep(offsetPixels - 1.5, offsetPixels + 1.5, sampleRadius);
+      float centerIsNear = step(centerCoc, -0.001);
+      float sampleIsFar = step(0.001, sampleCoc);
+      float farLeaksThroughNear = centerIsNear * sampleIsFar;
+      float depthSeparation = abs(sampleDistance - centerDistance) /
+        max(min(sampleDistance, centerDistance), 0.05);
+      float layerWeight = mix(
+        1.0,
+        0.035,
+        farLeaksThroughNear * smoothstep(0.015, 0.18, depthSeparation)
+      );
+
+      float weight = coverage * layerWeight;
+      if (weight <= 0.0001) {
+        continue;
+      }
+      vec4 sampleColor = texture2D(PMS_DOF_COLOR_TEXTURE, sampleUv);
+      float peak = max(max(sampleColor.r, sampleColor.g), sampleColor.b);
+      float highlight = smoothstep(0.32, 1.8, peak);
+      float blurAmount = clamp(sampleRadius / max(maxRadius, 1.0), 0.0, 1.0);
+      sampleColor.rgb *= 1.0 + highlight * blurAmount * max(uBokehHighlight, 0.0);
+      accum += sampleColor * weight;
+      totalWeight += weight;
+    }
+
+    vec4 bokeh = accum / max(totalWeight, 0.0001);
+    return mix(center, bokeh, focusBlend);
+  }
+`;
+
 const compositeMaterial = new THREE.ShaderMaterial({
   uniforms: {
     uBaseTexture: { value: sceneTarget.texture },
+    uBloomSourceTexture: { value: glowTarget.texture },
     uBloomTexture: { value: blurTargetA.texture },
+    uBloomWideTexture: { value: blurTargetB.texture },
     uDepthTexture: { value: sceneTarget.depthTexture },
     uBloomStrength: { value: 1 },
     uBloomAlpha: { value: 1 },
     uToneExposure: { value: renderer.toneMappingExposure },
     uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 },
     uDofEnabled: { value: 0 },
+    uDofSamples: { value: activeQualityProfile.dofSamples },
     uCameraNear: { value: camera.near },
     uCameraFar: { value: camera.far },
     uFocusDistance: { value: state.cameraFocusDistance },
     uAperture: { value: state.cameraAperture },
     uFocalLength: { value: state.cameraFocalLength },
+    uSensorWidth: { value: state.cameraSensorWidth },
+    uBokehScale: { value: 2.35 },
+    uBokehHighlight: { value: 0.72 },
+    uApertureBlades: { value: 7 },
+    uApertureRoundness: { value: 0.84 },
     uResolution: { value: new THREE.Vector2(drawingSize.width, drawingSize.height) }
   },
   depthTest: false,
@@ -2712,18 +3345,26 @@ const compositeMaterial = new THREE.ShaderMaterial({
   vertexShader: screenVertexShader,
   fragmentShader: `
     uniform sampler2D uBaseTexture;
+    uniform sampler2D uBloomSourceTexture;
     uniform sampler2D uBloomTexture;
+    uniform sampler2D uBloomWideTexture;
     uniform sampler2D uDepthTexture;
     uniform float uBloomStrength;
     uniform float uBloomAlpha;
     uniform float uToneExposure;
     uniform float uTransparentOutput;
     uniform float uDofEnabled;
+    uniform float uDofSamples;
     uniform float uCameraNear;
     uniform float uCameraFar;
     uniform float uFocusDistance;
     uniform float uAperture;
     uniform float uFocalLength;
+    uniform float uSensorWidth;
+    uniform float uBokehScale;
+    uniform float uBokehHighlight;
+    uniform float uApertureBlades;
+    uniform float uApertureRoundness;
     uniform vec2 uResolution;
 
     varying vec2 vUv;
@@ -2785,6 +3426,163 @@ const compositeMaterial = new THREE.ShaderMaterial({
       return mix(low, high, step(vec3(0.0031308), value));
     }
 
+    #define PMS_DOF_COLOR_TEXTURE uBaseTexture
+    ${depthOfFieldShaderCommon}
+
+    void main() {
+      vec4 base = uDofEnabled < 0.5
+        ? texture2D(uBaseTexture, vUv)
+        : sampleDepthOfField(vUv);
+      vec4 bloomSource = texture2D(uBloomSourceTexture, vUv);
+      vec4 bloomMedium = texture2D(uBloomTexture, vUv);
+      vec4 bloomWide = texture2D(uBloomWideTexture, vUv);
+      bloomSource.rgb = max(bloomSource.rgb - vec3(0.0005), vec3(0.0));
+      bloomMedium.rgb = max(bloomMedium.rgb - vec3(0.00022), vec3(0.0));
+      bloomWide.rgb = max(bloomWide.rgb - vec3(0.00008), vec3(0.0));
+      vec4 bloom = bloomSource * 0.08 + bloomMedium * 0.52 + bloomWide * 0.76;
+      bloom.a = bloomSource.a * 0.06 + bloomMedium.a * 0.38 + bloomWide.a * 0.62;
+      float bloomEnergy = max(max(bloom.r, bloom.g), bloom.b);
+      float bloomMask = smoothstep(0.0, 0.006, bloomEnergy);
+      bloom *= bloomMask;
+      vec3 softBloom = 1.0 - exp(-bloom.rgb * uBloomStrength);
+      vec3 color = base.rgb + softBloom * (0.66 + (1.0 - clamp(base.rgb, 0.0, 1.0)) * 0.34);
+      float alpha = max(base.a, bloom.a * uBloomAlpha);
+      alpha = mix(1.0, alpha, uTransparentOutput);
+      color = linearToSrgb(pmsAgxToneMap(color));
+      gl_FragColor = vec4(color, alpha);
+    }
+  `
+});
+
+// The operator graph uses real intermediate HDR resources instead of deferring
+// Glow + DOF + output to a single terminal shader.  Keeping the stages separate
+// makes node bypass, timing, future branching, and texture previews truthful.
+const operatorGlowMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uBaseTexture: { value: sceneTarget.texture },
+    uBloomSourceTexture: { value: glowTarget.texture },
+    uBloomTexture: { value: blurTargetA.texture },
+    uBloomWideTexture: { value: blurTargetB.texture },
+    uBloomStrength: { value: 1 },
+    uBloomAlpha: { value: 1 }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uBaseTexture;
+    uniform sampler2D uBloomSourceTexture;
+    uniform sampler2D uBloomTexture;
+    uniform sampler2D uBloomWideTexture;
+    uniform float uBloomStrength;
+    uniform float uBloomAlpha;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 base = texture2D(uBaseTexture, vUv);
+      vec4 bloomSource = texture2D(uBloomSourceTexture, vUv);
+      vec4 bloomMedium = texture2D(uBloomTexture, vUv);
+      vec4 bloomWide = texture2D(uBloomWideTexture, vUv);
+      bloomSource.rgb = max(bloomSource.rgb - vec3(0.0005), vec3(0.0));
+      bloomMedium.rgb = max(bloomMedium.rgb - vec3(0.00022), vec3(0.0));
+      bloomWide.rgb = max(bloomWide.rgb - vec3(0.00008), vec3(0.0));
+      vec4 bloom = bloomSource * 0.08 + bloomMedium * 0.52 + bloomWide * 0.76;
+      bloom.a = bloomSource.a * 0.06 + bloomMedium.a * 0.38 + bloomWide.a * 0.62;
+      float bloomEnergy = max(max(bloom.r, bloom.g), bloom.b);
+      bloom *= smoothstep(0.0, 0.006, bloomEnergy);
+      vec3 softBloom = 1.0 - exp(-bloom.rgb * uBloomStrength);
+      vec3 color = base.rgb + softBloom * (0.66 + (1.0 - clamp(base.rgb, 0.0, 1.0)) * 0.34);
+      gl_FragColor = vec4(color, max(base.a, bloom.a * uBloomAlpha));
+    }
+  `
+});
+
+const operatorDofMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uColorTexture: { value: sceneTarget.texture },
+    uDepthTexture: { value: sceneTarget.depthTexture },
+    uDofSamples: { value: activeQualityProfile.dofSamples },
+    uCameraNear: { value: camera.near },
+    uCameraFar: { value: camera.far },
+    uFocusDistance: { value: state.cameraFocusDistance },
+    uAperture: { value: state.cameraAperture },
+    uFocalLength: { value: state.cameraFocalLength },
+    uSensorWidth: { value: state.cameraSensorWidth },
+    uBokehScale: { value: 2.35 },
+    uBokehHighlight: { value: 0.72 },
+    uApertureBlades: { value: 7 },
+    uApertureRoundness: { value: 0.84 },
+    uResolution: { value: new THREE.Vector2(drawingSize.width, drawingSize.height) }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uColorTexture;
+    uniform sampler2D uDepthTexture;
+    uniform float uDofSamples;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    uniform float uFocusDistance;
+    uniform float uAperture;
+    uniform float uFocalLength;
+    uniform float uSensorWidth;
+    uniform float uBokehScale;
+    uniform float uBokehHighlight;
+    uniform float uApertureBlades;
+    uniform float uApertureRoundness;
+    uniform vec2 uResolution;
+    varying vec2 vUv;
+
+    #define PMS_DOF_COLOR_TEXTURE uColorTexture
+    ${depthOfFieldShaderCommon}
+
+    void main() {
+      gl_FragColor = sampleDepthOfField(vUv);
+    }
+  `
+});
+
+const operatorDofCompositeMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uSharpTexture: { value: sceneTarget.texture },
+    uBokehTexture: { value: dofBokehTarget.texture },
+    uDepthTexture: { value: sceneTarget.depthTexture },
+    uCameraNear: { value: camera.near },
+    uCameraFar: { value: camera.far },
+    uFocusDistance: { value: state.cameraFocusDistance },
+    uAperture: { value: state.cameraAperture },
+    uFocalLength: { value: state.cameraFocalLength },
+    uSensorWidth: { value: state.cameraSensorWidth },
+    uBokehScale: { value: 2.35 },
+    uBokehHighlight: { value: 0.72 },
+    uResolveRadius: { value: 2.4 },
+    uResolution: { value: new THREE.Vector2(drawingSize.width, drawingSize.height) },
+    uBokehResolution: { value: new THREE.Vector2(dofBokehTarget.width, dofBokehTarget.height) }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uSharpTexture;
+    uniform sampler2D uBokehTexture;
+    uniform sampler2D uDepthTexture;
+    uniform float uCameraNear;
+    uniform float uCameraFar;
+    uniform float uFocusDistance;
+    uniform float uAperture;
+    uniform float uFocalLength;
+    uniform float uSensorWidth;
+    uniform float uBokehScale;
+    uniform float uBokehHighlight;
+    uniform float uResolveRadius;
+    uniform vec2 uResolution;
+    uniform vec2 uBokehResolution;
+    varying vec2 vUv;
+
     float perspectiveDepthToViewZ(float invClipZ, float nearValue, float farValue) {
       return (nearValue * farValue) / ((farValue - nearValue) * invClipZ - farValue);
     }
@@ -2797,75 +3595,133 @@ const compositeMaterial = new THREE.ShaderMaterial({
       return max(-perspectiveDepthToViewZ(depth, uCameraNear, uCameraFar), 0.001);
     }
 
-    float depthCircleOfConfusion(float viewDistance) {
-      float focusDistance = max(uFocusDistance, 0.05);
-      float focusError = abs(viewDistance - focusDistance);
-      float focusHold = max(0.035, focusDistance * (0.035 + clamp(uAperture, 1.2, 22.0) * 0.006));
-      float normalizedError = max(focusError - focusHold, 0.0) / max(focusDistance, 0.1);
-      float apertureStrength = clamp(1.65 / max(uAperture, 1.2), 0.075, 1.35);
-      float focalStrength = clamp(uFocalLength / 45.0, 0.28, 4.2);
-      return clamp(normalizedError * apertureStrength * focalStrength * 3.0, 0.0, 1.0);
-    }
-
-    vec4 sampleDepthOfField(vec2 uv) {
-      vec4 center = texture2D(uBaseTexture, uv);
-      if (uDofEnabled < 0.5) {
-        return center;
-      }
-
-      float viewDistance = viewDistanceAt(uv);
-      float coc = depthCircleOfConfusion(viewDistance);
-      vec2 texel = 1.0 / max(uResolution, vec2(2.0));
-      float focusBlend = smoothstep(0.018, 0.32, coc);
-      if (focusBlend <= 0.001) {
-        return center;
-      }
-
-      float maxRadiusPixels = clamp(min(uResolution.x, uResolution.y) * 0.045, 4.0, 22.0);
-      vec2 radius = texel * (maxRadiusPixels * smoothstep(0.0, 1.0, coc));
-      vec4 accum = center * 1.15;
-      float totalWeight = 1.15;
-      const float GOLDEN_ANGLE = 2.39996323;
-
-      for (int i = 0; i < 24; i++) {
-        float fi = float(i) + 0.5;
-        float ring = sqrt(fi / 24.0);
-        float angle = fi * GOLDEN_ANGLE;
-        vec2 disk = vec2(cos(angle), sin(angle)) * ring;
-        vec2 sampleUv = clamp(uv + disk * radius, texel * 0.5, vec2(1.0) - texel * 0.5);
-        float sampleDistance = viewDistanceAt(sampleUv);
-        float sampleCoc = depthCircleOfConfusion(sampleDistance);
-        float sampleBlur = max(coc, sampleCoc);
-        float focusWeight = smoothstep(0.025, 0.34, sampleBlur);
-        float foregroundGuard = sampleDistance + 0.025 < viewDistance
-          ? smoothstep(0.04, 0.55, sampleCoc + coc * 0.55)
-          : 1.0;
-        float edgeWeight = mix(1.08, 0.72, ring);
-        float weight = mix(0.26, 1.0, focusWeight) * foregroundGuard * edgeWeight;
-        vec4 sampleColor = texture2D(uBaseTexture, sampleUv);
-        float highlight = smoothstep(0.58, 1.35, max(max(sampleColor.r, sampleColor.g), sampleColor.b));
-        sampleColor.rgb *= 1.0 + highlight * coc * 0.08;
-        accum += sampleColor * weight;
-        totalWeight += weight;
-      }
-
-      vec4 blurred = accum / max(totalWeight, 0.0001);
-      return mix(center, blurred, focusBlend);
+    float signedCircleOfConfusionPixels(float viewDistance) {
+      float focalLength = clamp(uFocalLength * 0.001, 0.001, 0.3);
+      float focusDistance = max(uFocusDistance, focalLength + 0.01);
+      float objectDistance = max(viewDistance, focalLength + 0.001);
+      float apertureDiameter = focalLength / max(uAperture, 0.7);
+      float sensorWidth = max(uSensorWidth * 0.001, 0.008);
+      float cocOnSensor = apertureDiameter * focalLength * (objectDistance - focusDistance) /
+        (objectDistance * max(focusDistance - focalLength, 0.001));
+      float radiusPixels = cocOnSensor / sensorWidth * uResolution.x * 0.5 * uBokehScale;
+      float limit = clamp(min(uResolution.x, uResolution.y) * 0.09, 10.0, 82.0);
+      return clamp(radiusPixels, -limit, limit);
     }
 
     void main() {
-      vec4 base = sampleDepthOfField(vUv);
-      vec4 bloom = texture2D(uBloomTexture, vUv);
-      bloom.rgb = max(bloom.rgb - vec3(0.00035), vec3(0.0));
-      bloom.a = max(bloom.a - 0.00025, 0.0);
-      float bloomEnergy = max(max(bloom.r, bloom.g), bloom.b);
-      float bloomMask = smoothstep(0.0, 0.018, bloomEnergy);
-      bloom *= bloomMask;
-      vec3 softBloom = 1.0 - exp(-bloom.rgb * uBloomStrength);
-      vec3 color = base.rgb + softBloom * (0.72 + (1.0 - clamp(base.rgb, 0.0, 1.0)) * 0.28);
-      float alpha = max(base.a, bloom.a * uBloomAlpha);
-      alpha = mix(1.0, alpha, uTransparentOutput);
-      color = linearToSrgb(pmsAgxToneMap(color));
+      vec4 sharp = texture2D(uSharpTexture, vUv);
+      float radiusPixels = abs(signedCircleOfConfusionPixels(viewDistanceAt(vUv)));
+      float blendAmount = smoothstep(0.45, 1.8, radiusPixels);
+      if (blendAmount <= 0.001) {
+        gl_FragColor = sharp;
+        return;
+      }
+
+      vec2 texel = 1.0 / max(uBokehResolution, vec2(2.0));
+      vec4 neighborhoodMean = vec4(0.0);
+      vec4 brightest = vec4(0.0);
+      float brightestEnergy = -1.0;
+      float sampleCount = 0.0;
+      float resolveStep = clamp(uResolveRadius, 1.0, 3.5) * 0.5;
+      for (int y = -2; y <= 2; y++) {
+        for (int x = -2; x <= 2; x++) {
+          vec2 grid = vec2(float(x), float(y));
+          if (dot(grid, grid) > 5.0) {
+            continue;
+          }
+          vec4 candidate = texture2D(uBokehTexture, vUv + grid * texel * resolveStep);
+          float energy = max(max(candidate.r, candidate.g), candidate.b);
+          neighborhoodMean += candidate;
+          sampleCount += 1.0;
+          if (energy > brightestEnergy) {
+            brightest = candidate;
+            brightestEnergy = energy;
+          }
+        }
+      }
+      neighborhoodMean /= max(sampleCount, 1.0);
+      float meanEnergy = max(max(neighborhoodMean.r, neighborhoodMean.g), neighborhoodMean.b);
+      float isolatedHighlight = smoothstep(0.004, 0.085, brightestEnergy - meanEnergy) *
+        smoothstep(0.015, 0.42, brightestEnergy);
+      vec4 bokeh = mix(neighborhoodMean, brightest, isolatedHighlight * 0.84);
+      float highlightEnergy = smoothstep(0.025, 0.9, brightestEnergy);
+      float blurAmount = clamp(radiusPixels / max(min(uResolution.x, uResolution.y) * 0.09, 1.0), 0.0, 1.0);
+      float highlightRecovery = highlightEnergy * blurAmount * max(uBokehHighlight, 0.0) * 2.6;
+      bokeh.rgb *= 1.0 + highlightRecovery;
+      gl_FragColor = mix(sharp, bokeh, blendAmount);
+    }
+  `
+});
+
+const operatorOutputMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uColorTexture: { value: sceneTarget.texture },
+    uToneExposure: { value: renderer.toneMappingExposure },
+    uTransparentOutput: { value: exportSettings.transparent ? 1 : 0 }
+  },
+  depthTest: false,
+  depthWrite: false,
+  toneMapped: false,
+  vertexShader: screenVertexShader,
+  fragmentShader: `
+    uniform sampler2D uColorTexture;
+    uniform float uToneExposure;
+    uniform float uTransparentOutput;
+    varying vec2 vUv;
+
+    const mat3 PMS_LINEAR_REC2020_TO_LINEAR_SRGB = mat3(
+      vec3(1.6605, -0.1246, -0.0182),
+      vec3(-0.5876, 1.1329, -0.1006),
+      vec3(-0.0728, -0.0083, 1.1187)
+    );
+    const mat3 PMS_LINEAR_SRGB_TO_LINEAR_REC2020 = mat3(
+      vec3(0.6274, 0.0691, 0.0164),
+      vec3(0.3293, 0.9195, 0.0880),
+      vec3(0.0433, 0.0113, 0.8956)
+    );
+
+    vec3 pmsAgxDefaultContrastApprox(vec3 x) {
+      vec3 x2 = x * x;
+      vec3 x4 = x2 * x2;
+      return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4
+        - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+    }
+
+    vec3 pmsAgxToneMap(vec3 color) {
+      const mat3 AgXInsetMatrix = mat3(
+        vec3(0.856627153315983, 0.137318972929847, 0.11189821299995),
+        vec3(0.0951212405381588, 0.761241990602591, 0.0767994186031903),
+        vec3(0.0482516061458583, 0.101439036467562, 0.811302368396859)
+      );
+      const mat3 AgXOutsetMatrix = mat3(
+        vec3(1.1271005818144368, -0.1413297634984383, -0.14132976349843826),
+        vec3(-0.11060664309660323, 1.157823702216272, -0.11060664309660294),
+        vec3(-0.016493938717834573, -0.016493938717834257, 1.2519364065950405)
+      );
+      const float AgxMinEv = -12.47393;
+      const float AgxMaxEv = 4.026069;
+      color *= uToneExposure;
+      color = PMS_LINEAR_SRGB_TO_LINEAR_REC2020 * color;
+      color = AgXInsetMatrix * color;
+      color = max(color, 1e-10);
+      color = log2(color);
+      color = clamp((color - AgxMinEv) / (AgxMaxEv - AgxMinEv), 0.0, 1.0);
+      color = pmsAgxDefaultContrastApprox(color);
+      color = AgXOutsetMatrix * color;
+      color = pow(max(vec3(0.0), color), vec3(2.2));
+      return clamp(PMS_LINEAR_REC2020_TO_LINEAR_SRGB * color, 0.0, 1.0);
+    }
+
+    vec3 linearToSrgb(vec3 value) {
+      vec3 low = value * 12.92;
+      vec3 high = 1.055 * pow(max(value, 0.0), vec3(1.0 / 2.4)) - 0.055;
+      return mix(low, high, step(vec3(0.0031308), value));
+    }
+
+    void main() {
+      vec4 source = texture2D(uColorTexture, vUv);
+      vec3 color = linearToSrgb(pmsAgxToneMap(source.rgb));
+      float alpha = mix(1.0, source.a, uTransparentOutput);
       gl_FragColor = vec4(color, alpha);
     }
   `
@@ -3008,13 +3864,22 @@ const particleMaterial = new THREE.ShaderMaterial({
     attribute vec3 aMorphTarget;
     attribute vec3 aMorphColor;
     attribute float aMorphTextureWeight;
+    attribute vec2 aSimulationUv;
 
     uniform float uTime;
     uniform float uPixelRatio;
     uniform float uPointSize;
     uniform float uEdgeFeather;
     uniform float uSizeRandom;
+    uniform float uAdaptiveDensityRatio;
+    uniform float uAdaptivePointScale;
+    uniform float uAdaptiveAlphaScale;
     uniform float uParticleizeProgress;
+    uniform float uFlowStyle;
+    uniform float uFlowCharacter;
+    uniform float uFlowQuality;
+    uniform vec3 uEffectBoundsCenter;
+    uniform vec3 uEffectBoundsExtent;
     uniform float uSpread;
     uniform float uNoise;
     uniform float uNoiseScale;
@@ -3050,6 +3915,17 @@ const particleMaterial = new THREE.ShaderMaterial({
     uniform float uUseTexture;
     uniform vec3 uColorA;
     uniform vec3 uColorB;
+    uniform float uFeedbackEnabled;
+    uniform sampler2D uFeedbackPosition;
+    uniform sampler2D uFeedbackVelocity;
+    uniform float uFeedbackStrength;
+    uniform float uFeedbackDissolveCoupling;
+    uniform float uFeedbackLifetimeMin;
+    uniform float uFeedbackLifetimeMax;
+    uniform float uFeedbackFadeIn;
+    uniform float uFeedbackFadeOut;
+    uniform float uTrailOpacity;
+    uniform float uTrailSize;
     #define MAX_PARTICLE_LIGHTS 8
     uniform float uParticleAmbient;
     uniform float uParticleLightCount;
@@ -3064,7 +3940,10 @@ const particleMaterial = new THREE.ShaderMaterial({
     varying vec3 vColor;
     varying float vAlpha;
     varying float vCoreRadius;
+    varying float vCorePixelSize;
     varying float vGlowSeed;
+    varying float vSpriteAngle;
+    varying float vSpriteStretch;
 
     mat2 rotate2d(float angle) {
       float s = sin(angle);
@@ -3082,6 +3961,38 @@ const particleMaterial = new THREE.ShaderMaterial({
       float c = sin(p.z * 1.32 + sin(p.x * 1.18) + p.y * 0.72);
       float d = sin(dot(p, vec3(1.9, 1.15, 1.45)) + sin(p.x + p.y));
       return (a + b + c + d) * 0.25;
+    }
+
+    // Analytic divergence-free flow. Neighbouring particles stay together as
+    // ribbons and vortices instead of receiving unrelated random impulses.
+    vec3 curlFlow(vec3 p, float t) {
+      vec3 a = p * 0.74 + vec3(t * 0.31, -t * 0.23, t * 0.19);
+      vec3 curlA = vec3(
+        -sin(a.y) - cos(a.z),
+        -sin(a.z) - cos(a.x),
+        -sin(a.x) - cos(a.y)
+      );
+      vec3 b = p * 1.47 + vec3(2.1, -1.3, 0.7) + vec3(-t * 0.17, t * 0.21, t * 0.13);
+      vec3 curlB = vec3(
+        -sin(b.y) - cos(b.z),
+        -sin(b.z) - cos(b.x),
+        -sin(b.x) - cos(b.y)
+      );
+      return normalize(curlA + curlB * 0.42 + vec3(0.001, 0.002, 0.003));
+    }
+
+    vec3 layeredFlow(vec3 p, float t) {
+      vec3 first = curlFlow(p, t);
+      vec3 result = first;
+      if (uFlowQuality > 1.5) {
+        vec3 warp = curlFlow(p * 0.73 + first * 0.38 + vec3(1.4, -0.7, 0.9), -t * 0.63);
+        result += curlFlow(p * 1.92 + warp * 0.46 + vec3(-0.8, 1.7, 0.35), t * 0.71) * 0.46;
+      }
+      if (uFlowQuality > 2.5) {
+        vec3 detailWarp = curlFlow(p * 1.37 + result * 0.32 + vec3(2.2, 0.4, -1.5), t * 0.37);
+        result += curlFlow(p * 3.74 + detailWarp * 0.31, -t * 0.43) * 0.21;
+      }
+      return normalize(result + vec3(0.0003, 0.0007, 0.0002));
     }
 
     vec3 applyParticleLights(vec3 baseColor, vec3 worldPosition, vec3 worldNormal, float emissiveMix) {
@@ -3137,6 +4048,19 @@ const particleMaterial = new THREE.ShaderMaterial({
     }
 
     void main() {
+      if (aSeed > clamp(uAdaptiveDensityRatio, 0.0, 1.0)) {
+        vColor = vec3(0.0);
+        vAlpha = 0.0;
+        vCoreRadius = 0.0;
+        vCorePixelSize = 0.0;
+        vGlowSeed = aSeed;
+        vSpriteAngle = 0.0;
+        vSpriteStretch = 1.0;
+        gl_PointSize = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+
       vec3 p = position;
       vec3 surfacePosition = position;
       float pulse = wave(p, aSeed);
@@ -3151,6 +4075,14 @@ const particleMaterial = new THREE.ShaderMaterial({
         sin(q.x * 1.65 + uTime * 0.95 + aSeed * 4.2)
       );
       field += normalize(aNormal + vec3(lumpyNoise)) * lumpyNoise;
+      vec3 coherentCurl = curlFlow(q, uTime * 0.22);
+      vec3 boundsExtent = max(uEffectBoundsExtent, vec3(0.0001));
+      vec3 boundsPosition = (position - uEffectBoundsCenter) / boundsExtent;
+      vec3 domainWarp = curlFlow(boundsPosition * 1.17 + vec3(0.0, uTime * 0.08, 0.0), uTime * 0.11);
+      vec3 tdFlowField = layeredFlow(
+        boundsPosition * mix(1.08, 2.35, clamp(uFlowCharacter, 0.0, 1.0)) + domainWarp * 0.42,
+        uTime * 0.19
+      );
 
       float morphMode = clamp(uMorphMode * uMorphReady, 0.0, 1.0);
       float particleize = clamp(uParticleizeProgress, 0.0, 1.0);
@@ -3241,14 +4173,11 @@ const particleMaterial = new THREE.ShaderMaterial({
       organicPosition += field * strandMask * (current + growHead) * uFilamentCurl * (0.045 + aSeed * 0.07);
       p = mix(p, organicPosition, organicFlow);
 
-      p += aOffset * uSpread * arrive * (0.22 + aSeed * 0.78);
-      float lumpAmplitude = uNoise * arrive * (0.5 + min(noiseSize, 6.0) * 0.12);
-      p += normalize(aNormal + field * 0.35) * lumpyNoise * lumpAmplitude;
-      p += field * uNoise * arrive * 0.08;
-      p += aNormal * pulse * arrive * uNoise * 0.028;
-      p += normalize(aNormal * 0.85 + aOffset * 0.34 + field * 0.16) *
-        particleizeHead * (0.018 + uNoise * 0.035 + uSpread * 0.018);
-
+      float modernFlow = step(-0.5, uFlowStyle);
+      float fluidStyle = modernFlow * (1.0 - step(0.5, uFlowStyle));
+      float dustStyle = modernFlow * step(0.5, uFlowStyle) * (1.0 - step(1.5, uFlowStyle));
+      float energyStyle = modernFlow * step(1.5, uFlowStyle);
+      float flowCharacter = clamp(uFlowCharacter, 0.0, 1.0);
       float dissolveAmount = clamp(uDissolve, 0.0, 1.0);
       float dissolveEdgeWidth = max(uDissolveEdgeWidth, 0.025);
       vec3 dissolveDirection = uDissolveDirection;
@@ -3256,20 +4185,56 @@ const particleMaterial = new THREE.ShaderMaterial({
         dissolveDirection = vec3(0.82, 0.18, -0.22);
       }
       dissolveDirection = normalize(dissolveDirection);
-      float directionalDissolveOrder = clamp(
-        dot(normalize(position + aNormal * 0.35 + vec3(0.0001)), dissolveDirection) * 0.32 + 0.5,
+      vec3 bundledSpreadDirection = normalize(
+        tdFlowField * (0.66 + fluidStyle * 0.2) +
+        aNormal * (0.3 + dustStyle * 0.24) +
+        dissolveDirection * (0.08 + energyStyle * 0.56)
+      );
+      float spreadBand = 0.28 + aGrowthOrder * 0.34 + aFilament * 0.24 + aSeed * 0.14;
+      vec3 legacySpreadOffset = aOffset * uSpread * arrive * (0.22 + aSeed * 0.78);
+      vec3 modernSpreadOffset = bundledSpreadDirection * uSpread * arrive *
+        (0.1 + spreadBand * mix(0.22, 0.42, flowCharacter));
+      p += mix(legacySpreadOffset, modernSpreadOffset, modernFlow);
+      float modernShapeActivity = max(dissolveAmount, smoothstep(0.0, 0.08, uSpread));
+      float lumpAmplitude = uNoise * arrive * (0.5 + min(noiseSize, 6.0) * 0.12) *
+        mix(1.0, modernShapeActivity * (0.16 + flowCharacter * 0.34), modernFlow);
+      p += normalize(aNormal + field * 0.35) * lumpyNoise * lumpAmplitude;
+      p += mix(field, tdFlowField, modernFlow) * uNoise * arrive * 0.08 *
+        mix(1.0, modernShapeActivity, modernFlow);
+      p += aNormal * pulse * arrive * uNoise * 0.028 * mix(1.0, modernShapeActivity, modernFlow);
+      p += normalize(aNormal * 0.85 + aOffset * 0.34 + field * 0.16) *
+        particleizeHead * (0.018 + uNoise * 0.035 + uSpread * 0.018);
+
+      float legacyDirectionalOrder = smoothstep(-1.4, 1.4, dot(position, dissolveDirection));
+      float normalizedDirectionalOrder = smoothstep(-0.92, 0.92, dot(boundsPosition, dissolveDirection));
+      float directionalDissolveOrder = mix(legacyDirectionalOrder, normalizedDirectionalOrder, modernFlow);
+      float legacyFieldOrder = clamp(blobNoise(q * 0.72 + coherentCurl * 0.34) * 0.5 + 0.5, 0.0, 1.0);
+      float warpedFront = blobNoise(boundsPosition * mix(1.18, 2.7, flowCharacter) + tdFlowField * 0.46) * 0.5 + 0.5;
+      float bandFront = sin(dot(boundsPosition, vec3(1.7, 2.3, 1.1)) + warpedFront * 2.4) * 0.5 + 0.5;
+      float dissolveFieldOrder = mix(
+        legacyFieldOrder,
+        clamp(warpedFront * 0.72 + bandFront * 0.28, 0.0, 1.0),
+        modernFlow
+      );
+      float legacyDissolveOrder = clamp(
+        aGrowthOrder * 0.42 +
+        directionalDissolveOrder * 0.34 +
+        dissolveFieldOrder * 0.16 +
+        aSeed * 0.08 -
+        aFilament * 0.06,
         0.0,
         1.0
       );
-      float dissolveOrder = clamp(
-        aGrowthOrder * 0.36 +
-        directionalDissolveOrder * 0.28 +
-        aMix * 0.18 +
-        aSeed * 0.16 -
-        aFilament * 0.08,
+      float modernDissolveOrder = clamp(
+        directionalDissolveOrder * mix(0.54, 0.66, energyStyle) +
+        dissolveFieldOrder * mix(0.31, 0.2, energyStyle) +
+        aGrowthOrder * 0.13 +
+        aFilament * (fluidStyle * -0.045 + dustStyle * 0.025) +
+        (aSeed - 0.5) * 0.025,
         0.0,
         1.0
       );
+      float dissolveOrder = mix(legacyDissolveOrder, modernDissolveOrder, modernFlow);
       float dissolveLocal = (dissolveAmount - dissolveOrder) / dissolveEdgeWidth;
       float dissolve = dissolveAmount <= 0.0001
         ? 0.0
@@ -3277,52 +4242,105 @@ const particleMaterial = new THREE.ShaderMaterial({
       float dissolveEdge = dissolveAmount <= 0.0001
         ? 0.0
         : smoothstep(-0.42, 0.16, dissolveLocal) * (1.0 - smoothstep(0.78, 1.58, dissolveLocal));
-      dissolveEdge *= 0.56 + filamentNoise * 0.44;
+      dissolveEdge *= mix(0.56 + filamentNoise * 0.44, 0.9 + warpedFront * 0.1, modernFlow);
       float mistSeed = smoothstep(0.52, 0.98, aSeed + aFilament * 0.18 + filamentNoise * 0.12);
-      float sheetMask = dissolveEdge * (0.34 + strandMask * 0.66) * (0.72 + filamentNoise * 0.28);
-      float spraySeed = smoothstep(0.74, 1.0, aSeed * 0.72 + aFilament * 0.18 + filamentNoise * 0.2);
-      float dissolveMistMask = clamp(uDissolveMist, 0.0, 1.0) *
+      float bundleSignal = sin(
+        dot(boundsPosition, vec3(5.7, 8.9, 4.3)) + warpedFront * 5.2 + dot(tdFlowField, vec3(1.8, 2.4, 1.1))
+      ) * 0.5 + 0.5;
+      float ribbonClass = smoothstep(mix(0.62, 0.48, 1.0 - flowCharacter), 0.82, bundleSignal) *
+        (0.76 + aFilament * 0.24);
+      float fragmentClass = smoothstep(0.28, 0.58, aSeed + aFilament * 0.16) *
+        (1.0 - smoothstep(0.78, 0.98, aSeed + aFilament * 0.08)) *
+        (1.0 - ribbonClass * 0.72);
+      float mistClass = smoothstep(mix(0.84, 0.68, flowCharacter), 0.99, aSeed * 0.82 + aFilament * 0.18);
+      float legacySheetMask = dissolveEdge * (0.34 + strandMask * 0.66) * (0.72 + filamentNoise * 0.28);
+      float modernSheetMask = dissolveEdge * ribbonClass *
+        (fluidStyle * (0.68 + aFilament * 0.24) + dustStyle * 0.24 + energyStyle * 0.46);
+      float sheetMask = mix(legacySheetMask, modernSheetMask, modernFlow);
+      float legacySpraySeed = smoothstep(0.74, 1.0, aSeed * 0.72 + aFilament * 0.18 + filamentNoise * 0.2);
+      float spraySeed = mix(legacySpraySeed, fragmentClass, modernFlow);
+      float legacyMistMask = clamp(uDissolveMist, 0.0, 1.0) *
         max(sheetMask * 0.62, dissolve * spraySeed * 0.24);
+      float modernMistMask = clamp(uDissolveMist, 0.0, 1.0) * dissolveEdge *
+        (mistClass * (0.34 + dustStyle * 0.54) + fragmentClass * (0.08 + energyStyle * 0.18));
+      float dissolveMistMask = mix(legacyMistMask, modernMistMask, modernFlow);
       float dissolvePulse = sin(uTime * (1.35 + uDissolveCurl * 0.24) + aSeed * 17.0 + position.y * 3.1) * 0.5 + 0.5;
       vec3 crossCurl = cross(dissolveDirection, normalize(aNormal + vec3(0.001, 0.002, 0.003)));
       if (length(crossCurl) < 0.001) {
         crossCurl = normalize(cross(dissolveDirection, vec3(0.0, 1.0, 0.0)));
       }
       vec3 dissolveCurlField = normalize(
-        field * (0.56 + uDissolveTurbulence * 0.2) +
-        crossCurl * (0.28 + uDissolveCurl * 0.22) +
-        aOffset * (0.34 + dissolvePulse * 0.2)
+        mix(coherentCurl, tdFlowField, modernFlow) * (0.72 + uDissolveTurbulence * 0.24) +
+        field * 0.22 +
+        crossCurl * (0.24 + uDissolveCurl * 0.18) +
+        aOffset * (0.08 + dissolvePulse * 0.06) * (1.0 - modernFlow)
       );
-      vec3 sheetDir = normalize(
+      vec3 legacySheetDir = normalize(
         filamentDirection * (0.68 + uFilamentCurl * 0.16) +
         dissolveCurlField * (0.48 + uDissolveCurl * 0.12) +
         crossCurl * 0.32 +
         dissolveDirection * 0.16
       );
-      vec3 peelDir = normalize(
+      vec3 modernSheetDir = normalize(
+        tdFlowField * (0.72 + fluidStyle * 0.3) +
+        dissolveDirection * (0.18 + energyStyle * 0.72) +
+        crossCurl * (0.28 + uDissolveCurl * 0.08) +
+        aNormal * dustStyle * 0.22
+      );
+      vec3 sheetDir = normalize(mix(legacySheetDir, modernSheetDir, modernFlow));
+      vec3 legacyPeelDir = normalize(
         dissolveDirection * 0.34 +
         aNormal * (0.46 + dissolveEdge * 0.32) +
         dissolveCurlField * uDissolveTurbulence * 0.34 +
         aOffset * (0.18 + dissolveMistMask * 0.2)
       );
+      vec3 modernPeelDir = normalize(
+        aNormal * (0.44 + dustStyle * 0.24) +
+        sheetDir * (0.42 + fluidStyle * 0.28) +
+        dissolveDirection * (0.2 + energyStyle * 0.82)
+      );
+      vec3 peelDir = normalize(mix(legacyPeelDir, modernPeelDir, modernFlow));
       float dissolveSpread = max(uDissolveSpread, 0.0);
-      float edgeTravel = dissolveSpread * sheetMask * (0.05 + mistSeed * 0.18);
+      float advectAge = smoothstep(-0.12, 1.18, dissolveLocal);
+      float edgeTravel = dissolveSpread * sheetMask *
+        mix(0.07 + mistSeed * 0.16, 0.1 + fluidStyle * 0.16 + energyStyle * 0.12, modernFlow);
       float sprayTravel = dissolveSpread * dissolve * spraySeed *
-        (0.03 + clamp(dissolveLocal, 0.0, 1.3) * 0.055);
-      p += peelDir * (edgeTravel + sprayTravel);
+        mix(0.035 + advectAge * 0.18, (0.025 + dustStyle * 0.08 + energyStyle * 0.16) * dissolveEdge, modernFlow);
+      p += peelDir * edgeTravel;
+      p += normalize(dissolveDirection * 0.46 + dissolveCurlField * 0.84 + aNormal * 0.18) * sprayTravel;
       p += sheetDir * sheetMask *
-        (uFilamentLength * 0.46 + uDissolveCurl * 0.12 + dissolveSpread * 0.08) *
+        (uFilamentLength * 0.42 + uDissolveCurl * 0.1 + dissolveSpread * 0.075) *
         (0.65 + mistSeed * 0.35);
-      p += dissolveCurlField * uDissolveCurl * (sheetMask * 0.055 + dissolveMistMask * 0.08);
+      p += dissolveCurlField * (uDissolveCurl + uDissolveTurbulence * 0.45) *
+        (sheetMask * 0.045 + dissolveMistMask * (0.07 + advectAge * 0.09));
       float spray = spraySeed * dissolveEdge * clamp(uDissolveMist + uEdgeBreak * 0.65, 0.0, 1.0);
-      p += normalize(dissolveDirection * 0.72 + aNormal * 0.42 + aOffset * 0.36) *
+      p += normalize(
+        dissolveDirection * 0.72 +
+        aNormal * 0.42 +
+        aOffset * 0.36 * (1.0 - modernFlow) +
+        tdFlowField * modernFlow * 0.48
+      ) *
         spray * dissolveSpread * 0.32;
-      p += aOffset * dissolveMistMask * dissolveSpread * (0.035 + aSeed * 0.15);
+      p += mix(aOffset, normalize(tdFlowField + aNormal * 0.32), modernFlow) *
+        dissolveMistMask * dissolveSpread * (0.018 + aSeed * 0.07);
       p.y += (sheetMask * 0.18 + dissolveMistMask * 0.22) * uDissolveLift;
       float silkDissolve = max(sheetMask, dissolve * strandMask * 0.55) *
         (strandMask + clamp(uDissolveCurl * 0.12, 0.0, 0.55));
       p += filamentDirection * silkDissolve * (uFilamentLength + uDissolveCurl * 0.35) * (0.16 + aSeed * 0.42);
       p += dissolveCurlField * silkDissolve * uDissolveCurl * (0.06 + spark * 0.14);
+
+      float ribbonSprite = modernFlow * clamp(
+        sheetMask * (0.82 + fluidStyle * 0.38 + energyStyle * 0.18) +
+        dissolveMistMask * dustStyle * 0.16,
+        0.0,
+        1.0
+      );
+      vec3 viewFlowDirection = normalize(mat3(modelViewMatrix) * sheetDir + vec3(0.0001, 0.0002, 0.0003));
+      vSpriteAngle = atan(viewFlowDirection.y, viewFlowDirection.x);
+      vSpriteStretch = 1.0 + ribbonSprite *
+        (fluidStyle * mix(2.4, 5.2, 1.0 - flowCharacter) +
+        dustStyle * mix(0.45, 1.25, flowCharacter) +
+        energyStyle * mix(1.2, 2.8, 1.0 - flowCharacter));
 
       float radius = length(p.xz);
       float angle = uSwirl * (0.22 * radius + 0.16 * sin(uTime * 0.65 + aSeed * 6.28318));
@@ -3333,52 +4351,97 @@ const particleMaterial = new THREE.ShaderMaterial({
         : smoothstep(0.08, 0.96, particleize) * smoothstep(0.18, 0.98, particleizeReveal);
       p = mix(surfacePosition, p, particleizeMotion);
 
+      vec4 feedbackPositionState = texture2D(uFeedbackPosition, aSimulationUv);
+      vec3 feedbackPosition = feedbackPositionState.xyz;
+      vec3 feedbackOffset = feedbackPosition - position;
+      vec4 feedbackVelocityState = texture2D(uFeedbackVelocity, aSimulationUv);
+      vec3 feedbackVelocity = feedbackVelocityState.xyz;
+      float feedbackParticleLife = mix(
+        uFeedbackLifetimeMin,
+        uFeedbackLifetimeMax,
+        feedbackVelocityState.a
+      );
+      float feedbackAge = feedbackPositionState.a;
+      float feedbackActive = step(0.0, feedbackAge);
+      float feedbackBirthFade = uFeedbackFadeIn <= 0.00001
+        ? 1.0
+        : smoothstep(0.0, uFeedbackFadeIn, feedbackAge);
+      float feedbackDeathFade = uFeedbackFadeOut <= 0.00001
+        ? 1.0
+        : 1.0 - smoothstep(
+          max(feedbackParticleLife - uFeedbackFadeOut, 0.0),
+          feedbackParticleLife,
+          feedbackAge
+        );
+      float feedbackLifeOpacity = feedbackActive * feedbackBirthFade * feedbackDeathFade;
+      float feedbackLifecycle = clamp(
+        sheetMask * 1.22 + dissolveMistMask * 0.72 + dissolve * spraySeed * 0.24,
+        0.0,
+        1.0
+      );
+      float feedbackInfluence = step(0.5, uFeedbackEnabled) * uFeedbackStrength *
+        mix(1.0, feedbackLifecycle, clamp(uFeedbackDissolveCoupling, 0.0, 1.0));
+      p += feedbackOffset * feedbackInfluence;
+      float feedbackSpeed = length(feedbackVelocity) * feedbackInfluence;
+
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
       float cameraDepth = max(-mvPosition.z, 0.001);
       float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
-      // Screen-density lock: close-up shots project the same particles across
-      // far more pixels, which otherwise looks sparse while distant geometry
-      // turns into a dense white haze.  A stronger inverse-depth coverage plus
-      // distance alpha keeps close/far shots visually consistent.
       float densityDepth = max(cameraDepth, 0.18);
-      float depthScale = clamp(pow(6.0 / densityDepth, 1.58) * pow(projectionBoost, 1.08), 0.10, 24.0);
-      float densityAlpha = clamp(pow(6.0 / densityDepth, 0.62) * pow(projectionBoost, 0.16), 0.22, 1.42);
+      float depthScale = clamp((6.0 / densityDepth) * pow(projectionBoost, 1.02), 0.10, 24.0);
+      float densityAlpha = 1.0;
       float growthPointScale = 0.62 + arrive * 0.38 + growHead * 0.38;
       float randomSize = mix(1.0, 0.52 + aSeed * 1.28, uSizeRandom);
       float corePointSize = uPointSize * uPixelRatio * depthScale * randomSize * growthPointScale;
+      corePointSize *= clamp(uAdaptivePointScale, 0.42, 1.35);
       corePointSize *= mix(0.36, 1.0, smoothstep(0.0, 0.72, particleizeReveal));
       corePointSize *= 1.0 + particleizeHead * 0.16;
       corePointSize *= mix(1.0, 0.56 + growHead * 0.32 + sheetMask * 0.22 + dissolveMistMask * 0.12, strandMask);
       corePointSize *= 1.0 + sheetMask * (0.08 + uDissolveMist * 0.12);
+      corePointSize *= 1.0 + smoothstep(0.04, 0.68, feedbackSpeed) * 0.14;
       corePointSize *= mix(1.0, 0.92 + morphRibbon * (0.18 + uMorphFlow * 0.06), morphMode);
+      corePointSize *= max(uTrailSize, 0.1);
       corePointSize = max(corePointSize, 1.05 * uPixelRatio);
-      float glowSourceSize = corePointSize * 1.08 + min(uGlowRadius, 1400.0) * uPixelRatio * 0.018;
-      gl_PointSize = mix(corePointSize, max(corePointSize, glowSourceSize), step(0.5, uGlowPass));
-      vCoreRadius = clamp((corePointSize / max(gl_PointSize, 0.001)) * 0.48, 0.025, 0.48);
+      float densityFootprintSize = corePointSize;
+      float glowSourceSize = densityFootprintSize * 1.06 + min(uGlowRadius, 1400.0) * uPixelRatio * 0.008;
+      gl_PointSize = mix(
+        densityFootprintSize,
+        max(densityFootprintSize, glowSourceSize),
+        step(0.5, uGlowPass)
+      ) * vSpriteStretch;
+      vCoreRadius = clamp((densityFootprintSize / max(gl_PointSize, 0.001)) * 0.48, 0.025, 0.48);
+      vCorePixelSize = densityFootprintSize;
       gl_Position = projectionMatrix * mvPosition;
 
-      vec3 gradientColor = mix(uColorA, uColorB, clamp(aMix + pulse * 0.08, 0.0, 1.0));
+      vec3 gradientColor = mix(
+        uColorA,
+        uColorB,
+        clamp(aMix + pulse * 0.08 * mix(1.0, modernShapeActivity, modernFlow), 0.0, 1.0)
+      );
       vColor = mix(gradientColor, aParticleColor, clamp(uUseTexture * aTextureWeight, 0.0, 1.0));
       float textureColorWeight = clamp(uUseTexture * aTextureWeight, 0.0, 1.0);
       vec3 liftedTextureColor = pow(max(vColor, vec3(0.0)), vec3(0.72));
       vColor = mix(vColor, liftedTextureColor, textureColorWeight * 0.72);
       vColor = mix(vColor, vec3(1.0), growHead * 0.18);
-      vec3 dissolveTint = mix(vec3(0.48, 0.68, 0.82), vec3(0.96, 0.985, 1.0), 0.45 + spark * 0.28);
-      vColor = mix(vColor, dissolveTint, sheetMask * (0.35 + uDissolveMist * 0.22) + dissolveMistMask * 0.12);
-      vColor += sheetMask * vec3(0.08, 0.12, 0.15);
+      vec3 dissolveTint = mix(vColor * 1.08, vec3(0.66, 0.84, 1.0), 0.18 + spark * 0.12);
+      vColor = mix(vColor, dissolveTint, sheetMask * (0.24 + uDissolveMist * 0.14) + dissolveMistMask * 0.08);
+      vec3 feedbackTint = mix(vColor, vec3(0.48, 0.78, 1.0), 0.24);
+      vColor = mix(vColor, feedbackTint, smoothstep(0.05, 0.62, feedbackSpeed) * feedbackLifecycle * 0.2);
+      vColor += sheetMask * vec3(0.035, 0.055, 0.075);
       vec3 silkTint = mix(vColor, vec3(0.72, 0.88, 1.0), 0.2 + spark * 0.14);
       vColor = mix(vColor, silkTint, strandMask * (growHead * 0.42 + sheetMask * 0.52 + dissolveMistMask * 0.1 + uEdgeBreak * 0.08));
       vec3 morphTargetColor = mix(gradientColor, aMorphColor, clamp(uUseTexture * aMorphTextureWeight, 0.0, 1.0));
       morphTargetColor = mix(morphTargetColor, vec3(0.92, 0.88, 0.8), morphRibbon * 0.08);
       vColor = mix(vColor, morphTargetColor, morphMode * morphEase);
       vec3 worldPosition = (modelMatrix * vec4(p, 1.0)).xyz;
-      vec3 worldNormal = normalize(mat3(modelMatrix) * normalize(aNormal + field * 0.06));
+      vec3 worldNormal = normalize(mat3(modelMatrix) * normalize(
+        aNormal + field * 0.06 * mix(1.0, modernShapeActivity, modernFlow)
+      ));
       float glowMix = (1.0 - exp(-max(uGlowExposure, 0.0) * 0.72)) *
         (1.0 - exp(-max(uGlowRadius, 0.0) * 0.008));
       vColor = applyParticleLights(vColor, worldPosition, worldNormal, glowMix);
       float growthAlpha = clamp(visible * (0.16 + arrive * 0.84) + growHead * 0.35, 0.0, 1.0);
-      float lateErase = smoothstep(0.82, 1.0, dissolveAmount) * smoothstep(0.76, 1.0, dissolve);
-      float dissolveFade = 1.0 - lateErase * (0.82 + clamp(uDissolveMist, 0.0, 1.0) * 0.12);
+      float dissolveFade = 1.0 - smoothstep(0.58, 1.48, dissolveLocal);
       float dissolveEdgeAlpha = max(
         dissolveEdge * (0.24 + uDissolveMist * 0.22) * (0.56 + spark * 0.44),
         sheetMask * (0.38 + uFilamentLength * 0.08)
@@ -3388,9 +4451,12 @@ const particleMaterial = new THREE.ShaderMaterial({
       vAlpha *= mix(1.0, 0.82, dissolveMistMask * (1.0 - dissolveEdge));
       vAlpha *= mix(1.0, 0.82 + morphRibbon * (0.24 + uMorphFlow * 0.05), morphMode);
       vAlpha *= particleizeAlpha * (0.55 + particleizeReveal * 0.45 + particleizeHead * 0.22);
-      vAlpha *= 1.0 - smoothstep(0.965, 1.0, dissolveAmount);
+      vAlpha *= 1.0 - smoothstep(0.992, 1.0, dissolveAmount);
       vAlpha *= densityAlpha;
+      vAlpha *= clamp(uAdaptiveAlphaScale, 0.38, 1.2);
       vAlpha *= clamp(uModelVisibility, 0.0, 1.0);
+      vAlpha *= clamp(uTrailOpacity, 0.0, 1.0);
+      vAlpha *= mix(1.0, feedbackLifeOpacity, step(0.5, uFeedbackEnabled));
       vGlowSeed = aSeed;
     }
   `,
@@ -3399,11 +4465,15 @@ const particleMaterial = new THREE.ShaderMaterial({
     uniform float uGlowExposure;
     uniform float uGlowPass;
     uniform float uEdgeFeather;
+    uniform float uPixelRatio;
 
     varying vec3 vColor;
     varying float vAlpha;
     varying float vCoreRadius;
+    varying float vCorePixelSize;
     varying float vGlowSeed;
+    varying float vSpriteAngle;
+    varying float vSpriteStretch;
 
     float coverageNoise(vec2 p) {
       return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
@@ -3411,7 +4481,17 @@ const particleMaterial = new THREE.ShaderMaterial({
 
     void main() {
       vec2 uv = gl_PointCoord - 0.5;
-      float d = length(uv);
+      float spriteCos = cos(vSpriteAngle);
+      float spriteSin = sin(vSpriteAngle);
+      vec2 alignedUv = mat2(spriteCos, spriteSin, -spriteSin, spriteCos) * uv;
+      float spriteStretch = max(vSpriteStretch, 1.0);
+      float capsuleRadius = 0.5 / spriteStretch;
+      float capsuleHalfSegment = max(0.0, 0.5 - capsuleRadius);
+      vec2 capsuleDelta = vec2(
+        alignedUv.x - clamp(alignedUv.x, -capsuleHalfSegment, capsuleHalfSegment),
+        alignedUv.y
+      );
+      float d = length(capsuleDelta) / max(capsuleRadius, 0.0001) * 0.5;
       if (uGlowPass < 0.5) {
         float feather = clamp(uEdgeFeather, 0.0, 1.0);
         float edgeWidth = mix(0.012, 0.16, feather);
@@ -3428,7 +4508,7 @@ const particleMaterial = new THREE.ShaderMaterial({
           discard;
         }
         float exposure = max(uGlowExposure, 0.0);
-        float exposureNorm = pow(1.0 - exp(-exposure * 0.55), 1.08);
+        float exposureNorm = 1.0 - exp(-pow(exposure, 1.08) * 0.68);
         float coreGlow = exposureNorm * (1.0 - exp(-max(uGlowRadius, 0.0) * 0.004));
         vec3 litColor = vColor * (1.0 + coreGlow * 0.16);
         gl_FragColor = vec4(litColor, 1.0);
@@ -3444,8 +4524,8 @@ const particleMaterial = new THREE.ShaderMaterial({
         discard;
       }
 
-      float exposureNorm = 1.0 - exp(-pow(exposure, 1.16) * 0.42);
-      float radiusNorm = 1.0 - exp(-max(uGlowRadius, 0.0) * 0.0028);
+      float exposureNorm = 1.0 - exp(-pow(exposure, 1.08) * 0.68);
+      float radiusNorm = 1.0 - exp(-max(uGlowRadius, 0.0) * 0.004);
       float glowStrength = exposureNorm * radiusNorm;
       if (glowStrength <= 0.00002) {
         discard;
@@ -3455,7 +4535,7 @@ const particleMaterial = new THREE.ShaderMaterial({
       float glowWeight = mix(0.18, 1.0, smoothstep(0.18, 0.92, max(luminance, colorEnergy * 0.76)));
       float highlight = mix(0.46, 1.0, smoothstep(0.72, 0.99, vGlowSeed));
       float radiusSoftness = clamp(uGlowRadius / 500.0, 0.0, 1.0);
-      float source = exp(-d * d * mix(5.6, 1.25, radiusSoftness));
+      float source = exp(-d * d * mix(8.2, 3.2, radiusSoftness));
       float energy = source * vAlpha * glowWeight * highlight * glowStrength;
       float alpha = energy * (0.18 + radiusNorm * 0.3);
       vec3 glowColor = mix(vColor, pow(max(vColor, vec3(0.0)), vec3(0.72)), 0.34);
@@ -3471,6 +4551,73 @@ glowMaterial.blending = THREE.AdditiveBlending;
 glowMaterial.depthWrite = false;
 glowMaterial.depthTest = false;
 glowMaterial.transparent = true;
+
+const particleTrailScene = new THREE.Scene();
+const particleTrailGeometry = new THREE.BufferGeometry();
+const particleTrailCoreMaterial = particleMaterial.clone();
+particleTrailCoreMaterial.uniforms = THREE.UniformsUtils.clone(uniforms);
+particleTrailCoreMaterial.depthWrite = false;
+particleTrailCoreMaterial.transparent = true;
+const particleTrailGlowMaterial = glowMaterial.clone();
+particleTrailGlowMaterial.uniforms = THREE.UniformsUtils.clone(glowUniforms);
+particleTrailGlowMaterial.depthWrite = false;
+particleTrailGlowMaterial.depthTest = false;
+particleTrailGlowMaterial.blending = THREE.AdditiveBlending;
+particleTrailGlowMaterial.transparent = true;
+const particleTrailPoints = new THREE.Points(particleTrailGeometry, particleTrailCoreMaterial);
+particleTrailPoints.frustumCulled = false;
+particleTrailPoints.matrixAutoUpdate = false;
+particleTrailScene.add(particleTrailPoints);
+
+function copyParticleTrailUniforms(sourceMaterial, targetMaterial) {
+  const sourceUniforms = sourceMaterial?.uniforms || {};
+  const targetUniforms = targetMaterial?.uniforms || {};
+  Object.entries(sourceUniforms).forEach(([name, sourceUniform]) => {
+    if (targetUniforms[name]) targetUniforms[name].value = sourceUniform.value;
+  });
+}
+
+function renderParticleTrailHistory(targetRenderer, renderCamera, pointsResource, glowPass = false) {
+  if (!isOperatorResource(pointsResource, 'points')) return 0;
+  const feedbackState = pointsResource.payload?.feedbackState;
+  const trail = feedbackState?.params?.trail;
+  const historyTextures = Array.isArray(feedbackState?.historyTextures)
+    ? feedbackState.historyTextures.slice(0, Math.max(0, Number(trail?.samples) || 0))
+    : [];
+  if (!trail?.enabled || trail.opacity <= 0 || historyTextures.length === 0) return 0;
+
+  const objects = pointsResource.payload?.objects || [pointsResource.object];
+  const sourceObject = objects.find((object) => (
+    Boolean(Number(object?.material?.uniforms?.uGlowPass?.value) >= 0.5) === glowPass
+  ));
+  if (!sourceObject?.geometry || !sourceObject?.material) return 0;
+
+  sourceObject.updateWorldMatrix?.(true, false);
+  particleTrailPoints.geometry = sourceObject.geometry;
+  particleTrailPoints.matrix.copy(sourceObject.matrixWorld);
+  particleTrailPoints.matrixWorld.copy(sourceObject.matrixWorld);
+  const trailMaterial = glowPass ? particleTrailGlowMaterial : particleTrailCoreMaterial;
+  particleTrailPoints.material = trailMaterial;
+  copyParticleTrailUniforms(sourceObject.material, trailMaterial);
+  trailMaterial.uniforms.uFeedbackEnabled.value = 1;
+  trailMaterial.uniforms.uFeedbackVelocity.value = feedbackState.velocityTexture || null;
+
+  const previousAutoClear = targetRenderer.autoClear;
+  targetRenderer.autoClear = false;
+  try {
+    for (let index = historyTextures.length - 1; index >= 0; index -= 1) {
+      const normalizedAge = (index + 1) / (historyTextures.length + 1);
+      const fadeWeight = Math.pow(Math.max(0, 1 - normalizedAge), trail.fade);
+      trailMaterial.uniforms.uFeedbackPosition.value = historyTextures[index];
+      trailMaterial.uniforms.uTrailOpacity.value = trail.opacity * fadeWeight;
+      trailMaterial.uniforms.uTrailSize.value = trail.size * (0.68 + (1 - normalizedAge) * 0.32);
+      targetRenderer.render(particleTrailScene, renderCamera);
+    }
+  } finally {
+    targetRenderer.autoClear = previousAutoClear;
+  }
+  return historyTextures.length;
+}
 
 const emissionUniforms = {
   uTime: { value: 0 },
@@ -3566,6 +4713,8 @@ const emissionMaterial = new THREE.ShaderMaterial({
     varying vec3 vColor;
     varying float vAlpha;
     varying float vGlow;
+    varying float vCorePixelSize;
+    varying float vDensitySeed;
 
     float hash(vec3 p) {
       return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
@@ -3673,14 +4822,24 @@ const emissionMaterial = new THREE.ShaderMaterial({
       float cameraDepth = max(-mvPosition.z, 0.001);
       float projectionBoost = clamp(projectionMatrix[1][1] / 2.25, 0.62, 3.25);
       float densityDepth = max(cameraDepth, 0.18);
-      float depthScale = clamp(pow(6.0 / densityDepth, 1.52) * pow(projectionBoost, 1.02), 0.10, 20.0);
-      float densityAlpha = clamp(pow(6.0 / densityDepth, 0.58) * pow(projectionBoost, 0.16), 0.24, 1.35);
+      float depthScale = clamp((6.0 / densityDepth) * pow(projectionBoost, 1.02), 0.10, 20.0);
+      float densityAlpha = 1.0;
       float sizeJitter = 0.62 + hash(position + vec3(aSeed)) * 0.72;
       float baseSize = max(uEmissionSize, 0.01) * uPixelRatio * depthScale * sizeJitter * (0.68 + plume * 0.42);
       baseSize *= 1.0 + breakMask * max(uBreakSize - 1.0, -0.75);
       baseSize = max(baseSize, 1.05 * uPixelRatio);
-      float glowSize = baseSize * (1.55 + clamp(uEmissionGlow, 0.0, 4.0) * 1.12);
-      gl_PointSize = mix(baseSize, max(baseSize, glowSize), step(0.5, uGlowPass));
+      float densityFootprintSize = max(
+        baseSize,
+        1.05 * uPixelRatio * max(depthScale, 1.0)
+      );
+      float glowSize = densityFootprintSize * (1.55 + clamp(uEmissionGlow, 0.0, 4.0) * 1.12);
+      gl_PointSize = mix(
+        densityFootprintSize,
+        max(densityFootprintSize, glowSize),
+        step(0.5, uGlowPass)
+      );
+      vCorePixelSize = densityFootprintSize;
+      vDensitySeed = aSeed;
       gl_Position = projectionMatrix * mvPosition;
 
       float gradientMix = clamp(
@@ -3708,25 +4867,67 @@ const emissionMaterial = new THREE.ShaderMaterial({
   `,
   fragmentShader: `
     uniform float uGlowPass;
+    uniform float uPixelRatio;
 
     varying vec3 vColor;
     varying float vAlpha;
     varying float vGlow;
+    varying float vCorePixelSize;
+    varying float vDensitySeed;
+
+    float densityHash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+    }
+
+    float screenDensityParticleAlpha(float pointPixelSize, float seed) {
+      float targetDiameter = max(1.65 * uPixelRatio, 1.35);
+      float gridSize = clamp(floor(pointPixelSize / targetDiameter + 0.18), 1.0, 36.0);
+      float clusterMask = step(1.5, gridSize);
+      vec2 cellUv = gl_PointCoord * gridSize;
+      vec2 cell = floor(cellUv);
+      vec2 localUv = fract(cellUv);
+      vec2 hashInput = cell + vec2(seed * 173.31, seed * 91.73);
+      vec2 jitter = vec2(
+        densityHash(hashInput + vec2(7.13, 19.71)),
+        densityHash(hashInput + vec2(31.17, 3.91))
+      );
+      vec2 center = mix(vec2(0.5), mix(vec2(0.34), vec2(0.66), jitter), clusterMask);
+      float cellPixelSize = pointPixelSize / max(gridSize, 1.0);
+      float radius = mix(
+        0.5,
+        min(0.48, max(0.3, (targetDiameter * 0.47) / max(cellPixelSize, 0.001))),
+        clusterMask
+      );
+      float edgeWidth = clamp((0.62 * uPixelRatio) / max(cellPixelSize, 0.001), 0.035, radius * 0.72);
+      return 1.0 - smoothstep(
+        max(radius - edgeWidth, 0.0),
+        radius,
+        length(localUv - center)
+      );
+    }
 
     void main() {
       vec2 uv = gl_PointCoord - 0.5;
       float d = length(uv);
-      if (d > 0.5) {
-        discard;
-      }
 
       if (uGlowPass < 0.5) {
         float core = smoothstep(0.48, 0.06, d);
         float feather = smoothstep(0.5, 0.32, d);
+        float legacyAlpha = core * feather;
+        float densityAlpha = screenDensityParticleAlpha(vCorePixelSize, vDensitySeed);
+        float densityClusterMask = step(max(1.65 * uPixelRatio, 1.35) * 1.5, vCorePixelSize);
+        float particleAlpha = mix(legacyAlpha, densityAlpha, densityClusterMask) * vAlpha;
+        if (particleAlpha <= 0.001) {
+          discard;
+        }
         float glowLift = 1.0 - exp(-pow(max(vGlow, 0.0), 1.12) * 0.48);
         vec3 color = vColor * (0.92 + glowLift * 0.16);
-        gl_FragColor = vec4(color, core * feather * vAlpha);
+        gl_FragColor = vec4(color, particleAlpha);
         return;
+      }
+
+      if (d > 0.5) {
+        discard;
       }
 
       if (vGlow <= 0.0001) {
@@ -4068,6 +5269,7 @@ resetCamera();
 ensureSceneCamerasInitialized();
 importSceneLights();
 syncUi();
+syncQualityUi();
 syncUniforms();
 refreshCameraTimeline();
 updatePlayButton();
@@ -4409,8 +5611,17 @@ async function buildParticles(source, label, options = {}) {
   try {
     configureModelAnimation(source, { reset: source !== modelAnimation.source });
     applyModelAnimationPose(getModelAnimationSeconds(0, false), { updateGeometry: false });
-    const particleGeometry = createParticleGeometry(source, state.particleCount);
-    const emissionGeometry = createEmissionGeometry(source, state.emissionCount);
+    const activeRecord = getSelectedSceneModel();
+    const samplingSeed = [
+      activeRecord?.payload?.path,
+      activeRecord?.payload?.name,
+      activeRecord?.payload?.extension,
+      activeRecord?.payload?.size,
+      activeRecord?.name,
+      label
+    ].filter(Boolean).join('|') || 'particle-model-studio-default';
+    const particleGeometry = createParticleGeometry(source, state.particleCount, `${samplingSeed}|surface`);
+    const emissionGeometry = createEmissionGeometry(source, state.emissionCount, `${samplingSeed}|emission`);
     if (token !== buildToken) {
       particleGeometry.dispose();
       emissionGeometry.dispose();
@@ -4505,12 +5716,13 @@ function createSceneModelRecord(options = {}) {
     effectRotation: normalizeVectorArray(options.effectRotation, [0, 0, 0]),
     collectionId: typeof options.collectionId === 'string' ? options.collectionId : '',
     hidden: Boolean(options.hidden),
+    effectPhase: Math.max(0, Number(options.effectPhase) || 0),
     snapshotRoot: null
   };
 }
 
 function sanitizeSceneModelOptions(options = {}) {
-  const snapshot = { ...captureKeyframeOptions(), ...options };
+  const snapshot = normalizeFlowEffectOptions({ ...captureKeyframeOptions(), ...options });
   if (!VALID_EFFECT_MODES.has(snapshot.effectMode) || snapshot.effectMode === 'image') {
     snapshot.effectMode = 'particles';
   }
@@ -4526,6 +5738,11 @@ function sanitizeSceneModelOptions(options = {}) {
   BOOLEAN_KEYFRAME_FIELDS.forEach((field) => {
     if (snapshot[field] !== undefined) {
       snapshot[field] = Boolean(snapshot[field]);
+    }
+  });
+  STRING_KEYFRAME_FIELDS.forEach((field) => {
+    if (snapshot[field] !== undefined) {
+      snapshot[field] = normalizeStringStateValue(field, snapshot[field]);
     }
   });
   COLOR_KEYFRAME_FIELDS.forEach((field) => {
@@ -4821,7 +6038,7 @@ function buildSceneModelSnapshotFromActive(record) {
     effectRoot.add(points);
   } else if (particles?.geometry) {
     const geometry = particles.geometry.clone();
-    const material = createSceneModelParticleMaterial(options, geometry);
+    const material = createSceneModelParticleMaterial(options, geometry, record.effectPhase);
     const points = new THREE.Points(geometry, material);
     points.name = `${record.name || 'Model'} Particle Snapshot`;
     points.frustumCulled = false;
@@ -4915,11 +6132,11 @@ function copyPointMaterialRenderState(target, source) {
   target.forceSinglePass = source.forceSinglePass;
 }
 
-function createSceneModelParticleMaterial(options = {}, geometry = null) {
+function createSceneModelParticleMaterial(options = {}, geometry = null, effectPhase = uniforms.uTime.value) {
   const material = particleMaterial.clone();
   material.uniforms = THREE.UniformsUtils.clone(uniforms);
   copyPointMaterialRenderState(material, particleMaterial);
-  applySceneModelParticleUniforms(material.uniforms, options, geometry);
+  applySceneModelParticleUniforms(material.uniforms, options, geometry, effectPhase);
   return material;
 }
 
@@ -4936,16 +6153,47 @@ function optionNumber(options, key, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function applySceneModelParticleUniforms(targetUniforms, options = {}, geometry = null) {
-  targetUniforms.uTime.value = uniforms.uTime.value;
+function applyParticleFlowBounds(targetUniforms, geometry = null) {
+  if (!targetUniforms?.uEffectBoundsCenter || !targetUniforms?.uEffectBoundsExtent) {
+    return;
+  }
+  if (geometry && !geometry.boundingBox) {
+    geometry.computeBoundingBox();
+  }
+  const bounds = geometry?.boundingBox;
+  if (!bounds || bounds.isEmpty()) {
+    targetUniforms.uEffectBoundsCenter.value.set(0, 0, 0);
+    targetUniforms.uEffectBoundsExtent.value.set(1, 1, 1);
+    return;
+  }
+  bounds.getCenter(targetUniforms.uEffectBoundsCenter.value);
+  bounds.getSize(targetUniforms.uEffectBoundsExtent.value).multiplyScalar(0.5);
+  targetUniforms.uEffectBoundsExtent.value.max(new THREE.Vector3(0.0001, 0.0001, 0.0001));
+}
+
+function applySceneModelParticleUniforms(targetUniforms, options = {}, geometry = null, effectPhase = uniforms.uTime.value) {
+  targetUniforms.uTime.value = Math.max(0, Number(effectPhase) || 0);
   targetUniforms.uPixelRatio.value = studioPixelRatio;
   targetUniforms.uPointSize.value = optionNumber(options, 'pointSize', state.pointSize);
   targetUniforms.uEdgeFeather.value = optionNumber(options, 'edgeFeather', state.edgeFeather);
   targetUniforms.uSizeRandom.value = optionNumber(options, 'sizeRandom', state.sizeRandom);
+  if (targetUniforms.uAdaptiveDensityRatio) {
+    targetUniforms.uAdaptiveDensityRatio.value = geometry?.userData?.baseDensityRatio || 1;
+  }
+  if (targetUniforms.uAdaptivePointScale) {
+    targetUniforms.uAdaptivePointScale.value = 1;
+  }
+  if (targetUniforms.uAdaptiveAlphaScale) {
+    targetUniforms.uAdaptiveAlphaScale.value = 1;
+  }
   targetUniforms.uGlowRadius.value = optionNumber(options, 'glowRadius', state.glowRadius);
   targetUniforms.uGlowExposure.value = optionNumber(options, 'glowExposure', state.glowExposure);
   targetUniforms.uParticleizeProgress.value = optionNumber(options, 'particleizeProgress', state.particleizeProgress);
   targetUniforms.uModelVisibility.value = THREE.MathUtils.clamp(optionNumber(options, 'modelVisibility', state.modelVisibility), 0, 1);
+  targetUniforms.uFlowStyle.value = getFlowStyleId(options.flowStyle);
+  targetUniforms.uFlowCharacter.value = normalizeFlowCharacter(options.flowCharacter);
+  targetUniforms.uFlowQuality.value = getFlowQualityDetail(activeQualityLevel);
+  applyParticleFlowBounds(targetUniforms, geometry);
   targetUniforms.uSpread.value = optionNumber(options, 'spread', state.spread);
   targetUniforms.uNoise.value = optionNumber(options, 'noise', state.noise);
   targetUniforms.uNoiseScale.value = optionNumber(options, 'noiseScale', state.noiseScale);
@@ -5031,6 +6279,47 @@ function applySceneModelEmissionUniforms(targetUniforms, options = {}, geometry 
   syncParticleLightingUniformSet(targetUniforms);
 }
 
+function resolveSceneModelFlowPhase(record) {
+  if (deterministicFlowRenderTime !== null) {
+    return Math.max(0, deterministicFlowRenderTime) * Math.max(0, optionNumber(record?.options, 'speed', 0));
+  }
+  return Math.max(0, Number(record?.effectPhase) || 0);
+}
+
+function getActiveFlowSpeed(fallback = state.speed) {
+  if (operatorGraphDocument?.metadata?.mode === 'graph') {
+    const graphSpeed = Number(
+      operatorGraphDocument.nodes?.find((node) => node.type === 'simulation.dissolve')?.params?.speed
+    );
+    if (Number.isFinite(graphSpeed)) {
+      return Math.max(0, graphSpeed);
+    }
+  }
+  return Math.max(0, Number(fallback) || 0);
+}
+
+function advanceSceneModelFlowPhases(deltaSeconds) {
+  const activeRecord = getSelectedSceneModel();
+  if (!sceneModelObjects.length) {
+    uniforms.uTime.value = advanceFlowPhase(uniforms.uTime.value, deltaSeconds, state.speed);
+    return;
+  }
+  sceneModelObjects.forEach((record) => {
+    const speed = record === activeRecord
+      ? getActiveFlowSpeed(state.speed)
+      : Math.max(0, optionNumber(record.options, 'speed', 0));
+    record.effectPhase = advanceFlowPhase(record.effectPhase, deltaSeconds, speed);
+    if (record === activeRecord) {
+      uniforms.uTime.value = record.effectPhase;
+    }
+  });
+}
+
+function getDeterministicActiveFlowPhase(timeSeconds) {
+  const speedKeyframes = getSortedParameterKeyframes('speed');
+  return integrateLinearSpeed(timeSeconds, speedKeyframes, getActiveFlowSpeed(state.speed));
+}
+
 function updateSceneModelSnapshotUniforms() {
   sceneModelObjects.forEach((record) => {
     if (!record.snapshotRoot) {
@@ -5060,10 +6349,138 @@ function updateSceneModelSnapshotUniforms() {
       if (node.material.uniforms.uEmissionEnabled) {
         applySceneModelEmissionUniforms(node.material.uniforms, record.options, node.geometry);
       } else if (node.material.uniforms.uPointSize) {
-        applySceneModelParticleUniforms(node.material.uniforms, record.options, node.geometry);
+        applySceneModelParticleUniforms(
+          node.material.uniforms,
+          record.options,
+          node.geometry,
+          resolveSceneModelFlowPhase(record)
+        );
       }
     });
   });
+}
+
+function estimatePointObjectScreenDiameter(object, renderCamera, width, height) {
+  const geometry = object?.geometry;
+  if (!geometry || !renderCamera || width <= 0 || height <= 0) {
+    return 0;
+  }
+  if (!geometry.boundingSphere) {
+    geometry.computeBoundingSphere();
+  }
+  if (!geometry.boundingSphere) {
+    return 0;
+  }
+
+  object.updateWorldMatrix?.(true, false);
+  renderCamera.updateMatrixWorld?.(true);
+  const sphere = geometry.boundingSphere.clone();
+  sphere.applyMatrix4(object.matrixWorld);
+  if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) {
+    return 0;
+  }
+
+  if (renderCamera.isOrthographicCamera) {
+    const worldHeight = Math.max(
+      0.0001,
+      (renderCamera.top - renderCamera.bottom) / Math.max(renderCamera.zoom || 1, 0.0001)
+    );
+    return Math.min(Math.max(width, height) * 2.2, (sphere.radius * 2 * height) / worldHeight);
+  }
+
+  const viewCenter = sphere.center.clone().applyMatrix4(renderCamera.matrixWorldInverse);
+  const depth = Math.max(-viewCenter.z - sphere.radius * 0.25, renderCamera.near || CAMERA_DEFAULT_NEAR, 0.001);
+  const projectionY = Math.abs(renderCamera.projectionMatrix?.elements?.[5] || 1);
+  const radiusPixels = (sphere.radius * projectionY * height * 0.5) / depth;
+  return Math.min(Math.max(width, height) * 2.2, radiusPixels * 2);
+}
+
+function computeAdaptiveParticleDensity(object, renderCamera, width, height) {
+  const geometry = object?.geometry;
+  const capacity = Number(geometry?.userData?.capacity || geometry?.attributes?.position?.count || 0);
+  const authoredCount = Number(geometry?.userData?.authoredCount || capacity);
+  if (!capacity || !authoredCount || !geometry?.getAttribute?.('aSeed')) {
+    return {
+      ratio: 1,
+      pointScale: 1,
+      alphaScale: 1,
+      visibleCount: capacity,
+      projectedDiameter: 0,
+      multiplier: 1
+    };
+  }
+
+  const projectedDiameter = estimatePointObjectScreenDiameter(object, renderCamera, width, height);
+  const maxMultiplier = Math.max(1, capacity / Math.max(authoredCount, 1));
+  const rawMultiplier = Math.pow(
+    Math.max(projectedDiameter, 1) / ADAPTIVE_PARTICLE_CLOSE_REFERENCE_DIAMETER,
+    2
+  );
+  const multiplier = THREE.MathUtils.clamp(
+    rawMultiplier,
+    Math.min(ADAPTIVE_PARTICLE_MIN_SCREEN_MULTIPLIER, maxMultiplier),
+    maxMultiplier
+  );
+  const visibleCount = THREE.MathUtils.clamp(
+    Math.round(authoredCount * multiplier),
+    1,
+    capacity
+  );
+  const densityGain = Math.max(1, visibleCount / Math.max(authoredCount, 1));
+
+  return {
+    ratio: THREE.MathUtils.clamp(visibleCount / Math.max(capacity, 1), 0, 1),
+    pointScale: THREE.MathUtils.clamp(Math.pow(densityGain, -0.08), 0.82, 1.08),
+    alphaScale: THREE.MathUtils.clamp(Math.pow(densityGain, -0.1), 0.78, 1.04),
+    visibleCount,
+    projectedDiameter,
+    multiplier
+  };
+}
+
+function assignAdaptiveParticleUniforms(material, density) {
+  const materials = Array.isArray(material) ? material : [material];
+  materials.forEach((item) => {
+    const targetUniforms = item?.uniforms;
+    if (!targetUniforms?.uAdaptiveDensityRatio) {
+      return;
+    }
+    targetUniforms.uAdaptiveDensityRatio.value = density.ratio;
+    targetUniforms.uAdaptivePointScale.value = density.pointScale;
+    targetUniforms.uAdaptiveAlphaScale.value = density.alphaScale;
+  });
+}
+
+function applyAdaptiveParticleDensityForRender(renderCamera, width, height) {
+  const pointObjects = [];
+  if (particles) pointObjects.push(particles);
+  if (glowParticles) pointObjects.push(glowParticles);
+  sceneModelObjects.forEach((record) => {
+    record.snapshotRoot?.traverse((node) => {
+      if (node.isPoints && node.material?.uniforms?.uAdaptiveDensityRatio) {
+        pointObjects.push(node);
+      }
+    });
+  });
+
+  const stats = [];
+  pointObjects.forEach((object) => {
+    const density = computeAdaptiveParticleDensity(object, renderCamera, width, height);
+    assignAdaptiveParticleUniforms(object.material, density);
+    if (object.geometry?.userData) {
+      object.geometry.userData.lastAdaptiveDensity = density;
+    }
+    stats.push({
+      name: object.name || 'particles',
+      visibleCount: density.visibleCount,
+      capacity: Number(object.geometry?.userData?.capacity || object.geometry?.attributes?.position?.count || 0),
+      ratio: Number(density.ratio.toFixed(4)),
+      projectedDiameter: Number(density.projectedDiameter.toFixed(1)),
+      multiplier: Number(density.multiplier.toFixed(3))
+    });
+  });
+  perfStats.lastAdaptiveParticleStats = stats;
+  return stats;
 }
 
 function sceneModelEffectLabel(mode) {
@@ -5333,7 +6750,7 @@ function applySceneModelOptionsToState(options = {}) {
   });
   STRING_KEYFRAME_FIELDS.forEach((field) => {
     if (snapshot[field] !== undefined) {
-      state[field] = VALID_EFFECT_MODES.has(snapshot[field]) ? snapshot[field] : 'particles';
+      state[field] = normalizeStringStateValue(field, snapshot[field]);
     }
   });
 }
@@ -5381,6 +6798,7 @@ async function activateSceneModel(recordId, options = {}) {
   }
   currentSource = record.source;
   currentLabel = record.name;
+  uniforms.uTime.value = Math.max(0, Number(record.effectPhase) || 0);
   syncUi();
   syncUniforms();
   selectSceneModelTransform();
@@ -5461,7 +6879,8 @@ async function duplicateSelectedSceneModel() {
     options: { ...sourceRecord.options },
     transform,
     effectRotation: [...sourceRecord.effectRotation],
-    collectionId: sourceRecord.collectionId || ''
+    collectionId: sourceRecord.collectionId || '',
+    effectPhase: sourceRecord.effectPhase
   });
   sceneModelObjects.push(duplicate);
   await activateSceneModel(duplicate.id);
@@ -7309,8 +8728,60 @@ function removeImageSplatObject(options = {}) {
   }
 }
 
-function createParticleGeometry(root, count) {
-  const targetCount = Math.max(1, Math.round(Number(count) || 1));
+function getAdaptiveParticleReservoirCapacity(count) {
+  const authoredCount = Math.max(1, Math.round(Number(count) || 1));
+  let multiplier = 2.75;
+  if (authoredCount <= ADAPTIVE_PARTICLE_LOW_COUNT_THRESHOLD) {
+    multiplier = 10;
+  } else if (authoredCount <= ADAPTIVE_PARTICLE_MID_COUNT_THRESHOLD) {
+    multiplier = 6;
+  } else if (authoredCount <= ADAPTIVE_PARTICLE_HIGH_COUNT_THRESHOLD) {
+    multiplier = 4.5;
+  }
+  return Math.max(
+    authoredCount,
+    Math.min(ADAPTIVE_PARTICLE_RESERVOIR_MAX, Math.round(authoredCount * multiplier))
+  );
+}
+
+function hashParticleSeed(value) {
+  let hash = 2166136261;
+  const text = String(value || 'particle-model-studio');
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function createParticleRandom(seed) {
+  let value = hashParticleSeed(seed) || 0x6d2b79f5;
+  return () => {
+    value += 0x6d2b79f5;
+    let result = value;
+    result = Math.imul(result ^ (result >>> 15), result | 1);
+    result ^= result + Math.imul(result ^ (result >>> 7), result | 61);
+    return ((result ^ (result >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function withDeterministicParticleRandom(seed, callback) {
+  const previousRandom = Math.random;
+  Math.random = createParticleRandom(seed);
+  try {
+    return callback();
+  } finally {
+    Math.random = previousRandom;
+  }
+}
+
+function createParticleGeometry(root, count, seed = 'surface') {
+  return withDeterministicParticleRandom(seed, () => createParticleGeometryUnseeded(root, count));
+}
+
+function createParticleGeometryUnseeded(root, count) {
+  const authoredCount = Math.max(1, Math.round(Number(count) || 1));
+  const targetCount = getAdaptiveParticleReservoirCapacity(authoredCount);
   const cleanupStrength = THREE.MathUtils.clamp(Number(state.sampleCleanup ?? 0), 0, 1);
   const candidateCount = getParticleCandidateCount(targetCount, cleanupStrength);
   const captureAnimationBindings = hasModelAnimation(root);
@@ -7530,7 +9001,14 @@ function createParticleGeometry(root, count) {
   particleGeometry.setAttribute('aMorphTarget', new THREE.BufferAttribute(morphTarget.positions, 3));
   particleGeometry.setAttribute('aMorphColor', new THREE.BufferAttribute(morphTarget.colors, 3));
   particleGeometry.setAttribute('aMorphTextureWeight', new THREE.BufferAttribute(morphTarget.textureWeights, 1));
+  particleGeometry.userData.authoredCount = Math.min(authoredCount, finalCount);
+  particleGeometry.userData.baseDensityRatio = THREE.MathUtils.clamp(
+    particleGeometry.userData.authoredCount / Math.max(finalCount, 1),
+    0,
+    1
+  );
   particleGeometry.userData.capacity = finalCount;
+  particleGeometry.userData.adaptiveCapacity = finalCount;
   particleGeometry.userData.hasMorphTarget = morphTarget.ready;
   if (captureAnimationBindings) {
     particleGeometry.userData.animationBindings = createAnimationBindings({
@@ -7628,7 +9106,11 @@ function createNormalizedModelParticleArrays(root, count) {
   return { positions, colors, textureWeights };
 }
 
-function createEmissionGeometry(root, count) {
+function createEmissionGeometry(root, count, seed = 'emission') {
+  return withDeterministicParticleRandom(seed, () => createEmissionGeometryUnseeded(root, count));
+}
+
+function createEmissionGeometryUnseeded(root, count) {
   const safeCount = Math.max(MIN_PARTICLE_COUNT, Math.round(Number(count) || MIN_PARTICLE_COUNT));
   const captureAnimationBindings = hasModelAnimation(root);
   const { meshes, box, sampleBox } = collectSampleMeshes(root, { captureAnimationBindings });
@@ -10527,6 +12009,7 @@ async function importSceneModels(snapshot = {}) {
     await buildParticles(activeRecord.source, activeRecord.name, { resetView: false });
     currentSource = activeRecord.source;
     currentLabel = activeRecord.name;
+    uniforms.uTime.value = Math.max(0, Number(activeRecord.effectPhase) || 0);
   } finally {
     sceneModelSaveSuspended = false;
   }
@@ -10596,6 +12079,10 @@ function syncUniforms() {
   uniforms.uGlowExposure.value = state.glowExposure;
   uniforms.uParticleizeProgress.value = state.particleizeProgress;
   uniforms.uModelVisibility.value = state.modelVisibility;
+  uniforms.uFlowStyle.value = getFlowStyleId(state.flowStyle);
+  uniforms.uFlowCharacter.value = normalizeFlowCharacter(state.flowCharacter);
+  uniforms.uFlowQuality.value = getFlowQualityDetail(activeQualityLevel);
+  applyParticleFlowBounds(uniforms, particles?.geometry);
   uniforms.uSpread.value = state.spread;
   uniforms.uNoise.value = state.noise;
   uniforms.uNoiseScale.value = state.noiseScale;
@@ -11375,10 +12862,15 @@ function updateStats() {
     return;
   }
 
-  const actualParticleCount = particles?.geometry?.userData?.capacity || state.particleCount;
+  const geometryData = particles?.geometry?.userData || {};
+  const actualParticleCount = geometryData.capacity || state.particleCount;
+  const authoredParticleCount = geometryData.authoredCount || state.particleCount;
+  const countLabel = actualParticleCount > authoredParticleCount
+    ? `${formatCount(authoredParticleCount)} / ${formatCount(actualParticleCount)} adaptive`
+    : formatCount(actualParticleCount);
   statsText.textContent = state.effectMode === 'morph'
-    ? `${formatCount(actualParticleCount)} morph particles`
-    : `${formatCount(actualParticleCount)} particles`;
+    ? `${countLabel} morph particles`
+    : `${countLabel} particles`;
 }
 
 function resetImageSplatTransform() {
@@ -12169,6 +13661,31 @@ function createDefaultLightConfig() {
 function syncUi() {
   setRangeValue('particleCount', state.particleCount);
   NUMERIC_KEYFRAME_FIELDS.forEach((field) => setRangeValue(field, state[field]));
+  if (controlsUi.flowStyle) {
+    controlsUi.flowStyle.value = normalizeFlowStyle(state.flowStyle);
+  }
+  const activeFlowStyle = normalizeFlowStyle(state.flowStyle);
+  controlsUi.flowStyleCards?.forEach((button) => {
+    const active = button.dataset.flowStyle === activeFlowStyle;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (controlsUi.flowStyleDescription) {
+    controlsUi.flowStyleDescription.textContent = ({
+      'fluid-ribbon': '连续束状流线，适合产品、角色和有机形体的丝滑消散。',
+      'weathered-dust': '短拖丝与柔边雾化，适合风化、尘化和缓慢剥落。',
+      'energy-burst': '强方向、高卷曲和窄亮边，适合冲击、传送与节奏点。'
+    })[activeFlowStyle];
+  }
+  if (controlsUi.flowMotionStatus) {
+    const moving = Number(state.speed) > 0.0001;
+    controlsUi.flowMotionStatus.textContent = moving ? `流动中 · ${Number(state.speed).toFixed(2)}` : '已静止';
+    controlsUi.flowMotionStatus.classList.toggle('is-moving', moving);
+    controlsUi.flowMotionStatus.classList.toggle('is-still', !moving);
+  }
+  if (controlsUi.flowDirectionPreset) {
+    controlsUi.flowDirectionPreset.value = normalizeFlowDirectionPreset(state.flowDirectionPreset);
+  }
   controlsUi.emissionEnabled.checked = state.emissionEnabled;
   controlsUi.colorA.value = state.colorA;
   controlsUi.colorB.value = state.colorB;
@@ -12253,6 +13770,10 @@ function formatControlValue(key, value) {
 
   if (key === 'cameraFocalLength' || key === 'cameraFocusDistance') {
     return Number(value).toFixed(2);
+  }
+
+  if (key === 'cameraApertureBlades') {
+    return String(Math.round(Number(value) || 3));
   }
 
   return Number(value).toFixed(2);
@@ -12409,6 +13930,10 @@ function syncCameraSettingsFromState(updateUi = false) {
   state.cameraDisplaySize = THREE.MathUtils.clamp(Number(state.cameraDisplaySize) || 1, 0.2, 5);
   state.cameraAperture = THREE.MathUtils.clamp(Number(state.cameraAperture) || 5.6, 1.2, 22);
   state.cameraFocusDistance = THREE.MathUtils.clamp(Number(state.cameraFocusDistance) || 7.18, 0.05, CAMERA_FOCUS_DISTANCE_MAX);
+  state.cameraBokehScale = THREE.MathUtils.clamp(Number(state.cameraBokehScale) || 2.35, 0.25, 6);
+  state.cameraBokehHighlight = THREE.MathUtils.clamp(Number(state.cameraBokehHighlight) || 0, 0, 4);
+  state.cameraApertureBlades = THREE.MathUtils.clamp(Math.round(Number(state.cameraApertureBlades) || 7), 3, 12);
+  state.cameraApertureRoundness = THREE.MathUtils.clamp(Number(state.cameraApertureRoundness) || 0, 0, 1);
   state.cameraDofEnabled = Boolean(state.cameraDofEnabled) && state.cameraType === 'perspective';
 
   camera.filmGauge = state.cameraSensorWidth;
@@ -12424,10 +13949,18 @@ function syncCameraSettingsFromState(updateUi = false) {
     setRangeValue('cameraFocalLength', state.cameraFocalLength);
     setRangeValue('cameraAperture', state.cameraAperture);
     setRangeValue('cameraFocusDistance', state.cameraFocusDistance);
+    setRangeValue('cameraBokehScale', state.cameraBokehScale);
+    setRangeValue('cameraBokehHighlight', state.cameraBokehHighlight);
+    setRangeValue('cameraApertureBlades', state.cameraApertureBlades);
+    setRangeValue('cameraApertureRoundness', state.cameraApertureRoundness);
     setValueInput('cameraDisplaySize', state.cameraDisplaySize);
     setValueInput('cameraFocalLength', state.cameraFocalLength);
     setValueInput('cameraAperture', state.cameraAperture);
     setValueInput('cameraFocusDistance', state.cameraFocusDistance);
+    setValueInput('cameraBokehScale', state.cameraBokehScale);
+    setValueInput('cameraBokehHighlight', state.cameraBokehHighlight);
+    setValueInput('cameraApertureBlades', state.cameraApertureBlades);
+    setValueInput('cameraApertureRoundness', state.cameraApertureRoundness);
   }
 
   const perspective = state.cameraType === 'perspective';
@@ -12435,8 +13968,16 @@ function syncCameraSettingsFromState(updateUi = false) {
   controlsUi.cameraDofEnabled.disabled = !perspective;
   controlsUi.cameraAperture.disabled = !dofControlsEnabled;
   controlsUi.cameraFocusDistance.disabled = !dofControlsEnabled;
+  controlsUi.cameraBokehScale.disabled = !dofControlsEnabled;
+  controlsUi.cameraBokehHighlight.disabled = !dofControlsEnabled;
+  controlsUi.cameraApertureBlades.disabled = !dofControlsEnabled;
+  controlsUi.cameraApertureRoundness.disabled = !dofControlsEnabled;
   outputUi.cameraAperture.disabled = !dofControlsEnabled;
   outputUi.cameraFocusDistance.disabled = !dofControlsEnabled;
+  outputUi.cameraBokehScale.disabled = !dofControlsEnabled;
+  outputUi.cameraBokehHighlight.disabled = !dofControlsEnabled;
+  outputUi.cameraApertureBlades.disabled = !dofControlsEnabled;
+  outputUi.cameraApertureRoundness.disabled = !dofControlsEnabled;
   if (controlsUi.cameraModeHint) {
     controlsUi.cameraModeHint.textContent = perspective
       ? '相机大小调整场景中的相机线框和手柄；焦段控制最终取景，景深参数可独立 K 帧。'
@@ -12479,6 +14020,18 @@ function setCameraSettings(settings = {}, updateUi = true) {
   if (settings.focusDistance !== undefined || settings.cameraFocusDistance !== undefined) {
     state.cameraFocusDistance = Number(settings.focusDistance ?? settings.cameraFocusDistance);
   }
+  if (settings.bokehScale !== undefined || settings.cameraBokehScale !== undefined) {
+    state.cameraBokehScale = Number(settings.bokehScale ?? settings.cameraBokehScale);
+  }
+  if (settings.highlightGain !== undefined || settings.cameraBokehHighlight !== undefined) {
+    state.cameraBokehHighlight = Number(settings.highlightGain ?? settings.cameraBokehHighlight);
+  }
+  if (settings.blades !== undefined || settings.cameraApertureBlades !== undefined) {
+    state.cameraApertureBlades = Number(settings.blades ?? settings.cameraApertureBlades);
+  }
+  if (settings.roundness !== undefined || settings.cameraApertureRoundness !== undefined) {
+    state.cameraApertureRoundness = Number(settings.roundness ?? settings.cameraApertureRoundness);
+  }
   syncCameraSettingsFromState(updateUi);
   return getCameraSettings();
 }
@@ -12492,7 +14045,11 @@ function getCameraSettings() {
     fov: camera.fov,
     dofEnabled: Boolean(state.cameraDofEnabled),
     aperture: state.cameraAperture,
-    focusDistance: state.cameraFocusDistance
+    focusDistance: state.cameraFocusDistance,
+    bokehScale: state.cameraBokehScale,
+    highlightGain: state.cameraBokehHighlight,
+    blades: state.cameraApertureBlades,
+    roundness: state.cameraApertureRoundness
   };
 }
 
@@ -12521,8 +14078,9 @@ function updateCameraPreviewLayout(force = false) {
 
   const viewWidth = Math.max(2, Math.round(cameraPreviewUi.canvas.clientWidth || 0));
   const viewHeight = Math.max(2, Math.round(cameraPreviewUi.canvas.clientHeight || viewWidth / aspect));
-  const renderWidth = Math.max(2, Math.round(width));
-  const renderHeight = Math.max(2, Math.round(height));
+  const previewScale = exportSettings.hideUi ? 1 : activeQualityProfile.cameraPreviewScale;
+  const renderWidth = Math.max(2, Math.round(width * previewScale));
+  const renderHeight = Math.max(2, Math.round(height * previewScale));
   const pixelRatio = 1;
   if (
     !force &&
@@ -12762,21 +14320,46 @@ function renderCameraPreview(force = false) {
 
   try {
     const previewCamera = configureCameraPreviewCamera(layout.aspect);
-    if (state.cameraType === 'panorama') {
-      renderPanoramaFor(cameraPreviewRenderer, previewCamera, {
-        outputTarget: null,
-        transparent: false,
-        width: layout.renderWidth,
-        height: layout.renderHeight
-      });
-    } else {
-      renderSceneWithGlowFor(
-        cameraPreviewRenderer,
-        previewCamera,
-        cameraPreviewPostTargets,
-        { outputTarget: null, transparent: false, dofEnabled: true }
-      );
-    }
+    executeStudioOperatorGraphFrame({
+      scope: 'camera-preview',
+      simulationTime: clock.elapsedTime,
+      feedbackRenderer: cameraPreviewRenderer,
+      renderCamera: previewCamera,
+      createRenderPipeline: state.cameraType === 'panorama'
+        ? undefined
+        : (resourceTracker) => createOperatorRenderPipeline(
+          cameraPreviewRenderer,
+          previewCamera,
+          cameraPreviewPostTargets,
+          {
+            resourceTracker,
+            outputTarget: null,
+            transparent: false
+          }
+        ),
+      renderLegacy: (graphEffects) => {
+        if (state.cameraType === 'panorama') {
+          renderPanoramaFor(cameraPreviewRenderer, previewCamera, {
+            outputTarget: null,
+            transparent: false,
+            width: layout.renderWidth,
+            height: layout.renderHeight
+          });
+        } else {
+          renderSceneWithGlowFor(
+            cameraPreviewRenderer,
+            previewCamera,
+            cameraPreviewPostTargets,
+            {
+              outputTarget: null,
+              transparent: false,
+              dofEnabled: graphEffects.dofEnabled !== false,
+              glowEnabled: graphEffects.glowEnabled !== false
+            }
+          );
+        }
+      }
+    });
   } finally {
     scene.background = previousPreviewBackground;
     scene.backgroundIntensity = previousPreviewBackgroundIntensity;
@@ -12810,6 +14393,10 @@ function captureCameraSnapshot() {
     dofEnabled: state.cameraDofEnabled,
     aperture: state.cameraAperture,
     focusDistance: state.cameraFocusDistance,
+    bokehScale: state.cameraBokehScale,
+    highlightGain: state.cameraBokehHighlight,
+    blades: state.cameraApertureBlades,
+    roundness: state.cameraApertureRoundness,
     zoom: snapshotCamera.zoom,
     near: snapshotCamera.near,
     far: snapshotCamera.far,
@@ -12903,6 +14490,18 @@ function applyCameraProjectionSnapshot(snapshot = {}) {
     const focusPosition = new THREE.Vector3().fromArray(snapshot.position.map(Number).slice(0, 3));
     const focusTarget = new THREE.Vector3().fromArray(snapshot.target.map(Number).slice(0, 3));
     state.cameraFocusDistance = focusPosition.distanceTo(focusTarget);
+  }
+  if (Number.isFinite(Number(snapshot.bokehScale))) {
+    state.cameraBokehScale = Number(snapshot.bokehScale);
+  }
+  if (Number.isFinite(Number(snapshot.highlightGain))) {
+    state.cameraBokehHighlight = Number(snapshot.highlightGain);
+  }
+  if (Number.isFinite(Number(snapshot.blades))) {
+    state.cameraApertureBlades = Number(snapshot.blades);
+  }
+  if (Number.isFinite(Number(snapshot.roundness))) {
+    state.cameraApertureRoundness = Number(snapshot.roundness);
   }
   if (Number.isFinite(Number(snapshot.displaySize ?? snapshot.cameraDisplaySize))) {
     state.cameraDisplaySize = Number(snapshot.displaySize ?? snapshot.cameraDisplaySize);
@@ -13246,7 +14845,7 @@ function captureKeyframeOptions() {
     ...Object.fromEntries(NUMERIC_KEYFRAME_FIELDS.filter((field) => !CAMERA_KEYFRAME_FIELDS.has(field)).map((field) => [field, state[field]])),
     ...Object.fromEntries(COLOR_KEYFRAME_FIELDS.map((field) => [field, state[field]])),
     ...Object.fromEntries(BOOLEAN_KEYFRAME_FIELDS.filter((field) => !CAMERA_KEYFRAME_FIELDS.has(field)).map((field) => [field, state[field]])),
-    effectMode: state.effectMode
+    ...Object.fromEntries(STRING_KEYFRAME_FIELDS.filter((field) => field !== 'cameraType').map((field) => [field, state[field]]))
   };
 }
 
@@ -13372,6 +14971,7 @@ function hasKeyframedOptions() {
 }
 
 async function applyOptionsSnapshot(options = {}, updateUi = false) {
+  options = normalizeFlowEffectOptions(options);
   if (options.glow !== undefined && options.glowExposure === undefined) {
     options.glowExposure = Number(options.glow);
   }
@@ -13430,9 +15030,7 @@ async function applyOptionsSnapshot(options = {}, updateUi = false) {
 
   STRING_KEYFRAME_FIELDS.forEach((field) => {
     if (typeof options[field] === 'string') {
-      const nextValue = field === 'effectMode'
-        ? (VALID_EFFECT_MODES.has(options[field]) ? options[field] : 'particles')
-        : normalizeCameraType(options[field]);
+      const nextValue = normalizeStringStateValue(field, options[field]);
       visibleModelNeedsSync = visibleModelNeedsSync || state[field] !== nextValue;
       state[field] = nextValue;
     }
@@ -13680,9 +15278,7 @@ function applyKeyframedOptionsAtTime(time, updateUi = false) {
     }
     const value = pickOptionValue(keyframes, time, field);
     if (value !== undefined) {
-      state[field] = field === 'effectMode'
-        ? (VALID_EFFECT_MODES.has(value) ? value : 'particles')
-        : normalizeCameraType(value);
+      state[field] = normalizeStringStateValue(field, value);
     }
   });
 
@@ -15482,7 +17078,7 @@ function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
-function glowEnabled() {
+function glowEnabled(options = {}) {
   if (state.effectMode === 'image') {
     return Boolean(imageSplatGlowParticles) && state.imageSplatGlow > 0 && state.imageSplatOpacity > 0;
   }
@@ -15499,13 +17095,729 @@ function glowEnabled() {
   return Boolean(glowParticles) &&
     state.modelVisibility > 0.001 &&
     state.particleizeProgress > 0.02 &&
-    state.glowRadius > 0 &&
-    state.glowExposure > 0;
+    Number(options.glowRadius ?? state.glowRadius) > 0 &&
+    Number(options.glowExposure ?? state.glowExposure) > 0;
 }
 
 const PROJECT_FORMAT = 'particle-model-studio-project';
 const PROJECT_SCHEMA_VERSION = 1;
 let currentProjectName = '';
+
+function createOperatorGraphFromCreatorState(sceneOptions = captureKeyframeOptions(), cameraSettings = getCameraSettings()) {
+  return createCreatorOperatorGraph({
+    options: sceneOptions,
+    camera: cameraSettings,
+    quality: getQualitySettings(),
+    model: {
+      name: currentLabel,
+      loaded: Boolean(currentModelPayload || visibleModelRoot?.children?.length)
+    }
+  });
+}
+
+function captureOperatorGraphDocument(sceneOptions = captureKeyframeOptions(), cameraSettings = getCameraSettings()) {
+  if (
+    !operatorGraphDocument ||
+    (operatorGraphDocument.metadata?.mode === 'creator' && operatorGraphDocument.metadata?.synchronized !== false)
+  ) {
+    operatorGraphDocument = createOperatorGraphFromCreatorState(sceneOptions, cameraSettings);
+  }
+  return cloneOperatorGraph(operatorGraphDocument);
+}
+
+function setStudioOperatorGraph(graph, options = {}) {
+  const normalized = normalizeOperatorGraph(graph);
+  const validation = validateOperatorGraph(normalized);
+  if (!validation.valid) {
+    const firstError = validation.errors[0]?.message || '节点图无效。';
+    const error = new Error(firstError);
+    error.name = 'OperatorGraphError';
+    error.diagnostics = validation;
+    throw error;
+  }
+  operatorGraphDocument = normalized;
+  const plan = compileOperatorGraph(operatorGraphDocument, {
+    dirtyNodeIds: options.dirtyNodeIds
+  });
+  return {
+    graph: cloneOperatorGraph(operatorGraphDocument),
+    validation,
+    plan
+  };
+}
+
+function resetStudioOperatorGraph() {
+  operatorGraphDocument = createOperatorGraphFromCreatorState();
+  return setStudioOperatorGraph(operatorGraphDocument);
+}
+
+function createStudioOperatorExecutors() {
+  const withDescriptor = (value, additions) => ({
+    ...(value && typeof value === 'object' ? value : {}),
+    ...additions
+  });
+  const particleParameterKeys = [
+    'pointSize', 'edgeFeather', 'sizeRandom', 'particleizeProgress', 'modelVisibility'
+  ];
+  const flowParameterKeys = [
+    'flowStyle', 'flowCharacter', 'flowDirectionPreset',
+    'spread', 'noise', 'noiseScale', 'swirl', 'speed',
+    'dissolve', 'dissolveSpread', 'dissolveEdgeWidth', 'dissolveTurbulence',
+    'dissolveCurl', 'dissolveMist', 'dissolveDirectionX', 'dissolveDirectionY',
+    'dissolveDirectionZ', 'dissolveLift', 'growth', 'growthFlow', 'growthWidth',
+    'growthTurbulence', 'organicFlow', 'edgeBreak', 'filamentLength', 'filamentCurl'
+  ];
+  const resolveParameters = (keys, nodeParams = {}, upstream = {}) => Object.fromEntries(
+    keys.map((key) => [
+      key,
+      nodeParams[key] !== undefined
+        ? nodeParams[key]
+        : upstream[key] !== undefined
+          ? upstream[key]
+          : state[key]
+    ])
+  );
+  const getGeometryCount = (geometry) => {
+    const attributeCount = Number(geometry?.getAttribute?.('position')?.count || geometry?.attributes?.position?.count || 0);
+    const drawCount = Number(geometry?.drawRange?.count);
+    if (Number.isFinite(drawCount) && drawCount >= 0 && drawCount !== Infinity) {
+      return Math.max(0, Math.min(attributeCount || drawCount, drawCount));
+    }
+    return Math.max(0, Math.floor(attributeCount) || 0);
+  };
+  const getGeometryByteLength = (geometry) => Object.values(geometry?.attributes || {}).reduce(
+    (total, attribute) => total + Math.max(0, Number(attribute?.array?.byteLength) || 0),
+    0
+  );
+  const getActivePointObjects = () => {
+    if (state.effectMode === 'emission') {
+      return [emissionParticles, emissionGlowParticles].filter(Boolean);
+    }
+    if (state.effectMode === 'image') {
+      return [imageSplatParticles, imageSplatGlowParticles, imageSplatMistParticles].filter(Boolean);
+    }
+    return [particles, glowParticles].filter(Boolean);
+  };
+  const executeSimulationModifier = ({ node, inputs, context }, kind, stage, label) => {
+    const input = inputs.points;
+    const tracker = context.resourceTracker;
+    if (node.bypass || node.params.enabled === false) {
+      if (tracker && isOperatorResource(input, 'points')) {
+        tracker.passthrough(input, { kind: 'points', label: `${label} input` });
+        tracker.recordPass({
+          nodeId: node.id,
+          type: node.type,
+          inputs: [input],
+          outputs: [input],
+          skipped: true,
+          reason: node.bypass ? 'bypass' : 'disabled'
+        });
+      }
+      return { points: input };
+    }
+    const modifier = createParticleSimulationModifier(kind, node.params, node.id);
+    const simulationModifiers = appendParticleSimulationModifier(
+      isOperatorResource(input, 'points') ? input.payload : input,
+      modifier
+    );
+    if (!tracker) {
+      return {
+        points: withDescriptor(input, {
+          simulationModifiers,
+          runtimeStage: stage
+        })
+      };
+    }
+    if (!isOperatorResource(input, 'points')) {
+      throw new Error(`${label} requires a points resource.`);
+    }
+    const points = tracker.create('points', {
+      producerNodeId: node.id,
+      producerPortId: 'points',
+      geometry: input.geometry,
+      object: input.object,
+      count: input.count,
+      byteLength: input.byteLength,
+      payload: {
+        ...(input.payload || {}),
+        sourceResource: input,
+        simulationModifiers
+      },
+      metadata: {
+        stage,
+        sourceResourceId: input.id,
+        particleCount: input.count,
+        modifierKind: modifier.kind,
+        modifierCount: simulationModifiers.length,
+        modifier: modifier.params
+      }
+    });
+    tracker.recordPass({
+      nodeId: node.id,
+      type: node.type,
+      inputs: [input],
+      outputs: [points]
+    });
+    return { points };
+  };
+  return {
+    'core.feedback': ({ inputs }) => ({ output: inputs.input }),
+    'asset.model-input': ({ node }) => ({
+      geometry: {
+        kind: 'geometry',
+        object: visibleModelRoot,
+        modelRoot: activeModelTransformRoot,
+        loaded: Boolean(currentModelPayload || visibleModelRoot?.children?.length),
+        name: node.params.name || currentLabel
+      }
+    }),
+    'geometry.particle-sampler': {
+      alwaysDirty: true,
+      execute: ({ node, inputs, context }) => {
+        const objects = getActivePointObjects();
+        const object = objects[0] || null;
+        const geometry = object?.geometry || particles?.geometry || null;
+        const parameters = resolveParameters(particleParameterKeys, node.params);
+        const count = getGeometryCount(geometry);
+        if (!context.resourceTracker) {
+          return {
+            points: {
+              kind: 'points',
+              geometry,
+              object,
+              objects,
+              source: inputs.geometry,
+              parameters,
+              particleCount: count
+            }
+          };
+        }
+        const points = context.resourceTracker.create('points', {
+          producerNodeId: node.id,
+          producerPortId: 'points',
+          geometry,
+          object,
+          count,
+          byteLength: getGeometryByteLength(geometry),
+          payload: {
+            geometry,
+            object,
+            objects,
+            source: inputs.geometry,
+            parameters
+          },
+          metadata: {
+            stage: 'particle-sampler',
+            effectMode: state.effectMode,
+            particleCount: count,
+            requestedCount: Number(node.params.particleCount ?? state.particleCount),
+            attributeNames: Object.keys(geometry?.attributes || {})
+          }
+        });
+        context.resourceTracker.recordPass({
+          nodeId: node.id,
+          type: node.type,
+          inputs: [inputs.geometry],
+          outputs: [points]
+        });
+        return { points };
+      }
+    },
+    'simulation.dissolve': ({ node, inputs, context }) => {
+      const input = inputs.points;
+      const inputParameters = isOperatorResource(input, 'points')
+        ? input.payload?.parameters || {}
+        : input?.parameters || {};
+      if (node.bypass) {
+        if (context.resourceTracker && isOperatorResource(input, 'points')) {
+          context.resourceTracker.passthrough(input, { kind: 'points', label: 'Flow Dissolve input' });
+          context.resourceTracker.recordPass({
+            nodeId: node.id,
+            type: node.type,
+            inputs: [input],
+            outputs: [input],
+            skipped: true,
+            reason: 'bypass'
+          });
+        }
+        return { points: input };
+      }
+      const parameters = {
+        ...inputParameters,
+        ...resolveParameters(flowParameterKeys, node.params, inputParameters)
+      };
+      if (node.params.flowStyle === undefined) {
+        parameters.flowStyle = undefined;
+      }
+      if (!context.resourceTracker) {
+        return {
+          points: withDescriptor(input, {
+            parameters,
+            dissolve: Number(parameters.dissolve),
+            spread: Number(parameters.spread),
+            noise: Number(parameters.noise),
+            runtimeStage: 'dissolve'
+          })
+        };
+      }
+      if (!isOperatorResource(input, 'points')) {
+        throw new Error('Flow Dissolve requires a points resource.');
+      }
+      const points = context.resourceTracker.create('points', {
+        producerNodeId: node.id,
+        producerPortId: 'points',
+        geometry: input.geometry,
+        object: input.object,
+        count: input.count,
+        byteLength: input.byteLength,
+        payload: {
+          ...(input.payload || {}),
+          sourceResource: input,
+          parameters
+        },
+        metadata: {
+          stage: 'flow-dissolve',
+          sourceResourceId: input.id,
+          particleCount: input.count,
+          dissolve: Number(parameters.dissolve),
+          spread: Number(parameters.spread),
+          turbulence: Number(parameters.dissolveTurbulence),
+          curl: Number(parameters.dissolveCurl)
+        }
+      });
+      context.resourceTracker.recordPass({
+        nodeId: node.id,
+        type: node.type,
+        inputs: [input],
+        outputs: [points]
+      });
+      return { points };
+    },
+    'simulation.force-field': (args) => executeSimulationModifier(
+      args,
+      'force-field',
+      'particle-force-field',
+      'Particle Force Field'
+    ),
+    'simulation.return-force': (args) => executeSimulationModifier(
+      args,
+      'return-force',
+      'particle-return-force',
+      'Particle Return Force'
+    ),
+    'simulation.emitter': (args) => executeSimulationModifier(
+      args,
+      'emitter',
+      'particle-emitter',
+      'Particle Emitter'
+    ),
+    'simulation.birth-life': (args) => executeSimulationModifier(
+      args,
+      'birth-life',
+      'particle-birth-life',
+      'Particle Birth / Life'
+    ),
+    'simulation.attractor': (args) => executeSimulationModifier(
+      args,
+      'attractor',
+      'particle-attractor',
+      'Particle Attractor'
+    ),
+    'simulation.collision-plane': (args) => executeSimulationModifier(
+      args,
+      'collision-plane',
+      'particle-collision-plane',
+      'Particle Plane Collision'
+    ),
+    'simulation.trail': (args) => executeSimulationModifier(
+      args,
+      'trail',
+      'particle-trail',
+      'Particle Trail'
+    ),
+    'simulation.feedback-particles': {
+      alwaysDirty: true,
+      execute: ({ node, inputs, context }) => {
+        const input = inputs.points;
+        const tracker = context.resourceTracker;
+        const passthrough = (reason) => {
+          if (tracker && isOperatorResource(input, 'points')) {
+            tracker.passthrough(input, { kind: 'points', label: 'Particle Feedback input' });
+            tracker.recordPass({
+              nodeId: node.id,
+              type: node.type,
+              inputs: [input],
+              outputs: [input],
+              skipped: true,
+              reason
+            });
+          }
+          return { points: input };
+        };
+
+        if (node.bypass || node.params.enabled === false) {
+          context.feedbackController?.releaseParticleFeedback?.({ nodeId: node.id, scope: context.scope });
+          return passthrough(node.bypass ? 'bypass' : 'disabled');
+        }
+        const modifierResolution = resolveParticleSimulationModifiers(
+          node.params,
+          isOperatorResource(input, 'points') ? input.payload : input
+        );
+        const feedbackParams = modifierResolution.params;
+        if (!context.feedbackController) {
+          return {
+            points: withDescriptor(input, {
+              feedback: {
+                enabled: true,
+                params: feedbackParams,
+                modifiers: modifierResolution.activeModifiers
+              },
+              runtimeStage: 'particle-feedback'
+            })
+          };
+        }
+        if (!isOperatorResource(input, 'points')) {
+          throw new Error('Particle Feedback requires a points resource.');
+        }
+        if (state.effectMode !== 'particles' && state.effectMode !== 'morph') {
+          context.feedbackController.releaseParticleFeedback?.({ nodeId: node.id, scope: context.scope });
+          return passthrough('unsupported-effect-mode');
+        }
+
+        const requestedSubsteps = Number(feedbackParams.substeps);
+        const qualitySubstepCap = activeQualityLevel === 'low' ? 1 : activeQualityLevel === 'high' ? 4 : 2;
+        const requestedTrailSamples = Number(feedbackParams.trail?.samples);
+        const qualityTrailSampleCap = activeQualityLevel === 'low' ? 2 : activeQualityLevel === 'high' ? 8 : 4;
+        const feedbackState = context.feedbackController.simulateParticleFeedback({
+          nodeId: node.id,
+          scope: context.scope,
+          points: input,
+          time: context.simulationTime,
+          params: {
+            ...feedbackParams,
+            substeps: Math.min(
+              Number.isFinite(requestedSubsteps) ? requestedSubsteps : qualitySubstepCap,
+              qualitySubstepCap
+            ),
+            trail: feedbackParams.trail
+              ? {
+                  ...feedbackParams.trail,
+                  samples: Math.min(
+                    Number.isFinite(requestedTrailSamples) ? requestedTrailSamples : qualityTrailSampleCap,
+                    qualityTrailSampleCap
+                  )
+                }
+              : null
+          }
+        });
+        if (!feedbackState?.enabled) {
+          return passthrough(feedbackState?.reason || 'feedback-unavailable');
+        }
+
+        const points = tracker.create('points', {
+          producerNodeId: node.id,
+          producerPortId: 'points',
+          geometry: input.geometry,
+          object: input.object,
+          count: input.count,
+          byteLength: input.byteLength + (feedbackState.stateByteLength || feedbackState.pingPongByteLength),
+          payload: {
+            ...(input.payload || {}),
+            sourceResource: input,
+            feedbackState
+          },
+          metadata: {
+            stage: 'particle-feedback',
+            sourceResourceId: input.id,
+            particleCount: input.count,
+            stateTextureWidth: feedbackState.width,
+            stateTextureHeight: feedbackState.height,
+            pingPongByteLength: feedbackState.pingPongByteLength,
+            basePositionByteLength: feedbackState.basePositionByteLength,
+            trailByteLength: feedbackState.trailByteLength,
+            stateByteLength: feedbackState.stateByteLength,
+            stateSpace: feedbackState.stateSpace,
+            lifecycleTimeModel: feedbackState.lifecycleTimeModel,
+            lifecycleSeekDeterministic: feedbackState.lifecycleSeekDeterministic,
+            motionSeekDeterministic: feedbackState.motionSeekDeterministic,
+            computeFrames: feedbackState.computeFrames,
+            computeSteps: feedbackState.computeSteps,
+            initializationSteps: feedbackState.initializationSteps,
+            frameSteps: feedbackState.frameSteps,
+            delta: feedbackState.delta,
+            reset: feedbackState.reset,
+            resetCount: feedbackState.resetCount,
+            resetReason: feedbackState.reason,
+            qualityLevel: activeQualityLevel,
+            requestedSubsteps: Number.isFinite(requestedSubsteps) ? requestedSubsteps : null,
+            requestedTrailSamples: Number.isFinite(requestedTrailSamples) ? requestedTrailSamples : null,
+            trailSampleCap: qualityTrailSampleCap,
+            trailEnabled: Boolean(feedbackState.params.trail?.enabled),
+            trailHistorySamples: feedbackState.historySampleCount,
+            trailHistoryCapacity: feedbackState.historyCapacity,
+            trailNodeId: feedbackState.params.trail?.nodeId || '',
+            trailInterval: feedbackState.params.trail?.interval || 0,
+            trailOpacity: feedbackState.params.trail?.opacity || 0,
+            simulationModifierCount: modifierResolution.activeCount,
+            simulationModifierNodeIds: modifierResolution.activeModifiers.map((modifier) => modifier.nodeId),
+            attractorCount: feedbackState.params.attractors.length,
+            attractorNodeIds: feedbackState.params.attractors.map((attractor) => attractor.nodeId),
+            collisionPlaneCount: feedbackState.params.collisionPlanes.length,
+            collisionPlaneNodeIds: feedbackState.params.collisionPlanes.map((plane) => plane.nodeId),
+            emitterMode: feedbackState.params.emitter.mode,
+            emitterNodeId: feedbackState.params.emitter.nodeId || '',
+            emitterRate: feedbackState.params.emitter.rate,
+            emitterBurstCount: feedbackState.params.emitter.burstCount,
+            birthLifeNodeId: feedbackState.params.birthLife.nodeId || '',
+            lifetimeRange: [
+              feedbackState.params.birthLife.lifetimeMin,
+              feedbackState.params.birthLife.lifetimeMax
+            ],
+            respawn: feedbackState.params.birthLife.respawn,
+            effectiveForce: [
+              feedbackState.params.forceX,
+              feedbackState.params.forceY,
+              feedbackState.params.forceZ
+            ],
+            effectiveAttraction: feedbackState.params.attraction,
+            effectiveTurbulence: feedbackState.params.turbulence,
+            effectiveCurl: feedbackState.params.curl,
+            strength: feedbackState.params.strength,
+            dissolveCoupling: feedbackState.params.dissolveCoupling
+          }
+        });
+        tracker.recordPass({
+          nodeId: node.id,
+          type: node.type,
+          inputs: [input],
+          outputs: [points]
+        });
+        return { points };
+      }
+    },
+    'scene.camera': {
+      alwaysDirty: true,
+      execute: ({ context }) => ({ camera: context.renderCamera || camera })
+    },
+    'render.particles': {
+      alwaysDirty: true,
+      execute: ({ node, inputs, context }) => {
+        if (context.renderPipeline && !isOperatorResource(inputs.points, 'points')) {
+          throw new Error('Particle Render requires a points resource.');
+        }
+        const rendered = context.renderPipeline?.renderParticles({
+          nodeId: node.id,
+          points: inputs.points,
+          camera: inputs.camera
+        });
+        if (rendered) {
+          return rendered;
+        }
+        return {
+          color: {
+            kind: 'texture-frame',
+            scope: context.scope,
+            points: inputs.points,
+            camera: inputs.camera
+          },
+          depth: {
+            kind: 'depth-frame',
+            scope: context.scope,
+            camera: inputs.camera
+          }
+        };
+      }
+    },
+    'post.glow': ({ node, inputs, context }) => {
+      if (context.renderPipeline && isOperatorResource(inputs.color, 'texture')) {
+        if (node.bypass) {
+          context.resourceTracker?.recordPass({
+            nodeId: node.id,
+            type: node.type,
+            inputs: [inputs.color],
+            outputs: [inputs.color],
+            skipped: true,
+            reason: 'bypass'
+          });
+          return { color: inputs.color };
+        }
+        return {
+          color: context.renderPipeline.renderGlow({
+            nodeId: node.id,
+            color: inputs.color,
+            params: node.params
+          })
+        };
+      }
+      return {
+        color: withDescriptor(inputs.color, {
+          glowEnabled: !node.bypass,
+          glowRadius: Number(node.params.glowRadius ?? state.glowRadius),
+          glowExposure: Number(node.params.glowExposure ?? state.glowExposure),
+          runtimeStage: 'glow'
+        })
+      };
+    },
+    'post.depth-of-field': ({ node, inputs, context }) => {
+      if (context.renderPipeline && isOperatorResource(inputs.color, 'texture')) {
+        if (node.bypass) {
+          context.resourceTracker?.recordPass({
+            nodeId: node.id,
+            type: node.type,
+            inputs: [inputs.color, inputs.depth],
+            outputs: [inputs.color],
+            skipped: true,
+            reason: 'bypass'
+          });
+          return { color: inputs.color };
+        }
+        return {
+          color: context.renderPipeline.renderDepthOfField({
+            nodeId: node.id,
+            color: inputs.color,
+            depth: inputs.depth,
+            camera: inputs.camera,
+            params: node.params
+          })
+        };
+      }
+      return {
+        color: withDescriptor(inputs.color, {
+          dofEnabled: !node.bypass && node.params.dofEnabled !== false,
+          depth: inputs.depth,
+          camera: inputs.camera,
+          runtimeStage: 'depth-of-field'
+        })
+      };
+    },
+    'output.viewport': {
+      alwaysDirty: true,
+      execute: ({ node, inputs, context }) => {
+        if (context.renderPipeline) {
+          if (!isOperatorResource(inputs.color, 'texture')) {
+            throw new Error('Viewport Output is not connected to a texture resource.');
+          }
+          context.renderPipeline.output({ nodeId: node.id, color: inputs.color });
+          return {};
+        }
+        const frameDescriptor = inputs.color && typeof inputs.color === 'object' ? inputs.color : {};
+        const restorePointUniforms = applyOperatorPointResourceUniforms(frameDescriptor.points);
+        try {
+          context.renderLegacy({
+            glowEnabled: frameDescriptor.glowEnabled !== false,
+            dofEnabled: frameDescriptor.dofEnabled !== false
+          });
+        } finally {
+          restorePointUniforms();
+        }
+        return {};
+      }
+    }
+  };
+}
+
+function ensureStudioOperatorRuntime() {
+  if (!studioOperatorRuntime) {
+    studioOperatorRuntime = new OperatorGraphRuntime({
+      executors: createStudioOperatorExecutors()
+    });
+  }
+  return studioOperatorRuntime;
+}
+
+function executeStudioOperatorGraphFrame(options = {}) {
+  const runtime = ensureStudioOperatorRuntime();
+  const graph = captureOperatorGraphDocument();
+  const scope = options.scope || 'viewport';
+  const resourceTracker = new OperatorResourceTracker().beginFrame({
+    scope,
+    frame: runtime.frame + 1
+  });
+  const resourceLifetime = new OperatorResourceLifetime().beginFrame({
+    scope,
+    frame: runtime.frame + 1
+  });
+  let renderPipeline = null;
+  let feedbackController = null;
+  try {
+    renderPipeline = options.createRenderPipeline?.(resourceTracker) || null;
+    feedbackController = renderPipeline || (options.feedbackRenderer
+      ? createParticleFeedbackController(options.feedbackRenderer)
+      : null);
+    feedbackController?.prepareGraph?.({
+      scope,
+      activeFeedbackNodeIds: graph.nodes
+        .filter((node) =>
+          node.enabled !== false &&
+          node.type === 'simulation.feedback-particles' &&
+          node.params?.enabled !== false &&
+          !node.bypass
+        )
+        .map((node) => node.id)
+    });
+    lastOperatorRuntimeResult = runtime.execute(graph, {
+      dirtyNodeIds: options.dirtyNodeIds,
+      targetNodeIds: options.targetNodeIds || ['viewport-output'],
+      context: {
+        scope,
+        simulationTime: Number.isFinite(Number(options.simulationTime))
+          ? Number(options.simulationTime)
+          : uniforms.uTime.value,
+        renderCamera: options.renderCamera || camera,
+        renderLegacy: options.renderLegacy,
+        renderPipeline,
+        feedbackController,
+        resourceTracker,
+        resourceLifetime
+      }
+    });
+    if (renderPipeline && !renderPipeline.restored) {
+      throw new Error('Operator render graph finished without reaching an enabled Viewport Output.');
+    }
+    resourceTracker.recordLifetimeStats(resourceLifetime.endFrame());
+    renderPipeline?.finish?.();
+    lastOperatorResourceStats = resourceTracker.getStats();
+    lastOperatorRuntimeError = null;
+    operatorRuntimeErrorReported = false;
+    return lastOperatorRuntimeResult;
+  } catch (error) {
+    try {
+      resourceTracker.recordLifetimeStats(resourceLifetime.abort());
+    } finally {
+      renderPipeline?.abort?.();
+    }
+    lastOperatorResourceStats = resourceTracker.getStats();
+    lastOperatorRuntimeError = {
+      name: error?.name || 'OperatorRuntimeError',
+      message: error?.message || String(error),
+      nodeId: error?.details?.nodeId || '',
+      nodeType: error?.details?.nodeType || ''
+    };
+    if (!operatorRuntimeErrorReported) {
+      console.error('Operator graph runtime failed; using the legacy render path for this frame.', error);
+      operatorRuntimeErrorReported = true;
+    }
+    options.renderLegacy?.({ glowEnabled: true, dofEnabled: true });
+    lastOperatorRuntimeResult = {
+      fallback: true,
+      error: lastOperatorRuntimeError,
+      executedNodeIds: [],
+      cacheHitNodeIds: [],
+      timings: [],
+      totalMs: 0
+    };
+    return lastOperatorRuntimeResult;
+  }
+}
+
+function getStudioOperatorRuntimeStats() {
+  return {
+    ...ensureStudioOperatorRuntime().getStats(),
+    resources: lastOperatorResourceStats ? { ...lastOperatorResourceStats } : null,
+    error: lastOperatorRuntimeError ? { ...lastOperatorRuntimeError } : null,
+    fallback: Boolean(lastOperatorRuntimeResult?.fallback)
+  };
+}
 
 function captureProjectDocument() {
   commitSelectedImageSplatTransform();
@@ -15520,14 +17832,16 @@ function captureProjectDocument() {
   const videoPlanes = serializeVideoPlanes();
   const sceneCameras = serializeSceneCameras();
   const exportResolution = getExportResolution();
+  const sceneOptions = captureKeyframeOptions();
+  const cameraSettings = getCameraSettings();
   return {
     format: PROJECT_FORMAT,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: '1.0.17',
+    appVersion: '1.0.21',
     savedAt: new Date().toISOString(),
     scene: {
-      options: captureKeyframeOptions(),
-      cameraSettings: getCameraSettings(),
+      options: sceneOptions,
+      cameraSettings,
       cameraSnapshot: captureCameraSnapshot(),
       cameraKeyframes: getSortedCameraKeyframes(),
       sceneCameras,
@@ -15553,7 +17867,8 @@ function captureProjectDocument() {
       morphTarget: serializeMorphTargetModel(),
       sceneModels,
       model: sceneModels?.models?.length ? null : currentModelPayload
-    }
+    },
+    operatorGraph: captureOperatorGraphDocument(sceneOptions, cameraSettings)
   };
 }
 
@@ -15793,6 +18108,11 @@ async function applyProjectDocument(document) {
     undoHistory.past.length = 0;
     setStatus('Project loaded');
     setCameraPreviewDirty();
+    if (document.operatorGraph) {
+      setStudioOperatorGraph(document.operatorGraph);
+    } else {
+      operatorGraphDocument = createOperatorGraphFromCreatorState();
+    }
     return true;
   } finally {
     undoHistory.restoring = false;
@@ -15805,6 +18125,12 @@ function validateProjectDocument(document) {
   }
   if (!document.scene || typeof document.scene !== 'object') {
     throw new Error('工程文件缺少场景数据。');
+  }
+  if (document.operatorGraph !== undefined) {
+    const graphValidation = validateOperatorGraph(document.operatorGraph);
+    if (!graphValidation.valid) {
+      throw new Error(`工程节点图无效：${graphValidation.errors[0]?.message || '未知错误'}`);
+    }
   }
 }
 
@@ -15852,7 +18178,7 @@ function syncExportFormatUi() {
   }
 }
 
-function glowBlurRadius() {
+function glowBlurRadius(options = {}) {
   if (state.effectMode === 'image') {
     return THREE.MathUtils.clamp(1.0 + normalizedGlowDriver(state.imageSplatGlow) * 24 + state.imageSplatScatter * 0.45, 0.8, 38);
   }
@@ -15861,14 +18187,13 @@ function glowBlurRadius() {
     return THREE.MathUtils.clamp(1.1 + normalizedGlowDriver(state.emissionGlow) * 30 + state.emissionDistance * 0.55, 0.85, 48);
   }
 
-  const radius = Math.max(state.glowRadius, 0);
-  const exposure = normalizedGlowDriver(state.glowExposure);
-  return THREE.MathUtils.clamp(0.55 + Math.pow(radius, 0.86) * (0.18 + exposure * 0.22), 0.35, 84);
+  const radius = Math.max(Number(options.glowRadius ?? state.glowRadius) || 0, 0);
+  return THREE.MathUtils.clamp(0.55 + Math.pow(radius, 0.82) * 0.34, 0.35, 84);
 }
 
 function normalizedGlowDriver(value) {
   const amount = Math.max(Number(value) || 0, 0);
-  return 1 - Math.exp(-Math.pow(amount, 1.16) * 0.42);
+  return 1 - Math.exp(-Math.pow(amount, 1.08) * 0.68);
 }
 
 function setFullTargetViewport(targetRenderer, target = null) {
@@ -15904,42 +18229,56 @@ function renderFullscreen(material, target = null) {
   renderFullscreenWith(renderer, material, target);
 }
 
-function blurGlowTextureFor(targetRenderer, targets) {
-  const radius = glowBlurRadius();
+function blurGlowTextureFor(targetRenderer, targets, options = {}) {
+  const radius = glowBlurRadius(options);
+  const glowLayers = THREE.MathUtils.clamp(
+    Math.round(Number(options.layers ?? activeQualityProfile.glowLayers) || 1),
+    1,
+    3
+  );
   blurMaterial.uniforms.uTexelSize.value.set(1 / targets.glowTarget.width, 1 / targets.glowTarget.height);
 
-  const passes = [
-    radius,
-    radius * 0.56,
-    Math.max(0.75, radius * 0.24)
-  ];
-
-  let input = targets.glowTarget;
-  let output = targets.blurTargetA;
-
-  passes.forEach((passRadius) => {
+  const renderBlurPair = (input, horizontalTarget, verticalTarget, passRadius) => {
     blurMaterial.uniforms.uTexture.value = input.texture;
     blurMaterial.uniforms.uDirection.value.set(1, 0);
     blurMaterial.uniforms.uRadius.value = passRadius;
-    renderFullscreenWith(targetRenderer, blurMaterial, output);
-
-    input = output;
-    output = output === targets.blurTargetA ? targets.blurTargetB : targets.blurTargetA;
-
-    blurMaterial.uniforms.uTexture.value = input.texture;
+    renderFullscreenWith(targetRenderer, blurMaterial, horizontalTarget);
+    blurMaterial.uniforms.uTexture.value = horizontalTarget.texture;
     blurMaterial.uniforms.uDirection.value.set(0, 1);
-    blurMaterial.uniforms.uRadius.value = passRadius;
-    renderFullscreenWith(targetRenderer, blurMaterial, output);
+    renderFullscreenWith(targetRenderer, blurMaterial, verticalTarget);
+    return verticalTarget;
+  };
 
-    input = output;
-    output = output === targets.blurTargetA ? targets.blurTargetB : targets.blurTargetA;
-  });
+  const medium = renderBlurPair(
+    targets.glowTarget,
+    targets.blurTargetA,
+    targets.blurTargetB,
+    Math.max(0.6, radius * 0.18)
+  );
+  if (glowLayers <= 1) {
+    return { medium, wide: medium };
+  }
+  let wide = renderBlurPair(
+    targets.glowTarget,
+    targets.blurTargetC,
+    targets.blurTargetD,
+    Math.max(1.1, radius * 0.55)
+  );
+  if (glowLayers <= 2) {
+    return { medium, wide };
+  }
+  wide = renderBlurPair(
+    wide,
+    targets.blurTargetC,
+    targets.blurTargetD,
+    Math.max(1.35, radius * 0.38)
+  );
 
-  return input;
+  return { medium, wide };
 }
 
 function blurGlowTexture() {
-  return blurGlowTextureFor(renderer, { glowTarget, blurTargetA, blurTargetB });
+  return blurGlowTextureFor(renderer, { glowTarget, blurTargetA, blurTargetB, blurTargetC, blurTargetD });
 }
 
 function setVisibleModelColorWrite(enabled) {
@@ -15990,11 +18329,20 @@ function setSceneModelSnapshotsVisible(visible) {
 function configureCompositeCameraUniforms(renderCamera, targets, options = {}) {
   compositeMaterial.uniforms.uDepthTexture.value = targets.sceneTarget.depthTexture;
   compositeMaterial.uniforms.uDofEnabled.value = options.dofEnabled ? 1 : 0;
+  compositeMaterial.uniforms.uDofSamples.value = activeQualityProfile.dofSamples;
   compositeMaterial.uniforms.uCameraNear.value = renderCamera.near;
   compositeMaterial.uniforms.uCameraFar.value = renderCamera.far;
   compositeMaterial.uniforms.uFocusDistance.value = state.cameraFocusDistance;
   compositeMaterial.uniforms.uAperture.value = state.cameraAperture;
   compositeMaterial.uniforms.uFocalLength.value = state.cameraFocalLength;
+  compositeMaterial.uniforms.uSensorWidth.value = Math.max(
+    8,
+    Number(renderCamera.getFilmWidth?.() || renderCamera.filmGauge || state.cameraSensorWidth) || state.cameraSensorWidth
+  );
+  compositeMaterial.uniforms.uBokehScale.value = state.cameraBokehScale;
+  compositeMaterial.uniforms.uBokehHighlight.value = state.cameraBokehHighlight;
+  compositeMaterial.uniforms.uApertureBlades.value = state.cameraApertureBlades;
+  compositeMaterial.uniforms.uApertureRoundness.value = state.cameraApertureRoundness;
   compositeMaterial.uniforms.uResolution.value.set(targets.sceneTarget.width, targets.sceneTarget.height);
 }
 
@@ -16009,6 +18357,11 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   targetRenderer.getClearColor(previousClearColor);
   const previousAlpha = targetRenderer.getClearAlpha();
   const finalViewport = options.viewport || null;
+  applyAdaptiveParticleDensityForRender(
+    renderCamera,
+    Math.max(1, Math.round(finalViewport?.width || targets?.sceneTarget?.width || canvas.width || 1)),
+    Math.max(1, Math.round(finalViewport?.height || targets?.sceneTarget?.height || canvas.height || 1))
+  );
   const previousViewport = new THREE.Vector4();
   const previousScissor = new THREE.Vector4();
   const previousScissorTest = targetRenderer.getScissorTest?.() || false;
@@ -16018,6 +18371,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     state.cameraType === 'perspective' &&
     targets?.sceneTarget?.depthTexture
   );
+  const bloomEnabled = options.glowEnabled !== false && glowEnabled();
   targetRenderer.getViewport(previousViewport);
   targetRenderer.getScissor(previousScissor);
   const applyFinalViewport = () => {
@@ -16054,7 +18408,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     imageSplatGlowParticles.visible = false;
   }
 
-  if (!glowEnabled()) {
+  if (!bloomEnabled) {
     // Keep the base image on the same post pipeline even when glow strength is
     // exactly zero.  Previously 0.00 rendered directly while 0.01 switched to
     // composite + tone mapping, which made glow/exposure sliders behave like a
@@ -16070,7 +18424,9 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     targetRenderer.setClearColor(0x000000, 0);
     targetRenderer.clear(true, true, true);
     compositeMaterial.uniforms.uBaseTexture.value = targets.sceneTarget.texture;
+    compositeMaterial.uniforms.uBloomSourceTexture.value = targets.glowTarget.texture;
     compositeMaterial.uniforms.uBloomTexture.value = targets.glowTarget.texture;
+    compositeMaterial.uniforms.uBloomWideTexture.value = targets.glowTarget.texture;
     compositeMaterial.uniforms.uBloomStrength.value = 0;
     compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
     compositeMaterial.uniforms.uBloomAlpha.value = 0;
@@ -16187,7 +18543,7 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   lightHandleGroup.visible = previousLightHandlesVisible;
   transformControls.visible = previousTransformVisible;
 
-  const blurredTarget = blurGlowTextureFor(targetRenderer, targets);
+  const blurredTargets = blurGlowTextureFor(targetRenderer, targets);
   const bloomDriver = state.effectMode === 'emission'
     ? state.emissionGlow
     : state.effectMode === 'image'
@@ -16198,9 +18554,11 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
     ? THREE.MathUtils.clamp(0.24 + bloomShape * 1.28, 0.24, 1.65)
     : state.effectMode === 'image'
       ? THREE.MathUtils.clamp(0.26 + bloomShape * 1.38, 0.26, 1.9)
-    : THREE.MathUtils.clamp(0.22 + bloomShape * 1.68, 0.22, 2.05);
+    : THREE.MathUtils.clamp(0.18 + bloomShape * 1.5, 0.18, 1.85);
   compositeMaterial.uniforms.uBaseTexture.value = targets.sceneTarget.texture;
-  compositeMaterial.uniforms.uBloomTexture.value = blurredTarget.texture;
+  compositeMaterial.uniforms.uBloomSourceTexture.value = targets.glowTarget.texture;
+  compositeMaterial.uniforms.uBloomTexture.value = blurredTargets.medium.texture;
+  compositeMaterial.uniforms.uBloomWideTexture.value = blurredTargets.wide.texture;
   compositeMaterial.uniforms.uBloomStrength.value = bloomStrength;
   compositeMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
   compositeMaterial.uniforms.uBloomAlpha.value = state.effectMode === 'emission'
@@ -16221,7 +18579,756 @@ function renderSceneWithGlowFor(targetRenderer, renderCamera, targets, options =
   targetRenderer.setClearColor(previousClearColor, previousAlpha);
 }
 
-function renderSceneWithGlow() {
+const OPERATOR_POINT_SCALAR_UNIFORMS = Object.freeze({
+  pointSize: 'uPointSize',
+  edgeFeather: 'uEdgeFeather',
+  sizeRandom: 'uSizeRandom',
+  particleizeProgress: 'uParticleizeProgress',
+  modelVisibility: 'uModelVisibility',
+  flowCharacter: 'uFlowCharacter',
+  spread: 'uSpread',
+  noise: 'uNoise',
+  noiseScale: 'uNoiseScale',
+  swirl: 'uSwirl',
+  dissolve: 'uDissolve',
+  dissolveSpread: 'uDissolveSpread',
+  dissolveEdgeWidth: 'uDissolveEdgeWidth',
+  dissolveTurbulence: 'uDissolveTurbulence',
+  dissolveCurl: 'uDissolveCurl',
+  dissolveMist: 'uDissolveMist',
+  dissolveLift: 'uDissolveLift',
+  growth: 'uGrowth',
+  growthFlow: 'uGrowthFlow',
+  growthWidth: 'uGrowthWidth',
+  growthTurbulence: 'uGrowthTurbulence',
+  organicFlow: 'uOrganicFlow',
+  edgeBreak: 'uEdgeBreak',
+  filamentLength: 'uFilamentLength',
+  filamentCurl: 'uFilamentCurl',
+  glowRadius: 'uGlowRadius',
+  glowExposure: 'uGlowExposure'
+});
+
+function snapshotAndAssignOperatorUniform(uniform, value, restorers) {
+  if (!uniform || !Number.isFinite(Number(value))) {
+    return;
+  }
+  const previous = uniform.value?.clone ? uniform.value.clone() : uniform.value;
+  restorers.push(() => {
+    if (uniform.value?.copy && previous?.isVector3) {
+      uniform.value.copy(previous);
+    } else {
+      uniform.value = previous;
+    }
+  });
+  uniform.value = Number(value);
+}
+
+function snapshotAndAssignOperatorUniformValue(uniform, value, restorers) {
+  if (!uniform) {
+    return;
+  }
+  const previous = uniform.value;
+  restorers.push(() => {
+    uniform.value = previous;
+  });
+  uniform.value = value;
+}
+
+function applyOperatorPointResourceUniforms(pointsResource, additions = {}) {
+  if (!isOperatorResource(pointsResource, 'points')) {
+    return () => {};
+  }
+  const parameters = {
+    ...(pointsResource.payload?.parameters || {}),
+    ...additions
+  };
+  const uniformSets = new Set(
+    (pointsResource.payload?.objects || [pointsResource.object])
+      .map((object) => object?.material?.uniforms)
+      .filter(Boolean)
+  );
+  const restorers = [];
+  const feedbackState = pointsResource.payload?.feedbackState || null;
+  uniformSets.forEach((uniformSet) => {
+    Object.entries(OPERATOR_POINT_SCALAR_UNIFORMS).forEach(([parameterName, uniformName]) => {
+      if (parameters[parameterName] !== undefined) {
+        snapshotAndAssignOperatorUniform(uniformSet[uniformName], parameters[parameterName], restorers);
+      }
+    });
+    if (Object.prototype.hasOwnProperty.call(parameters, 'flowStyle')) {
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFlowStyle,
+        getFlowStyleId(parameters.flowStyle, { legacy: parameters.flowStyle === undefined }),
+        restorers
+      );
+    }
+    const directionUniform = uniformSet.uDissolveDirection;
+    if (directionUniform?.value?.isVector3) {
+      const hasDirection = ['dissolveDirectionX', 'dissolveDirectionY', 'dissolveDirectionZ']
+        .some((key) => Number.isFinite(Number(parameters[key])));
+      if (hasDirection) {
+        const previous = directionUniform.value.clone();
+        restorers.push(() => directionUniform.value.copy(previous));
+        directionUniform.value.set(
+          Number.isFinite(Number(parameters.dissolveDirectionX))
+            ? Number(parameters.dissolveDirectionX)
+            : previous.x,
+          Number.isFinite(Number(parameters.dissolveDirectionY))
+            ? Number(parameters.dissolveDirectionY)
+            : previous.y,
+          Number.isFinite(Number(parameters.dissolveDirectionZ))
+            ? Number(parameters.dissolveDirectionZ)
+            : previous.z
+        );
+      }
+    }
+    if (feedbackState) {
+      const feedbackEnabled = feedbackState.supported && feedbackState.enabled ? 1 : 0;
+      snapshotAndAssignOperatorUniformValue(uniformSet.uFeedbackEnabled, feedbackEnabled, restorers);
+      snapshotAndAssignOperatorUniformValue(
+        uniformSet.uFeedbackPosition,
+        feedbackState.positionTexture || null,
+        restorers
+      );
+      snapshotAndAssignOperatorUniformValue(
+        uniformSet.uFeedbackVelocity,
+        feedbackState.velocityTexture || null,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackStrength,
+        feedbackState.params?.strength ?? 0,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackDissolveCoupling,
+        feedbackState.params?.dissolveCoupling ?? 0,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackLifetimeMin,
+        feedbackState.params?.birthLife?.lifetimeMin ?? 3.96,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackLifetimeMax,
+        feedbackState.params?.birthLife?.lifetimeMax ?? 7.04,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackFadeIn,
+        feedbackState.params?.birthLife?.fadeIn ?? 0,
+        restorers
+      );
+      snapshotAndAssignOperatorUniform(
+        uniformSet.uFeedbackFadeOut,
+        feedbackState.params?.birthLife?.fadeOut ?? 0.35,
+        restorers
+      );
+    }
+  });
+  return () => {
+    for (let index = restorers.length - 1; index >= 0; index -= 1) {
+      restorers[index]();
+    }
+  };
+}
+
+function createParticleFeedbackController(targetRenderer) {
+  return {
+    prepareGraph({ scope = 'viewport', activeFeedbackNodeIds = [] } = {}) {
+      return particleFeedbackManager.prune(targetRenderer, scope, activeFeedbackNodeIds);
+    },
+
+    simulateParticleFeedback({
+      nodeId = 'particle-feedback',
+      scope = 'viewport',
+      points,
+      time = 0,
+      params = {}
+    } = {}) {
+      if (!isOperatorResource(points, 'points')) {
+        throw new Error('Particle Feedback requires a points resource.');
+      }
+      return particleFeedbackManager.step({
+        renderer: targetRenderer,
+        scope,
+        nodeId,
+        geometry: points.geometry,
+        count: points.count,
+        time,
+        params
+      });
+    },
+
+    releaseParticleFeedback({ nodeId = 'particle-feedback', scope = 'viewport' } = {}) {
+      return particleFeedbackManager.release(targetRenderer, scope, nodeId);
+    }
+  };
+}
+
+function createOperatorRenderPipeline(targetRenderer, renderCamera, targets, options = {}) {
+  const tracker = options.resourceTracker;
+  if (!tracker || typeof tracker.create !== 'function') {
+    throw new Error('Operator GPU pipeline requires a resource tracker.');
+  }
+  const requiredTargets = [
+    'sceneTarget',
+    'glowTarget',
+    'blurTargetA',
+    'blurTargetB',
+    'blurTargetC',
+    'blurTargetD',
+    'glowCompositeTarget',
+    'dofBokehTarget',
+    'dofTarget'
+  ];
+  const missingTarget = requiredTargets.find((key) => !targets?.[key]);
+  if (missingTarget) {
+    throw new Error(`Operator GPU pipeline is missing ${missingTarget}.`);
+  }
+  const targetLeases = createOperatorPostTargetLeaseManager(targets, tracker);
+  const feedbackController = createParticleFeedbackController(targetRenderer);
+
+  const outputTarget = options.outputTarget ?? targetRenderer.getRenderTarget();
+  const transparent = options.transparent ?? exportSettings.transparent;
+  const finalViewport = options.viewport || null;
+  const previousTarget = targetRenderer.getRenderTarget();
+  const previousClearColor = new THREE.Color();
+  const previousViewport = new THREE.Vector4();
+  const previousScissor = new THREE.Vector4();
+  const previousAlpha = targetRenderer.getClearAlpha();
+  const previousScissorTest = targetRenderer.getScissorTest?.() || false;
+  targetRenderer.getClearColor(previousClearColor);
+  targetRenderer.getViewport(previousViewport);
+  targetRenderer.getScissor(previousScissor);
+  let restored = false;
+  let finished = false;
+
+  const restoreRendererState = () => {
+    if (restored) {
+      return;
+    }
+    restored = true;
+    targetRenderer.setRenderTarget(previousTarget);
+    targetRenderer.setClearColor(previousClearColor, previousAlpha);
+    targetRenderer.setViewport(previousViewport);
+    targetRenderer.setScissor(previousScissor);
+    targetRenderer.setScissorTest(previousScissorTest);
+    options.onRestore?.();
+  };
+
+  const applyOutputViewport = () => {
+    targetRenderer.setRenderTarget(outputTarget);
+    if (finalViewport) {
+      targetRenderer.setViewport(finalViewport.x, finalViewport.y, finalViewport.width, finalViewport.height);
+      targetRenderer.setScissor(finalViewport.x, finalViewport.y, finalViewport.width, finalViewport.height);
+      targetRenderer.setScissorTest(true);
+      return;
+    }
+    setFullTargetViewport(targetRenderer, outputTarget);
+  };
+
+  const recordPass = (startedAt, details) => tracker.recordPass({
+    ...details,
+    durationMs: performance.now() - startedAt
+  });
+
+  const createColorResource = (
+    nodeId,
+    portId,
+    target,
+    metadata = {},
+    payload = null,
+    release = null
+  ) => tracker.create('texture', {
+    producerNodeId: nodeId,
+    producerPortId: portId,
+    target,
+    texture: target.texture,
+    width: target.width,
+    height: target.height,
+    colorSpace: 'linear-hdr',
+    format: 'rgba16f',
+    metadata,
+    payload,
+    release
+  });
+
+  const releaseTokens = (tokens) => {
+    for (let index = tokens.length - 1; index >= 0; index -= 1) {
+      tokens[index]?.release?.();
+    }
+  };
+
+  const finish = () => {
+    if (finished) return targetLeases.getStats();
+    if (!restored) {
+      throw new Error('Cannot finish operator targets before renderer state is restored.');
+    }
+    const stats = targetLeases.finish();
+    finished = true;
+    return stats;
+  };
+
+  const abort = () => {
+    if (finished) return targetLeases.getStats();
+    let restoreError = null;
+    try {
+      restoreRendererState();
+    } catch (error) {
+      restoreError = error;
+    }
+    const stats = targetLeases.abort();
+    finished = true;
+    if (restoreError) throw restoreError;
+    return stats;
+  };
+
+  return {
+    ...feedbackController,
+
+    renderParticles({ nodeId = 'particle-render', points, camera: inputCamera } = {}) {
+      const startedAt = performance.now();
+      if (!isOperatorResource(points, 'points')) {
+        throw new Error('Particle Render requires a points resource.');
+      }
+      const sceneLease = targetLeases.acquire('sceneTarget', nodeId);
+      const sceneRenderTarget = sceneLease.resource;
+      let depthLease = null;
+      let handedOff = false;
+      let trailDrawCount = 0;
+      const activeCamera = inputCamera || renderCamera;
+      const restorePointUniforms = applyOperatorPointResourceUniforms(points);
+      syncParticleLightingUniforms();
+      updateSceneModelSnapshotUniforms();
+      updateModelBreakRootInverse();
+      applyAdaptiveParticleDensityForRender(
+        activeCamera,
+        Math.max(1, Math.round(sceneRenderTarget.width || canvas.width || 1)),
+        Math.max(1, Math.round(sceneRenderTarget.height || canvas.height || 1))
+      );
+
+      const glowVisibility = [
+        [glowParticles, glowParticles?.visible ?? false],
+        [emissionGlowParticles, emissionGlowParticles?.visible ?? false],
+        [imageSplatGlowParticles, imageSplatGlowParticles?.visible ?? false]
+      ];
+      glowVisibility.forEach(([object]) => {
+        if (object) {
+          object.visible = false;
+        }
+      });
+      try {
+        try {
+          targetRenderer.setRenderTarget(sceneRenderTarget);
+          setFullTargetViewport(targetRenderer, sceneRenderTarget);
+          targetRenderer.setClearColor(0x000000, transparent ? 0 : 1);
+          targetRenderer.clear(true, true, true);
+          targetRenderer.render(scene, activeCamera);
+          trailDrawCount = renderParticleTrailHistory(targetRenderer, activeCamera, points, false);
+        } finally {
+          restorePointUniforms();
+          glowVisibility.forEach(([object, visible]) => {
+            if (object) {
+              object.visible = visible;
+            }
+          });
+        }
+
+        depthLease = sceneLease.retain();
+        const color = createColorResource(nodeId, 'color', sceneRenderTarget, {
+          stage: 'particle-render',
+          sourcePointsResourceId: points.id,
+          particleCount: points.count,
+          trailDrawCount
+        }, { pointsResource: points }, () => sceneLease.release());
+        const depth = tracker.create('depth', {
+          producerNodeId: nodeId,
+          producerPortId: 'depth',
+          target: sceneRenderTarget,
+          texture: sceneRenderTarget.depthTexture,
+          width: sceneRenderTarget.width,
+          height: sceneRenderTarget.height,
+          colorSpace: 'depth',
+          format: 'depth32',
+          payload: { pointsResource: points },
+          release: () => depthLease.release(),
+          metadata: {
+            stage: 'particle-render',
+            sourcePointsResourceId: points.id,
+            particleCount: points.count,
+            trailDrawCount
+          }
+        });
+        handedOff = true;
+        recordPass(startedAt, {
+          nodeId,
+          type: 'render.particles',
+          inputs: [points],
+          outputs: [color, depth]
+        });
+        return { color, depth };
+      } finally {
+        if (!handedOff) {
+          depthLease?.release();
+          sceneLease.release();
+        }
+      }
+    },
+
+    renderGlow({ nodeId = 'multi-glow', color, params = {} } = {}) {
+      const startedAt = performance.now();
+      if (!isOperatorResource(color, 'texture')) {
+        throw new Error('Glow requires a texture resource.');
+      }
+      if (!glowEnabled(params)) {
+        recordPass(startedAt, {
+          nodeId,
+          type: 'post.glow',
+          inputs: [color],
+          outputs: [color],
+          skipped: true,
+          reason: 'disabled'
+        });
+        return color;
+      }
+
+      const glowRoles = [
+        'glowTarget',
+        'blurTargetA',
+        'blurTargetB',
+        'blurTargetC',
+        'blurTargetD',
+        'glowCompositeTarget'
+      ];
+      const glowLeases = glowRoles.map((role) => targetLeases.acquire(role, nodeId));
+      const passTargets = Object.fromEntries(
+        glowRoles.map((role, index) => [role, glowLeases[index].resource])
+      );
+      const compositeLease = glowLeases[glowLeases.length - 1];
+      const temporaryGlowLeases = glowLeases.slice(0, -1);
+
+      const sourcePoints = color.payload?.pointsResource;
+      const restorePointUniforms = applyOperatorPointResourceUniforms(sourcePoints, {
+        glowRadius: Number(params.glowRadius ?? state.glowRadius),
+        glowExposure: Number(params.glowExposure ?? state.glowExposure)
+      });
+      const objectVisibility = [
+        [particles, particles?.visible ?? false],
+        [emissionParticles, emissionParticles?.visible ?? false],
+        [imageSplatParticles, imageSplatParticles?.visible ?? false],
+        [imageSplatMistParticles, imageSplatMistParticles?.visible ?? false],
+        [visibleModelRoot, visibleModelRoot?.visible ?? false],
+        [glowParticles, glowParticles?.visible ?? false],
+        [emissionGlowParticles, emissionGlowParticles?.visible ?? false],
+        [imageSplatGlowParticles, imageSplatGlowParticles?.visible ?? false]
+      ];
+      const previousPathVisible = cameraPathGroup.visible;
+      const previousLightHandlesVisible = lightHandleGroup.visible;
+      const previousTransformVisible = transformControls.visible;
+      const previousBackground = scene.background;
+      const previousBackgroundIntensity = scene.backgroundIntensity;
+      const restoreSnapshotsVisible = setSceneModelSnapshotsVisible(false);
+      const depthMaskVisibleModel =
+        Boolean(visibleModelRoot?.visible) &&
+        (state.effectMode === 'emission' ||
+          (state.effectMode === 'particles' && state.particleizeProgress < 0.995));
+      const restoreVisibleModelColorWrite = depthMaskVisibleModel ? setVisibleModelColorWrite(false) : null;
+      let trailGlowDrawCount = 0;
+
+      try {
+        if (particles) particles.visible = false;
+        if (emissionParticles) emissionParticles.visible = false;
+        if (imageSplatParticles) imageSplatParticles.visible = false;
+        if (imageSplatMistParticles) imageSplatMistParticles.visible = state.effectMode === 'image';
+        if (visibleModelRoot) visibleModelRoot.visible = depthMaskVisibleModel;
+        if (glowParticles) glowParticles.visible = state.effectMode === 'particles' || state.effectMode === 'morph';
+        if (emissionGlowParticles) {
+          emissionGlowParticles.visible = state.effectMode === 'emission' && state.emissionEnabled;
+        }
+        if (imageSplatGlowParticles) imageSplatGlowParticles.visible = state.effectMode === 'image';
+        cameraPathGroup.visible = false;
+        lightHandleGroup.visible = false;
+        transformControls.visible = false;
+        scene.background = null;
+        scene.backgroundIntensity = 0;
+
+        targetRenderer.setRenderTarget(passTargets.glowTarget);
+        setFullTargetViewport(targetRenderer, passTargets.glowTarget);
+        targetRenderer.setClearColor(0x000000, 0);
+        targetRenderer.clear(true, true, true);
+        applyAdaptiveParticleDensityForRender(
+          renderCamera,
+          Math.max(1, Math.round(passTargets.glowTarget.width || canvas.width || 1)),
+          Math.max(1, Math.round(passTargets.glowTarget.height || canvas.height || 1))
+        );
+        targetRenderer.render(scene, renderCamera);
+        trailGlowDrawCount = renderParticleTrailHistory(targetRenderer, renderCamera, sourcePoints, true);
+      } finally {
+        restorePointUniforms();
+        scene.background = previousBackground;
+        scene.backgroundIntensity = previousBackgroundIntensity;
+        restoreVisibleModelColorWrite?.();
+        restoreSnapshotsVisible();
+        objectVisibility.forEach(([object, visible]) => {
+          if (object) object.visible = visible;
+        });
+        cameraPathGroup.visible = previousPathVisible;
+        lightHandleGroup.visible = previousLightHandlesVisible;
+        transformControls.visible = previousTransformVisible;
+      }
+
+      const blurredTargets = blurGlowTextureFor(targetRenderer, passTargets, params);
+      const bloomDriver = state.effectMode === 'emission'
+        ? state.emissionGlow
+        : state.effectMode === 'image'
+          ? state.imageSplatGlow
+          : Number(params.glowExposure ?? state.glowExposure);
+      const bloomShape = normalizedGlowDriver(bloomDriver);
+      const bloomStrength = state.effectMode === 'emission'
+        ? THREE.MathUtils.clamp(0.24 + bloomShape * 1.28, 0.24, 1.65)
+        : state.effectMode === 'image'
+          ? THREE.MathUtils.clamp(0.26 + bloomShape * 1.38, 0.26, 1.9)
+          : THREE.MathUtils.clamp(0.18 + bloomShape * 1.5, 0.18, 1.85);
+      const bloomAlpha = state.effectMode === 'emission'
+        ? THREE.MathUtils.clamp(0.004 + bloomShape * 0.16, 0.004, 0.18)
+        : state.effectMode === 'image'
+          ? THREE.MathUtils.clamp(0.005 + bloomShape * 0.18, 0.005, 0.2)
+          : THREE.MathUtils.clamp(0.006 + bloomShape * 0.2, 0.006, 0.22);
+
+      operatorGlowMaterial.uniforms.uBaseTexture.value = color.texture;
+      operatorGlowMaterial.uniforms.uBloomSourceTexture.value = passTargets.glowTarget.texture;
+      operatorGlowMaterial.uniforms.uBloomTexture.value = blurredTargets.medium.texture;
+      operatorGlowMaterial.uniforms.uBloomWideTexture.value = blurredTargets.wide.texture;
+      operatorGlowMaterial.uniforms.uBloomStrength.value = bloomStrength;
+      operatorGlowMaterial.uniforms.uBloomAlpha.value = bloomAlpha;
+      renderFullscreenWith(targetRenderer, operatorGlowMaterial, passTargets.glowCompositeTarget);
+
+      const output = createColorResource(nodeId, 'color', passTargets.glowCompositeTarget, {
+        stage: 'glow',
+        glowRadius: Number(params.glowRadius ?? state.glowRadius),
+        glowExposure: Number(params.glowExposure ?? state.glowExposure),
+        layers: Math.round(Number(params.layers ?? activeQualityProfile.glowLayers) || 1),
+        trailGlowDrawCount
+      }, null, () => compositeLease.release());
+      releaseTokens(temporaryGlowLeases);
+      recordPass(startedAt, {
+        nodeId,
+        type: 'post.glow',
+        inputs: [color],
+        outputs: [output]
+      });
+      return output;
+    },
+
+    renderDepthOfField({ nodeId = 'viewport-dof', color, depth, camera: inputCamera, params = {} } = {}) {
+      const startedAt = performance.now();
+      if (!isOperatorResource(color, 'texture')) {
+        throw new Error('Depth of Field requires a texture resource.');
+      }
+      const activeCamera = inputCamera || renderCamera;
+      const enabled = Boolean(
+        params.dofEnabled !== false &&
+        activeCamera?.isPerspectiveCamera &&
+        isOperatorResource(depth, 'depth') &&
+        depth.texture
+      );
+      if (!enabled) {
+        recordPass(startedAt, {
+          nodeId,
+          type: 'post.depth-of-field',
+          inputs: [color, depth],
+          outputs: [color],
+          skipped: true,
+          reason: params.dofEnabled === false ? 'bypassed-or-disabled' : 'missing-perspective-depth'
+        });
+        return color;
+      }
+
+      // Reuse the released Glow ping-pong surfaces as a DOF source prefilter.
+      // Sparse HDR points otherwise appear as copies of the finite aperture
+      // taps instead of a continuous photographic bokeh disc.
+      const prefilterALease = targetLeases.acquire('blurTargetA', nodeId);
+      const prefilterBLease = targetLeases.acquire('blurTargetB', nodeId);
+      const prefilterTargetA = prefilterALease.resource;
+      const prefilterTargetB = prefilterBLease.resource;
+      const bokehLease = targetLeases.acquire('dofBokehTarget', nodeId);
+      const bokehRenderTarget = bokehLease.resource;
+      const dofLease = targetLeases.acquire('dofTarget', nodeId);
+      const dofRenderTarget = dofLease.resource;
+
+      operatorDofMaterial.uniforms.uDepthTexture.value = depth.texture;
+      operatorDofMaterial.uniforms.uDofSamples.value = THREE.MathUtils.clamp(
+        Math.round(Number(params.samples ?? activeQualityProfile.dofSamples) || 8),
+        1,
+        48
+      );
+      operatorDofMaterial.uniforms.uCameraNear.value = activeCamera.near;
+      operatorDofMaterial.uniforms.uCameraFar.value = activeCamera.far;
+      operatorDofMaterial.uniforms.uFocusDistance.value = Math.max(
+        0.05,
+        Number(params.focusDistance ?? state.cameraFocusDistance) || state.cameraFocusDistance
+      );
+      operatorDofMaterial.uniforms.uAperture.value = THREE.MathUtils.clamp(
+        Number(params.aperture ?? state.cameraAperture) || state.cameraAperture,
+        1.2,
+        22
+      );
+      operatorDofMaterial.uniforms.uFocalLength.value = Math.max(
+        1,
+        Number(params.focalLength ?? state.cameraFocalLength) || state.cameraFocalLength
+      );
+      operatorDofMaterial.uniforms.uSensorWidth.value = Math.max(
+        8,
+        Number(params.sensorWidth ?? activeCamera.getFilmWidth?.() ?? activeCamera.filmGauge ?? state.cameraSensorWidth) ||
+          state.cameraSensorWidth
+      );
+      operatorDofMaterial.uniforms.uBokehScale.value = THREE.MathUtils.clamp(
+        Number(params.bokehScale ?? state.cameraBokehScale) || state.cameraBokehScale,
+        0.25,
+        6
+      );
+      operatorDofMaterial.uniforms.uBokehHighlight.value = THREE.MathUtils.clamp(
+        Number(params.highlightGain ?? state.cameraBokehHighlight) || 0,
+        0,
+        4
+      );
+      operatorDofMaterial.uniforms.uApertureBlades.value = THREE.MathUtils.clamp(
+        Math.round(Number(params.blades ?? state.cameraApertureBlades) || state.cameraApertureBlades),
+        3,
+        12
+      );
+      operatorDofMaterial.uniforms.uApertureRoundness.value = THREE.MathUtils.clamp(
+        Number(params.roundness ?? state.cameraApertureRoundness) || 0,
+        0,
+        1
+      );
+      operatorDofMaterial.uniforms.uResolution.value.set(color.width, color.height);
+      const maximumRadiusPixels = getMaximumBokehRadiusPixels(color.width, color.height);
+      const prefilterRadiusPixels = THREE.MathUtils.clamp(
+        maximumRadiusPixels / Math.sqrt(operatorDofMaterial.uniforms.uDofSamples.value) * 0.42,
+        0.8,
+        6
+      );
+      let completed = false;
+      try {
+        blurMaterial.uniforms.uTexture.value = color.texture;
+        blurMaterial.uniforms.uTexelSize.value.set(1 / color.width, 1 / color.height);
+        blurMaterial.uniforms.uDirection.value.set(1, 0);
+        blurMaterial.uniforms.uRadius.value = prefilterRadiusPixels;
+        renderFullscreenWith(targetRenderer, blurMaterial, prefilterTargetA);
+
+        blurMaterial.uniforms.uTexture.value = prefilterTargetA.texture;
+        blurMaterial.uniforms.uTexelSize.value.set(1 / prefilterTargetA.width, 1 / prefilterTargetA.height);
+        blurMaterial.uniforms.uDirection.value.set(0, 1);
+        blurMaterial.uniforms.uRadius.value = prefilterRadiusPixels *
+          (prefilterTargetA.width / Math.max(color.width, 1));
+        renderFullscreenWith(targetRenderer, blurMaterial, prefilterTargetB);
+        prefilterALease.release();
+
+        operatorDofMaterial.uniforms.uColorTexture.value = prefilterTargetB.texture;
+        renderFullscreenWith(targetRenderer, operatorDofMaterial, bokehRenderTarget);
+        prefilterBLease.release();
+
+        operatorDofCompositeMaterial.uniforms.uSharpTexture.value = color.texture;
+        operatorDofCompositeMaterial.uniforms.uBokehTexture.value = bokehRenderTarget.texture;
+        operatorDofCompositeMaterial.uniforms.uDepthTexture.value = depth.texture;
+        operatorDofCompositeMaterial.uniforms.uCameraNear.value = operatorDofMaterial.uniforms.uCameraNear.value;
+        operatorDofCompositeMaterial.uniforms.uCameraFar.value = operatorDofMaterial.uniforms.uCameraFar.value;
+        operatorDofCompositeMaterial.uniforms.uFocusDistance.value = operatorDofMaterial.uniforms.uFocusDistance.value;
+        operatorDofCompositeMaterial.uniforms.uAperture.value = operatorDofMaterial.uniforms.uAperture.value;
+        operatorDofCompositeMaterial.uniforms.uFocalLength.value = operatorDofMaterial.uniforms.uFocalLength.value;
+        operatorDofCompositeMaterial.uniforms.uSensorWidth.value = operatorDofMaterial.uniforms.uSensorWidth.value;
+        operatorDofCompositeMaterial.uniforms.uBokehScale.value = operatorDofMaterial.uniforms.uBokehScale.value;
+        operatorDofCompositeMaterial.uniforms.uBokehHighlight.value = operatorDofMaterial.uniforms.uBokehHighlight.value;
+        operatorDofCompositeMaterial.uniforms.uResolveRadius.value = THREE.MathUtils.clamp(
+          1.8 + prefilterRadiusPixels * 0.34,
+          2,
+          3.5
+        );
+        operatorDofCompositeMaterial.uniforms.uResolution.value.set(color.width, color.height);
+        operatorDofCompositeMaterial.uniforms.uBokehResolution.value.set(
+          bokehRenderTarget.width,
+          bokehRenderTarget.height
+        );
+        renderFullscreenWith(targetRenderer, operatorDofCompositeMaterial, dofRenderTarget);
+        completed = true;
+      } finally {
+        prefilterALease.release();
+        prefilterBLease.release();
+        bokehLease.release();
+        if (!completed) {
+          dofLease.release();
+        }
+      }
+
+      const output = createColorResource(nodeId, 'color', dofRenderTarget, {
+        stage: 'depth-of-field',
+        focusDistance: operatorDofMaterial.uniforms.uFocusDistance.value,
+        aperture: operatorDofMaterial.uniforms.uAperture.value,
+        samples: operatorDofMaterial.uniforms.uDofSamples.value,
+        lensModel: 'thin-lens-signed-coc',
+        sensorWidth: operatorDofMaterial.uniforms.uSensorWidth.value,
+        bokehScale: operatorDofMaterial.uniforms.uBokehScale.value,
+        highlightGain: operatorDofMaterial.uniforms.uBokehHighlight.value,
+        blades: operatorDofMaterial.uniforms.uApertureBlades.value,
+        roundness: operatorDofMaterial.uniforms.uApertureRoundness.value,
+        maximumRadiusPixels,
+        prefilterRadiusPixels,
+        prefilterWidth: prefilterTargetB.width,
+        prefilterHeight: prefilterTargetB.height,
+        resolveRadiusPixels: operatorDofCompositeMaterial.uniforms.uResolveRadius.value,
+        bokehWidth: bokehRenderTarget.width,
+        bokehHeight: bokehRenderTarget.height,
+        bokehRenderScale: bokehRenderTarget.width / Math.max(color.width, 1)
+      }, null, () => dofLease.release());
+      recordPass(startedAt, {
+        nodeId,
+        type: 'post.depth-of-field',
+        inputs: [color, depth],
+        outputs: [output]
+      });
+      return output;
+    },
+
+    output({ nodeId = 'viewport-output', color } = {}) {
+      const startedAt = performance.now();
+      if (!isOperatorResource(color, 'texture')) {
+        throw new Error('Viewport Output requires a texture resource.');
+      }
+      try {
+        operatorOutputMaterial.uniforms.uColorTexture.value = color.texture;
+        operatorOutputMaterial.uniforms.uToneExposure.value = targetRenderer.toneMappingExposure;
+        operatorOutputMaterial.uniforms.uTransparentOutput.value = transparent ? 1 : 0;
+        applyOutputViewport();
+        targetRenderer.setClearColor(0x090a0c, transparent ? 0 : 1);
+        targetRenderer.clear(true, true, true);
+        postQuad.material = operatorOutputMaterial;
+        targetRenderer.render(postScene, postCamera);
+        recordPass(startedAt, {
+          nodeId,
+          type: 'output.viewport',
+          inputs: [color]
+        });
+      } finally {
+        restoreRendererState();
+      }
+    },
+
+    finish,
+    abort,
+    get restored() {
+      return restored;
+    },
+    get finished() {
+      return finished;
+    }
+  };
+}
+
+function renderSceneWithGlowLegacy(graphEffects = {}) {
   if (cameraViewLocked && cameraViewPostTargets) {
     const layout = getMainCameraViewLayout();
     resizePostTargetSet(cameraViewPostTargets, layout.renderWidth, layout.renderHeight);
@@ -16253,7 +19360,8 @@ function renderSceneWithGlow() {
             transparent: false,
             viewport: layout,
             forceOutputComposite: true,
-            dofEnabled: true
+            dofEnabled: graphEffects.dofEnabled !== false,
+            glowEnabled: graphEffects.glowEnabled !== false
           }
         );
       }
@@ -16266,7 +19374,80 @@ function renderSceneWithGlow() {
   renderer.getSize(mainRendererSize);
   renderer.setViewport(0, 0, mainRendererSize.x, mainRendererSize.y);
   renderer.setScissorTest(false);
-  renderSceneWithGlowFor(renderer, camera, { sceneTarget, glowTarget, blurTargetA, blurTargetB }, { dofEnabled: false });
+  renderSceneWithGlowFor(
+    renderer,
+    camera,
+    {
+      sceneTarget,
+      glowTarget,
+      blurTargetA,
+      blurTargetB,
+      blurTargetC,
+      blurTargetD,
+      glowCompositeTarget,
+      dofBokehTarget,
+      dofTarget
+    },
+    {
+      dofEnabled: graphEffects.dofEnabled !== false,
+      glowEnabled: graphEffects.glowEnabled !== false
+    }
+  );
+}
+
+function createMainOperatorRenderPipeline(resourceTracker) {
+  if (state.cameraType === 'panorama') {
+    return null;
+  }
+  if (cameraViewLocked && cameraViewPostTargets) {
+    const layout = getMainCameraViewLayout();
+    resizePostTargetSet(cameraViewPostTargets, layout.renderWidth, layout.renderHeight);
+    const restoreHelpers = setEditorHelpersVisible(false);
+    renderer.setRenderTarget(null);
+    renderer.setViewport(0, 0, layout.canvasWidth, layout.canvasHeight);
+    renderer.setScissorTest(false);
+    renderer.setClearColor(0x090a0c, 1);
+    renderer.clear(true, true, true);
+    const viewCamera = configureOutputCamera(outputFrameCamera, layout.aspect, cameraAnimation.time);
+    return createOperatorRenderPipeline(renderer, viewCamera, cameraViewPostTargets, {
+      resourceTracker,
+      outputTarget: null,
+      transparent: false,
+      viewport: layout,
+      onRestore: restoreHelpers
+    });
+  }
+
+  renderer.getSize(mainRendererSize);
+  renderer.setViewport(0, 0, mainRendererSize.x, mainRendererSize.y);
+  renderer.setScissorTest(false);
+  return createOperatorRenderPipeline(
+    renderer,
+    camera,
+    {
+      sceneTarget,
+      glowTarget,
+      blurTargetA,
+      blurTargetB,
+      blurTargetC,
+      blurTargetD,
+      glowCompositeTarget,
+      dofBokehTarget,
+      dofTarget
+    },
+    { resourceTracker }
+  );
+}
+
+function renderSceneWithGlow() {
+  return executeStudioOperatorGraphFrame({
+    scope: cameraViewLocked ? 'camera-view' : 'viewport',
+    simulationTime: uniforms.uTime.value,
+    feedbackRenderer: renderer,
+    renderCamera: cameraViewLocked ? outputFrameCamera : camera,
+    createRenderPipeline: (resourceTracker) => createMainOperatorRenderPipeline(resourceTracker),
+    renderLegacy: (graphEffects) => renderSceneWithGlowLegacy(graphEffects)
+  });
 }
 
 function animate() {
@@ -16279,7 +19460,7 @@ function animate() {
     return;
   }
 
-  uniforms.uTime.value += delta * (state.effectMode === 'morph' ? Math.max(state.morphFlow, 0.05) : state.speed);
+  advanceSceneModelFlowPhases(delta);
   emissionUniforms.uTime.value += delta;
   imageSplatUniforms.uTime.value += delta;
   realSplatPointUniforms.uTime.value += delta;
@@ -16318,7 +19499,9 @@ function animate() {
   if (renderCameraPreview()) {
     smoothPerfStat('cameraPreviewMs', performance.now() - previewStartedAt);
   }
-  smoothPerfStat('frameMs', performance.now() - frameStartedAt);
+  const frameEndedAt = performance.now();
+  smoothPerfStat('frameMs', frameEndedAt - frameStartedAt);
+  updateAutoQuality(frameEndedAt);
 }
 
 function updateDissolve(value, updateControl = true) {
@@ -16354,6 +19537,8 @@ function stabilizeSceneModelTransformsForRender() {
 
 function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSeconds) {
   const cameraFrameTime = THREE.MathUtils.clamp(Number(cameraTimeSeconds) || 0, 0, cameraAnimation.duration);
+  const previousFlowPhase = uniforms.uTime.value;
+  const previousDeterministicFlowRenderTime = deterministicFlowRenderTime;
   stabilizeSceneModelTransformsForRender();
   if (cameraAnimation.keyframes.length || parameterKeyframes.length || videoPlaneKeyframes.length) {
     applyKeyframedOptionsAtTime(cameraFrameTime, false);
@@ -16362,7 +19547,8 @@ function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSe
   } else if (Number.isFinite(Number(dissolve))) {
     updateDissolve(dissolve, false);
   }
-  uniforms.uTime.value = timeSeconds * (state.effectMode === 'morph' ? Math.max(state.morphFlow, 0.05) : state.speed);
+  deterministicFlowRenderTime = Math.max(0, Number(timeSeconds) || 0);
+  uniforms.uTime.value = getDeterministicActiveFlowPhase(Math.max(0, Number(timeSeconds) || 0));
   emissionUniforms.uTime.value = timeSeconds;
   imageSplatUniforms.uTime.value = timeSeconds;
   realSplatPointUniforms.uTime.value = timeSeconds;
@@ -16398,23 +19584,58 @@ function renderStudioFrame(timeSeconds = 0, dissolve, cameraTimeSeconds = timeSe
       resizePostTargets();
     }
     const renderCamera = configureOutputCamera(outputFrameCamera, exportResolution.aspect, cameraFrameTime);
-    if (state.cameraType === 'panorama') {
-      renderPanoramaFor(renderer, renderCamera, {
-        outputTarget: null,
-        transparent: exportSettings.transparent,
-        width: exportResolution.width,
-        height: exportResolution.height
-      });
-    } else {
-      renderSceneWithGlowFor(
-        renderer,
-        renderCamera,
-        { sceneTarget, glowTarget, blurTargetA, blurTargetB },
-        { dofEnabled: true }
-      );
-    }
+    executeStudioOperatorGraphFrame({
+      scope: 'export-frame',
+      simulationTime: uniforms.uTime.value,
+      feedbackRenderer: renderer,
+      renderCamera,
+      createRenderPipeline: state.cameraType === 'panorama'
+        ? undefined
+        : (resourceTracker) => createOperatorRenderPipeline(
+          renderer,
+          renderCamera,
+          {
+            sceneTarget,
+            glowTarget,
+            blurTargetA,
+            blurTargetB,
+            blurTargetC,
+            blurTargetD,
+            glowCompositeTarget,
+            dofBokehTarget,
+            dofTarget
+          },
+          {
+            resourceTracker,
+            outputTarget: null,
+            transparent: exportSettings.transparent
+          }
+        ),
+      renderLegacy: (graphEffects) => {
+        if (state.cameraType === 'panorama') {
+          renderPanoramaFor(renderer, renderCamera, {
+            outputTarget: null,
+            transparent: exportSettings.transparent,
+            width: exportResolution.width,
+            height: exportResolution.height
+          });
+        } else {
+          renderSceneWithGlowFor(
+            renderer,
+            renderCamera,
+            { sceneTarget, glowTarget, blurTargetA, blurTargetB, blurTargetC, blurTargetD },
+            {
+              dofEnabled: graphEffects.dofEnabled !== false,
+              glowEnabled: graphEffects.glowEnabled !== false
+            }
+          );
+        }
+      }
+    });
     return canvas.toDataURL('image/png');
   } finally {
+    deterministicFlowRenderTime = previousDeterministicFlowRenderTime;
+    uniforms.uTime.value = previousFlowPhase;
     if (shouldResizeForExport) {
       renderer.setPixelRatio(previousPixelRatio);
       renderer.setSize(previousRenderSize.x, previousRenderSize.y, false);
@@ -16564,6 +19785,20 @@ window.particleStudio = {
   setLights: (lights) => importSceneLights(lights, false),
   getLights: () => serializeSceneLights(),
   getPerformanceStats,
+  getAdaptiveParticleStats: () => perfStats.lastAdaptiveParticleStats || [],
+  getQualitySettings,
+  setQualityMode: (mode, options = {}) => setQualityMode(mode, options),
+  getOperatorGraph: () => captureOperatorGraphDocument(),
+  setOperatorGraph: (graph, options = {}) => setStudioOperatorGraph(graph, options),
+  resetOperatorGraph: () => resetStudioOperatorGraph(),
+  validateOperatorGraph: (graph) => validateOperatorGraph(graph),
+  getOperatorExecutionPlan: (options = {}) => {
+    const graph = captureOperatorGraphDocument();
+    return compileOperatorGraph(graph, {
+      dirtyNodeIds: options.dirtyNodeIds
+    });
+  },
+  getOperatorRuntimeStats: () => getStudioOperatorRuntimeStats(),
   setModelAnimation: (options = {}) => {
     if (options.clipIndex !== undefined) {
       setModelAnimationClip(Number(options.clipIndex));
@@ -16712,6 +19947,21 @@ window.particleStudio = {
   }),
   setSceneModels: (sceneModels = {}) => importSceneModels(sceneModels),
   getSceneModels: () => serializeSceneModels(),
+  getFlowRuntimeState: () => ({
+    activeId: selectedSceneModelId,
+    activeUniformPhase: uniforms.uTime.value,
+    deterministicRenderTime: deterministicFlowRenderTime,
+    creatorFeedbackEnabled: captureOperatorGraphDocument().nodes
+      .find((node) => node.id === 'particle-feedback')?.params?.enabled !== false,
+    models: sceneModelObjects.map((record) => ({
+      id: record.id,
+      selected: record.id === selectedSceneModelId,
+      phase: Number(record.effectPhase) || 0,
+      speed: record.id === selectedSceneModelId
+        ? getActiveFlowSpeed(state.speed)
+        : optionNumber(record.options, 'speed', 0)
+    }))
+  }),
   selectSceneModel: (id) => activateSceneModel(id),
   duplicateSelectedSceneModelForTest: () => duplicateSelectedSceneModel(),
   selectSceneModelIdsForTest: (ids = []) => {
@@ -17030,6 +20280,10 @@ window.particleStudio = {
     : canvas.toDataURL('image/png')
 };
 
+qualityUi.mode?.addEventListener('change', () => {
+  setQualityMode(qualityUi.mode.value);
+});
+
 controlsUi.particleCount.addEventListener('input', () => {
   updateParticleCount(Number(controlsUi.particleCount.value));
 });
@@ -17064,6 +20318,12 @@ function updateNumericControl(key, value) {
   }
 
   state[key] = normalizeNumericStateValue(key, value);
+  if (key === 'dissolveDirectionX' || key === 'dissolveDirectionY' || key === 'dissolveDirectionZ') {
+    state.flowDirectionPreset = 'custom';
+    if (controlsUi.flowDirectionPreset) {
+      controlsUi.flowDirectionPreset.value = 'custom';
+    }
+  }
   if (REBUILD_NUMERIC_FIELDS.has(key)) {
     if (key === 'emissionCount' || key === 'imageSplatCount') {
       state[key] = Math.max(MIN_PARTICLE_COUNT, Math.round(state[key]));
@@ -17121,6 +20381,22 @@ function normalizeNumericStateValue(key, value) {
 
   if (key === 'cameraFocusDistance') {
     return THREE.MathUtils.clamp(value, 0.05, CAMERA_FOCUS_DISTANCE_MAX);
+  }
+
+  if (key === 'cameraBokehScale') {
+    return THREE.MathUtils.clamp(value, 0.25, 6);
+  }
+
+  if (key === 'cameraBokehHighlight') {
+    return THREE.MathUtils.clamp(value, 0, 4);
+  }
+
+  if (key === 'cameraApertureBlades') {
+    return THREE.MathUtils.clamp(Math.round(value), 3, 12);
+  }
+
+  if (key === 'cameraApertureRoundness') {
+    return THREE.MathUtils.clamp(value, 0, 1);
   }
 
   if (CLAMP_01_FIELDS.has(key)) {
@@ -17783,11 +21059,67 @@ function resizeRenderer() {
   renderer.setSize(size.width, size.height, false);
   resizePostTargets();
   uniforms.uPixelRatio.value = studioPixelRatio;
+  emissionUniforms.uPixelRatio.value = studioPixelRatio;
   imageSplatUniforms.uPixelRatio.value = studioPixelRatio;
+  realSplatPointUniforms.uPixelRatio.value = studioPixelRatio;
   renderTimelineFrameTicks();
   updateCameraPreviewLayout(true);
   setCameraPreviewDirty();
 }
+
+function applyFlowStyleToState(style, options = {}) {
+  const nextStyle = normalizeFlowStyle(style);
+  if (options.recordUndo !== false) {
+    recordUndoStep(options.label || '切换粒子流风格');
+  }
+  const styled = applyFlowStylePreset(state, nextStyle);
+  NUMERIC_KEYFRAME_FIELDS.forEach((field) => {
+    if (styled[field] !== undefined) {
+      state[field] = normalizeNumericStateValue(field, Number(styled[field]));
+    }
+  });
+  state.flowStyle = nextStyle;
+  syncUi();
+  syncUniforms();
+  syncSelectedSceneModelRecord();
+  setCameraPreviewDirty();
+  setStatus(options.reset ? '已恢复当前风格默认值' : `已切换粒子流风格`);
+}
+
+controlsUi.flowStyle?.addEventListener('change', () => {
+  applyFlowStyleToState(controlsUi.flowStyle.value);
+});
+
+controlsUi.flowStyleCards?.forEach((button) => {
+  button.addEventListener('click', () => {
+    const style = normalizeFlowStyle(button.dataset.flowStyle);
+    if (controlsUi.flowStyle) {
+      controlsUi.flowStyle.value = style;
+    }
+    applyFlowStyleToState(style);
+  });
+});
+
+controlsUi.resetFlowStyle?.addEventListener('click', () => {
+  applyFlowStyleToState(state.flowStyle, { reset: true, label: '恢复粒子流风格默认值' });
+});
+
+controlsUi.flowDirectionPreset?.addEventListener('change', () => {
+  const preset = normalizeFlowDirectionPreset(controlsUi.flowDirectionPreset.value);
+  state.flowDirectionPreset = preset;
+  if (preset !== 'custom') {
+    const direction = resolveFlowDirectionVector(preset, [
+      state.dissolveDirectionX,
+      state.dissolveDirectionY,
+      state.dissolveDirectionZ
+    ]);
+    [state.dissolveDirectionX, state.dissolveDirectionY, state.dissolveDirectionZ] = direction;
+  }
+  syncUi();
+  syncUniforms();
+  syncSelectedSceneModelRecord();
+  setCameraPreviewDirty();
+});
 
 window.addEventListener('resize', () => {
   applyWorkspaceLayout(workspaceLayoutState, { persist: false });
