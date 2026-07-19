@@ -15,7 +15,7 @@
 
 > 我们要替代的是复杂的制作流程，不是照搬 TD 的操作方式。Creator 负责快速出片，Graph 负责无限扩展。
 
-![Particle Model Studio 从模型到成片的四步工作流](docs/images/workflow-overview.svg)
+![Particle Model Studio 从模型到成片的四步工作流](docs/images/workflow-overview.png)
 
 ## 一眼看懂软件
 
@@ -28,7 +28,7 @@
 
 ## 粒子逸散图解
 
-![Particle Model Studio 模型粒子逸散图解](docs/images/model-emission-overview.svg)
+![Particle Model Studio 模型粒子逸散图解](docs/images/model-emission-overview.png)
 
 模型逸散由五部分共同构成：模型本体决定保留的实体质感，局部破碎限定作用区域，逸散数量与距离控制尾迹规模，风向和湍流塑造运动路径，粒子尺寸、透明度与辉光控制最终材质。点击右侧“逸散”属性页会自动切换到该渲染模式。
 
