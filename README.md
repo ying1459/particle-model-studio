@@ -9,11 +9,32 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6)](https://github.com/ying1459/particle-model-studio/releases/latest)
 [![Three.js](https://img.shields.io/badge/Three.js-000000?logo=threedotjs&logoColor=white)](https://threejs.org/)
 
-**用少量参数快速做出可交付的实时 3D 粒子效果。** 导入模型，选择风格，调整消散与扩散，即可预览、K 帧并导出透明 MOV 或 MP4；需要更深控制时，再进入中文节点图谱。
+## 它是什么
 
-Particle Model Studio is a Windows desktop particle editor for fast, production-ready 3D dissolves. Start with creator-friendly presets, then move into a Chinese node graph, GPU feedback, camera animation, glow, depth of field, and transparent video export when needed.
+**Particle Model Studio 是一款面向视觉创作者的实时 3D 粒子软件。** 它不要求你先学会 TouchDesigner 的节点体系：导入模型、选择风格、调整几个直观参数，就能得到消散、逸散、流丝、烟尘、辉光、景深和镜头动画；需要更深控制时，再进入全中文 Graph。
 
-![Particle Model Studio 1.0.21](docs/images/promo-poster.jpg)
+> 我们要替代的是复杂的制作流程，不是照搬 TD 的操作方式。Creator 负责快速出片，Graph 负责无限扩展。
+
+![Particle Model Studio 从模型到成片的四步工作流](docs/images/workflow-overview.svg)
+
+## 一眼看懂软件
+
+| 你要做什么 | 在软件里怎么做 | 得到什么 |
+| --- | --- | --- |
+| 快速做模型粒子效果 | 导入模型 → 选择三套风格之一 → 调整五个主要参数 | 可直接预览和导出的 TD 风格粒子镜头 |
+| 做模型逸散与局部破碎 | 点击右侧“逸散”，调整数量、距离、风向、湍流和破碎范围 | 模型本体与逸散颗粒连续衔接 |
+| 做镜头与后期 | 设置相机、光圈景深、Deep Glow 风格辉光和关键帧 | 视口、相机预览、静帧与视频保持一致 |
+| 搭复杂粒子系统 | 进入中文 Graph，组合发射、生命周期、力场、吸引、碰撞与反馈 | 可复用、可旁路、可诊断的高级效果链 |
+
+## 粒子逸散图解
+
+![Particle Model Studio 模型粒子逸散图解](docs/images/model-emission-overview.svg)
+
+模型逸散由五部分共同构成：模型本体决定保留的实体质感，局部破碎限定作用区域，逸散数量与距离控制尾迹规模，风向和湍流塑造运动路径，粒子尺寸、透明度与辉光控制最终材质。点击右侧“逸散”属性页会自动切换到该渲染模式。
+
+## 实机效果
+
+![Particle Model Studio 1.0.22 实机粒子效果](docs/images/promo-poster.jpg)
 
 [▶ 观看 1.0.21 宣传片](https://github.com/ying1459/particle-model-studio/releases/download/v1.0.21/Particle-Model-Studio-1.0.21-Promo-1080p.mp4) · [⬇ 下载最新版](https://github.com/ying1459/particle-model-studio/releases/latest) · [🗺 开发路线](docs/TOUCHDESIGNER_PARITY_ROADMAP.md)
 
@@ -23,7 +44,7 @@ Particle Model Studio is a Windows desktop particle editor for fast, production-
 
 右侧点击“逸散”会直接进入模型逸散模式，切回粒子、消散或生长页会返回模型粒子模式。工程中的逸散参数与关键帧保持不变，不再需要到“工程”页二次切换模式。
 
-## 两种工作方式
+## Creator 与 Graph
 
 | 模式 | 适合谁 | 使用方式 |
 | --- | --- | --- |

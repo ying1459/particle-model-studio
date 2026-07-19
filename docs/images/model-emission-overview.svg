@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="860" viewBox="0 0 1600 860" role="img" aria-labelledby="title desc">
+  <title id="title">Particle Model Studio 模型粒子逸散图解</title>
+  <desc id="desc">展示模型本体、局部破碎、连续侵蚀边界、束状逸散、风向湍流和粒子材质之间的关系。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090c11"/>
+      <stop offset="0.6" stop-color="#11171e"/>
+      <stop offset="1" stop-color="#0b1114"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffae99"/>
+      <stop offset="0.55" stop-color="#df6c69"/>
+      <stop offset="1" stop-color="#7f363d"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff1df"/>
+      <stop offset="0.45" stop-color="#8ff8e9"/>
+      <stop offset="1" stop-color="#4fd4d4" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff0df"/>
+      <stop offset="0.38" stop-color="#88efe4"/>
+      <stop offset="1" stop-color="#44b9c8" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000" flood-opacity="0.46"/>
+    </filter>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#76eee2"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; }
+      .title { fill: #f6f8fb; font-size: 55px; font-weight: 820; }
+      .subtitle { fill: #9eacb8; font-size: 24px; }
+      .label { fill: #f4f8fa; font-size: 25px; font-weight: 760; }
+      .copy { fill: #aeb9c3; font-size: 20px; }
+      .chip { fill: #d8e2e8; font-size: 18px; font-weight: 680; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="860" rx="32" fill="url(#bg)"/>
+  <circle cx="1445" cy="60" r="240" fill="#42d9d0" opacity="0.045"/>
+  <circle cx="110" cy="810" r="255" fill="#f2766e" opacity="0.05"/>
+
+  <g class="sans">
+    <text x="70" y="90" class="title">粒子逸散：本体、破碎与尾迹是一套连续效果</text>
+    <text x="72" y="132" class="subtitle">点击右侧“逸散”就进入该模式；不是随机喷点，而是从模型表面沿风场成束离开</text>
+    <g transform="translate(1190 61)">
+      <rect width="338" height="52" rx="26" fill="#17363a" stroke="#3b8886"/>
+      <circle cx="28" cy="26" r="9" fill="#79f4e6" filter="url(#glow)"/>
+      <text x="50" y="34" fill="#dffffa" font-size="20" font-weight="720">逸散页 → 自动切换逸散模式</text>
+    </g>
+
+    <g transform="translate(70 175)" filter="url(#shadow)">
+      <rect width="1460" height="470" rx="28" fill="#131920" stroke="#2b3741" stroke-width="2"/>
+      <rect x="296" y="38" width="868" height="394" rx="25" fill="#090d12" stroke="#25313b"/>
+
+      <g transform="translate(435 90)">
+        <path d="M0 88 170 0l168 88-170 88Z" fill="#f29181" opacity="0.92"/>
+        <path d="M0 88v191l168 88V176Z" fill="#b85156"/>
+        <path d="M168 176v191l170-88V88Z" fill="url(#body)"/>
+        <path d="M0 88 170 0l168 88-170 88Z M0 88v191l168 88 170-88V88 M168 176v191" fill="none" stroke="#ffb29c" stroke-width="4" stroke-linejoin="round"/>
+
+        <g fill="#0a0e13">
+          <circle cx="314" cy="122" r="15"/><circle cx="323" cy="151" r="10"/><circle cx="306" cy="181" r="18"/>
+          <circle cx="327" cy="212" r="13"/><circle cx="309" cy="246" r="17"/><circle cx="322" cy="277" r="10"/>
+        </g>
+        <path d="M312 99c-18 31 2 48-11 79s15 51 0 83 15 53 2 86" fill="none" stroke="url(#edge)" stroke-width="18" filter="url(#glow)"/>
+
+        <g opacity="0.9">
+          <path d="M300 119C420 74 507 66 640 22" fill="none" stroke="url(#trail)" stroke-width="7" stroke-linecap="round"/>
+          <path d="M302 145C428 114 532 123 690 79" fill="none" stroke="url(#trail)" stroke-width="4" stroke-linecap="round"/>
+          <path d="M306 174C440 159 558 169 745 126" fill="none" stroke="url(#trail)" stroke-width="8" stroke-linecap="round"/>
+          <path d="M304 205C432 201 559 237 714 197" fill="none" stroke="url(#trail)" stroke-width="5" stroke-linecap="round"/>
+          <path d="M303 237C414 253 531 299 685 266" fill="none" stroke="url(#trail)" stroke-width="7" stroke-linecap="round"/>
+          <path d="M303 273C400 302 499 352 636 334" fill="none" stroke="url(#trail)" stroke-width="4" stroke-linecap="round"/>
+        </g>
+
+        <g fill="#dffdf7">
+          <circle cx="347" cy="112" r="5"/><circle cx="370" cy="134" r="3"/><circle cx="393" cy="101" r="4"/>
+          <circle cx="418" cy="164" r="6"/><circle cx="448" cy="126" r="3"/><circle cx="474" cy="177" r="5"/>
+          <circle cx="507" cy="148" r="4"/><circle cx="545" cy="207" r="6"/><circle cx="578" cy="166" r="3"/>
+          <circle cx="610" cy="232" r="4"/><circle cx="650" cy="195" r="5"/><circle cx="696" cy="141" r="3"/>
+          <circle cx="372" cy="232" r="4"/><circle cx="404" cy="274" r="6"/><circle cx="449" cy="242" r="3"/>
+          <circle cx="483" cy="302" r="5"/><circle cx="526" cy="272" r="4"/><circle cx="571" cy="321" r="6"/>
+          <circle cx="621" cy="288" r="3"/><circle cx="672" cy="337" r="5"/><circle cx="728" cy="245" r="4"/>
+        </g>
+        <g fill="#72e8df" opacity="0.72">
+          <circle cx="763" cy="85" r="3"/><circle cx="798" cy="132" r="5"/><circle cx="840" cy="96" r="2"/>
+          <circle cx="780" cy="205" r="4"/><circle cx="835" cy="181" r="3"/><circle cx="872" cy="243" r="5"/>
+          <circle cx="745" cy="300" r="3"/><circle cx="812" cy="338" r="4"/><circle cx="892" cy="309" r="2"/>
+        </g>
+
+        <g transform="translate(230 232)">
+          <circle r="58" fill="none" stroke="#ffd592" stroke-width="3" stroke-dasharray="8 8"/>
+          <circle r="14" fill="none" stroke="#ffd592" stroke-width="3"/>
+          <path d="M-74 0H74M0-74V74" stroke="#ffd592" stroke-width="2" opacity="0.65"/>
+        </g>
+      </g>
+
+      <g transform="translate(24 48)">
+        <rect width="248" height="108" rx="18" fill="#1c222a" stroke="#3a4651"/>
+        <circle cx="30" cy="30" r="18" fill="#2a4850"/><text x="30" y="37" fill="#82f1e5" text-anchor="middle" font-size="19" font-weight="800">1</text>
+        <text x="60" y="38" class="label">模型本体</text>
+        <text x="22" y="76" class="copy">白化、粗糙度、可见度</text>
+        <text x="22" y="100" class="copy">始终保留实体质感</text>
+        <path d="M248 80h78" stroke="#53616d" stroke-width="2"/>
+      </g>
+      <g transform="translate(24 310)">
+        <rect width="248" height="112" rx="18" fill="#24221f" stroke="#6e5a3d"/>
+        <circle cx="30" cy="30" r="18" fill="#55452d"/><text x="30" y="37" fill="#ffd592" text-anchor="middle" font-size="19" font-weight="800">2</text>
+        <text x="60" y="38" class="label">局部破碎</text>
+        <text x="22" y="76" class="copy">中心、范围、羽化、进度</text>
+        <text x="22" y="100" class="copy">只破坏需要的区域</text>
+        <path d="M248 58h91" stroke="#8b704a" stroke-width="2"/>
+      </g>
+      <g transform="translate(1190 48)">
+        <rect width="246" height="108" rx="18" fill="#182328" stroke="#315b60"/>
+        <circle cx="30" cy="30" r="18" fill="#25464b"/><text x="30" y="37" fill="#82f1e5" text-anchor="middle" font-size="19" font-weight="800">3</text>
+        <text x="60" y="38" class="label">逸散形态</text>
+        <text x="22" y="76" class="copy">数量、强度、距离、速度</text>
+        <text x="22" y="100" class="copy">决定尾迹规模与节奏</text>
+        <path d="M-64 80h64" stroke="#4d7174" stroke-width="2"/>
+      </g>
+      <g transform="translate(1190 183)">
+        <rect width="246" height="108" rx="18" fill="#182328" stroke="#315b60"/>
+        <circle cx="30" cy="30" r="18" fill="#25464b"/><text x="30" y="37" fill="#82f1e5" text-anchor="middle" font-size="19" font-weight="800">4</text>
+        <text x="60" y="38" class="label">风与湍流</text>
+        <text x="22" y="76" class="copy">方向控制主运动</text>
+        <text x="22" y="100" class="copy">湍流负责卷曲与细节</text>
+        <path d="M-64 56h64" stroke="#4d7174" stroke-width="2"/>
+      </g>
+      <g transform="translate(1190 318)">
+        <rect width="246" height="108" rx="18" fill="#251d20" stroke="#70464b"/>
+        <circle cx="30" cy="30" r="18" fill="#573137"/><text x="30" y="37" fill="#ffa396" text-anchor="middle" font-size="19" font-weight="800">5</text>
+        <text x="60" y="38" class="label">逸散粒子</text>
+        <text x="22" y="76" class="copy">尺寸、透明度、辉光</text>
+        <text x="22" y="100" class="copy">控制颗粒材质和亮度</text>
+        <path d="M-64 54h64" stroke="#765057" stroke-width="2"/>
+      </g>
+
+      <path d="M720 58C840 10 975 15 1095 66" fill="none" stroke="#76eee2" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow)"/>
+      <text x="816" y="38" fill="#8ff5e9" font-size="20" font-weight="700">主风向</text>
+    </g>
+
+    <g transform="translate(70 680)">
+      <rect width="1460" height="118" rx="24" fill="#141a21" stroke="#2d3943"/>
+      <text x="34" y="44" fill="#f3f7fa" font-size="24" font-weight="780">连续效果链</text>
+      <g transform="translate(210 22)">
+        <rect width="220" height="72" rx="18" fill="#3a2327" stroke="#90515a"/><text x="110" y="44" fill="#ffb4a4" text-anchor="middle" font-size="22" font-weight="720">模型本体</text>
+        <path d="M444 36h58" stroke="#71e9df" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="516" width="220" height="72" rx="18" fill="#29302e" stroke="#6c8274"/><text x="626" y="44" fill="#e9efdf" text-anchor="middle" font-size="22" font-weight="720">连续侵蚀边界</text>
+        <path d="M750 36h58" stroke="#71e9df" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="822" width="220" height="72" rx="18" fill="#163137" stroke="#37767a"/><text x="932" y="44" fill="#8ff5e9" text-anchor="middle" font-size="22" font-weight="720">束状逸散</text>
+        <path d="M1056 36h58" stroke="#71e9df" stroke-width="3" marker-end="url(#arrow)"/>
+        <rect x="1128" width="220" height="72" rx="18" fill="#182329" stroke="#345158"/><text x="1238" y="44" fill="#b9d9dc" text-anchor="middle" font-size="22" font-weight="720">受控雾化尾迹</text>
+      </g>
+    </g>
+  </g>
+</svg>

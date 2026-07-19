@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Particle Model Studio 从模型到成片工作流</title>
+  <desc id="desc">导入模型、选择粒子风格、调节少量参数、导出视频的四步工作流，并展示 Creator 与中文 Graph 两种工作方式。</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b10"/>
+      <stop offset="0.55" stop-color="#10151c"/>
+      <stop offset="1" stop-color="#071112"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#77f4e6"/>
+      <stop offset="1" stop-color="#25bcd1"/>
+    </linearGradient>
+    <linearGradient id="coral" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9f8d"/>
+      <stop offset="1" stop-color="#d95d63"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000" flood-opacity="0.42"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5fded8"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; }
+      .muted { fill: #99a7b4; }
+      .small { font-size: 22px; }
+      .card-title { fill: #f5f8fb; font-size: 31px; font-weight: 750; }
+      .card-copy { fill: #b6c1ca; font-size: 21px; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="32" fill="url(#background)"/>
+  <circle cx="1455" cy="52" r="230" fill="#2bd3ce" opacity="0.045"/>
+  <circle cx="85" cy="820" r="250" fill="#ef766c" opacity="0.045"/>
+  <g opacity="0.48" fill="#8af7ec">
+    <circle cx="1468" cy="116" r="3"/><circle cx="1510" cy="155" r="2"/><circle cx="1418" cy="172" r="2.5"/>
+    <circle cx="1534" cy="94" r="4"/><circle cx="1380" cy="103" r="2"/><circle cx="1490" cy="208" r="3"/>
+  </g>
+
+  <g class="sans">
+    <g transform="translate(72 54)">
+      <rect width="260" height="42" rx="21" fill="#182329" stroke="#31545a"/>
+      <circle cx="24" cy="21" r="8" fill="url(#cyan)" filter="url(#glow)"/>
+      <text x="44" y="29" fill="#dffef9" font-size="20" font-weight="700" letter-spacing="1">PARTICLE MODEL STUDIO</text>
+    </g>
+    <text x="72" y="157" fill="#f7fafc" font-size="58" font-weight="800">从模型到成片，只要四步</text>
+    <text x="74" y="202" class="muted" font-size="25">不复制 TouchDesigner 的复杂操作，把常用粒子流程压缩成可直接出片的创作控件</text>
+
+    <g filter="url(#shadow)">
+      <g transform="translate(70 258)">
+        <rect width="330" height="382" rx="25" fill="#151b22" stroke="#29343f" stroke-width="2"/>
+        <circle cx="44" cy="44" r="22" fill="#213d42"/>
+        <text x="44" y="52" fill="#7df4e6" text-anchor="middle" font-size="22" font-weight="800">1</text>
+        <text x="78" y="53" class="card-title">导入模型</text>
+        <g transform="translate(73 100)" fill="none" stroke="#78e9df" stroke-width="4" stroke-linejoin="round">
+          <path d="M92 0 184 48 92 96 0 48Z"/>
+          <path d="M0 48v100l92 50 92-50V48M92 96v102"/>
+          <path d="m184 148 39-24m-39 24 40 24" opacity="0.55"/>
+        </g>
+        <text x="28" y="331" class="card-copy">GLB · GLTF · FBX · OBJ · STL</text>
+        <text x="28" y="360" class="card-copy">贴图颜色与模型动画一起保留</text>
+      </g>
+
+      <g transform="translate(445 258)">
+        <rect width="330" height="382" rx="25" fill="#151b22" stroke="#31545a" stroke-width="2"/>
+        <circle cx="44" cy="44" r="22" fill="#213d42"/>
+        <text x="44" y="52" fill="#7df4e6" text-anchor="middle" font-size="22" font-weight="800">2</text>
+        <text x="78" y="53" class="card-title">选择风格</text>
+        <g transform="translate(28 104)">
+          <rect width="274" height="54" rx="13" fill="#17343a" stroke="#3ebfba"/>
+          <path d="M19 35c23-27 43 13 66-14s44 15 69-9 50 17 91-2" fill="none" stroke="#7df4e6" stroke-width="4"/>
+          <text x="137" y="88" fill="#7df4e6" text-anchor="middle" font-size="20">流体丝带</text>
+          <rect y="111" width="132" height="54" rx="13" fill="#332d25" stroke="#8d7152"/>
+          <g fill="#d8b98a"><circle cx="20" cy="138" r="5"/><circle cx="46" cy="127" r="3"/><circle cx="69" cy="144" r="6"/><circle cx="101" cy="132" r="4"/></g>
+          <rect x="142" y="111" width="132" height="54" rx="13" fill="#392327" stroke="#aa5962"/>
+          <path d="m158 147 27-19 23 15 34-22 18 22" fill="none" stroke="#ff897e" stroke-width="5"/>
+          <text x="66" y="197" fill="#d7be97" text-anchor="middle" font-size="18">风化烟尘</text>
+          <text x="208" y="197" fill="#ff9d91" text-anchor="middle" font-size="18">能量爆散</text>
+        </g>
+        <text x="28" y="360" class="card-copy">一键得到不同流动语言</text>
+      </g>
+
+      <g transform="translate(820 258)">
+        <rect width="330" height="382" rx="25" fill="#151b22" stroke="#29343f" stroke-width="2"/>
+        <circle cx="44" cy="44" r="22" fill="#213d42"/>
+        <text x="44" y="52" fill="#7df4e6" text-anchor="middle" font-size="22" font-weight="800">3</text>
+        <text x="78" y="53" class="card-title">少量调参</text>
+        <g transform="translate(30 112)">
+          <text y="7" class="card-copy">扩散强度</text><line x1="120" y1="0" x2="272" y2="0" stroke="#34434d" stroke-width="8" stroke-linecap="round"/><line x1="120" y1="0" x2="210" y2="0" stroke="#5fded8" stroke-width="8" stroke-linecap="round"/><circle cx="210" r="11" fill="#0f171b" stroke="#7df4e6" stroke-width="4"/>
+          <text y="71" class="card-copy">消散进度</text><line x1="120" y1="64" x2="272" y2="64" stroke="#34434d" stroke-width="8" stroke-linecap="round"/><line x1="120" y1="64" x2="236" y2="64" stroke="#5fded8" stroke-width="8" stroke-linecap="round"/><circle cx="236" cy="64" r="11" fill="#0f171b" stroke="#7df4e6" stroke-width="4"/>
+          <text y="135" class="card-copy">流动速度</text><line x1="120" y1="128" x2="272" y2="128" stroke="#34434d" stroke-width="8" stroke-linecap="round"/><line x1="120" y1="128" x2="174" y2="128" stroke="#5fded8" stroke-width="8" stroke-linecap="round"/><circle cx="174" cy="128" r="11" fill="#0f171b" stroke="#7df4e6" stroke-width="4"/>
+          <text y="199" class="card-copy">质感控制</text><line x1="120" y1="192" x2="272" y2="192" stroke="#34434d" stroke-width="8" stroke-linecap="round"/><line x1="120" y1="192" x2="202" y2="192" stroke="#ff877b" stroke-width="8" stroke-linecap="round"/><circle cx="202" cy="192" r="11" fill="#0f171b" stroke="#ff9f8d" stroke-width="4"/>
+        </g>
+        <text x="28" y="360" class="card-copy">静止、K 帧和导出结果一致</text>
+      </g>
+
+      <g transform="translate(1195 258)">
+        <rect width="330" height="382" rx="25" fill="#151b22" stroke="#4a3435" stroke-width="2"/>
+        <circle cx="44" cy="44" r="22" fill="#42282b"/>
+        <text x="44" y="52" fill="#ff9f8d" text-anchor="middle" font-size="22" font-weight="800">4</text>
+        <text x="78" y="53" class="card-title">直接导出</text>
+        <g transform="translate(48 108)">
+          <rect width="234" height="142" rx="17" fill="#0a0e13" stroke="#5a6670" stroke-width="3"/>
+          <path d="m95 39 61 32-61 32Z" fill="url(#coral)" filter="url(#glow)"/>
+          <path d="M178 124h40V84" fill="none" stroke="#ff9f8d" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="m195 102 23-18 18 23" fill="none" stroke="#ff9f8d" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+        <g transform="translate(44 276)">
+          <rect width="70" height="34" rx="17" fill="#26333d"/><text x="35" y="24" fill="#dce6ee" text-anchor="middle" font-size="18" font-weight="700">MOV</text>
+          <rect x="82" width="70" height="34" rx="17" fill="#26333d"/><text x="117" y="24" fill="#dce6ee" text-anchor="middle" font-size="18" font-weight="700">MP4</text>
+          <rect x="164" width="80" height="34" rx="17" fill="#26333d"/><text x="204" y="24" fill="#dce6ee" text-anchor="middle" font-size="18" font-weight="700">360°</text>
+        </g>
+        <text x="28" y="360" class="card-copy">透明通道、相机动画与景深</text>
+      </g>
+    </g>
+
+    <g stroke="#5fded8" stroke-width="3" opacity="0.75" marker-end="url(#arrow)">
+      <path d="M408 449h24"/><path d="M783 449h24"/><path d="M1158 449h24"/>
+    </g>
+
+    <g transform="translate(70 694)">
+      <rect width="1455" height="74" rx="20" fill="#11272a" stroke="#27585b"/>
+      <rect width="236" height="74" rx="20" fill="url(#cyan)"/>
+      <text x="118" y="47" fill="#071316" text-anchor="middle" font-size="24" font-weight="850">Creator 快速出片</text>
+      <text x="270" y="46" fill="#d5efec" font-size="23">三套成片风格</text>
+      <text x="477" y="46" fill="#6b8589" font-size="23">→</text>
+      <text x="525" y="46" fill="#d5efec" font-size="23">扩散 / 消散 / 速度 / 方向 / 质感</text>
+      <text x="1018" y="46" fill="#6b8589" font-size="23">→</text>
+      <text x="1066" y="46" fill="#d5efec" font-size="23">预览、K 帧、导出一致</text>
+    </g>
+    <g transform="translate(70 788)">
+      <rect width="1455" height="64" rx="18" fill="#171a21" stroke="#363d49"/>
+      <rect width="236" height="64" rx="18" fill="#2b3039"/>
+      <text x="118" y="41" fill="#f1f5f7" text-anchor="middle" font-size="23" font-weight="800">中文 Graph 深控</text>
+      <text x="270" y="41" fill="#b8c1cb" font-size="21">Emitter  ·  Birth/Life  ·  Force  ·  Trail  ·  Feedback  ·  Glow  ·  DOF  ·  Output</text>
+    </g>
+  </g>
+</svg>
