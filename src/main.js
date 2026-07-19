@@ -823,7 +823,7 @@ const workspacePropertyCategories = [
   { id: 'particle', label: '粒子', icon: '粒', description: '基础粒子、模型转粒子、噪波运动' },
   { id: 'growth', label: '生长', icon: '生', description: '生长、流丝、边缘破碎' },
   { id: 'dissolve', label: '消散', icon: '散', description: '消散、边缘、方向' },
-  { id: 'emission', label: '逸散', icon: '发', description: '模型逸散、局部破碎' },
+  { id: 'emission', label: '逸散', icon: '逸', description: '模型逸散、局部破碎' },
   { id: 'image', label: '图像', icon: '图', description: '图片粒子、高斯场景' },
   { id: 'morph', label: '转换', icon: '换', description: '粒子转换' },
   { id: 'lights', label: '灯光', icon: '灯', description: '灯光列表与参数' },
@@ -831,6 +831,22 @@ const workspacePropertyCategories = [
   { id: 'input', label: '交互', icon: '手', description: '手势控制' },
   { id: 'export', label: '导出', icon: '出', description: '导出与系统工具' }
 ];
+
+const WORKSPACE_PROPERTY_EFFECT_MODES = Object.freeze({
+  particle: 'particles',
+  growth: 'particles',
+  dissolve: 'particles',
+  emission: 'emission',
+  image: 'image',
+  morph: 'morph'
+});
+
+const EFFECT_MODE_WORKSPACE_PROPERTIES = Object.freeze({
+  particles: 'particle',
+  emission: 'emission',
+  image: 'image',
+  morph: 'morph'
+});
 
 function classifyWorkspacePropertyNode(node) {
   if (!node) {
@@ -902,6 +918,14 @@ function setWorkspacePropertyTab(root, pageId, options = {}) {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  const targetEffectMode = WORKSPACE_PROPERTY_EFFECT_MODES[activeId];
+  if (
+    options.activateEffectMode !== false &&
+    targetEffectMode &&
+    state.effectMode !== targetEffectMode
+  ) {
+    setEffectMode(targetEffectMode, { syncPropertyTab: false });
+  }
   if (options.persist !== false) {
     try {
       window.localStorage?.setItem(WORKSPACE_PROPERTY_TAB_STORAGE_KEY, activeId);
@@ -966,7 +990,7 @@ function createWorkspacePropertyBrowser(children = []) {
       return 'camera';
     }
   })();
-  setWorkspacePropertyTab(browser, savedTab, { persist: false });
+  setWorkspacePropertyTab(browser, savedTab, { persist: false, activateEffectMode: false });
   return browser;
 }
 
@@ -13839,7 +13863,7 @@ function scheduleRebuild() {
   }, 180);
 }
 
-function setEffectMode(mode) {
+function setEffectMode(mode, options = {}) {
   if (mode === 'image' && !imageSplatRoot && !realSplatRoot) {
     setStatus('Import image first');
     return;
@@ -13858,6 +13882,16 @@ function setEffectMode(mode) {
   }
   syncEffectVisibility();
   syncUniforms();
+  if (options.syncPropertyTab !== false) {
+    const propertyPage = EFFECT_MODE_WORKSPACE_PROPERTIES[state.effectMode];
+    const propertyBrowser = document.querySelector('.workspace-property-browser');
+    if (propertyPage && propertyBrowser) {
+      setWorkspacePropertyTab(propertyBrowser, propertyPage, {
+        activateEffectMode: false,
+        persist: options.persistPropertyTab !== false
+      });
+    }
+  }
 }
 
 function setPreset(name) {

@@ -17,7 +17,11 @@ Particle Model Studio is a Windows desktop particle editor for fast, production-
 
 [▶ 观看 1.0.21 宣传片](https://github.com/ying1459/particle-model-studio/releases/download/v1.0.21/Particle-Model-Studio-1.0.21-Promo-1080p.mp4) · [⬇ 下载最新版](https://github.com/ying1459/particle-model-studio/releases/latest) · [🗺 开发路线](docs/TOUCHDESIGNER_PARITY_ROADMAP.md)
 
-> 当前版本：**1.0.21** · Windows x64 · 本地运行 · 工程文件可自包含保存
+> 当前版本：**1.0.22** · Windows x64 · 本地运行 · 工程文件可自包含保存
+
+### 1.0.22 逸散入口修复
+
+右侧点击“逸散”会直接进入模型逸散模式，切回粒子、消散或生长页会返回模型粒子模式。工程中的逸散参数与关键帧保持不变，不再需要到“工程”页二次切换模式。
 
 ## 两种工作方式
 
@@ -89,7 +93,7 @@ Creator 模式默认使用确定性解析流场，不会偷偷启动 GPU Feedbac
 
 包含完整编辑器、模型粒子、图片点云、Gaussian Splat 查看、图谱、动画与视频导出。解压即用，不包含 Apple SHARP 的 Python 运行时和模型权重。
 
-[直接下载 Particle Model Studio 1.0.21 Lite](https://github.com/ying1459/particle-model-studio/releases/download/v1.0.21/Particle-Model-Studio-1.0.21-Windows-x64-Lite.zip)
+[直接下载 Particle Model Studio 1.0.22 Lite](https://github.com/ying1459/particle-model-studio/releases/download/v1.0.22/Particle-Model-Studio-1.0.22-Windows-x64-Lite.zip)
 
 ### SHARP 高质量单图重建
 

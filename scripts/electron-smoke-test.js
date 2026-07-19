@@ -140,6 +140,20 @@ try {
       pressed: button.getAttribute('aria-pressed')
     }));
     const flowMotionStatus = document.querySelector('#flowMotionStatus')?.textContent || '';
+    document.querySelector('[data-property-tab="emission"]')?.click();
+    const emissionModeRouting = {
+      effectMode: window.particleStudio.getOptions().effectMode,
+      activePropertyTab: document.querySelector('.workspace-property-tab.active')?.dataset.propertyTab || '',
+      visiblePropertyPage: document.querySelector('.workspace-property-page:not([hidden])')?.dataset.propertyPage || '',
+      activeModeButton: document.querySelector('[data-effect-mode].active')?.dataset.effectMode || '',
+      controlsVisible: Boolean(document.querySelector('#emissionPanel')?.offsetParent)
+    };
+    document.querySelector('[data-property-tab="dissolve"]')?.click();
+    const dissolveModeRouting = {
+      effectMode: window.particleStudio.getOptions().effectMode,
+      activePropertyTab: document.querySelector('.workspace-property-tab.active')?.dataset.propertyTab || '',
+      visiblePropertyPage: document.querySelector('.workspace-property-page:not([hidden])')?.dataset.propertyPage || ''
+    };
     graphTab?.click();
     const graphWorkspace = document.querySelector('#operatorGraphWorkspace');
     const graphWorkspaceOpened = Boolean(graphWorkspace && !graphWorkspace.hidden);
@@ -415,6 +429,8 @@ try {
       feedbackCreatorControls,
       flowStyleCards,
       flowMotionStatus,
+      emissionModeRouting,
+      dissolveModeRouting,
       videoKeyButtons
     };
   });
@@ -518,6 +534,14 @@ try {
     uiLayout.flowStyleCards?.filter((card) => card.active).length !== 1 ||
     uiLayout.flowStyleCards?.find((card) => card.active)?.style !== 'fluid-ribbon' ||
     uiLayout.flowMotionStatus !== '已静止' ||
+    uiLayout.emissionModeRouting?.effectMode !== 'emission' ||
+    uiLayout.emissionModeRouting?.activePropertyTab !== 'emission' ||
+    uiLayout.emissionModeRouting?.visiblePropertyPage !== 'emission' ||
+    uiLayout.emissionModeRouting?.activeModeButton !== 'emission' ||
+    !uiLayout.emissionModeRouting?.controlsVisible ||
+    uiLayout.dissolveModeRouting?.effectMode !== 'particles' ||
+    uiLayout.dissolveModeRouting?.activePropertyTab !== 'dissolve' ||
+    uiLayout.dissolveModeRouting?.visiblePropertyPage !== 'dissolve' ||
     uiLayout.videoKeyButtons < 9
   ) {
     throw new Error(`Packaged UI layout regression: ${JSON.stringify(uiLayout)}`);

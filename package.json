@@ -1,6 +1,6 @@
 {
   "name": "particle-model-studio",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "description": "Fast desktop particle studio with creator presets, a Chinese node graph, GPU feedback, camera animation, glow, depth of field, and video export.",
   "author": "ying1459",
   "license": "MIT",
